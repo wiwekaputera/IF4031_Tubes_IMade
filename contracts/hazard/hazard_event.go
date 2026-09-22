@@ -43,7 +43,7 @@ type HazardEvent struct {
 
 	// Mentah fields (omitted for media scope)
 	SourceRefID string                 `json:"source_ref_id,omitempty"`
-	Latitude    float64                `json:"latitude,omitempty"`
-	Longitude   float64                `json:"longitude,omitempty"`
+	Latitude    float64                `json:"latitude"`
+	Longitude   float64                `json:"longitude"`
 	Attributes  map[string]interface{} `json:"attributes,omitempty"`
 }

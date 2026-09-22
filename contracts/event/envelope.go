@@ -9,7 +9,6 @@ import "github.com/your-org/if4031-m1/contracts/hazard"
 type Envelope struct {
 	EventID    string             `json:"event_id"`
 	Version    int64              `json:"version"`
-	OccurredAt string             `json:"occurred_at"` // ISO 8601
 	TraceID    string             `json:"trace_id"`    // correlation_id from the ingest cycle
 	Data       hazard.HazardEvent `json:"data"`
 }
