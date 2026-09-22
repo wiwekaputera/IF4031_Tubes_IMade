@@ -2,7 +2,7 @@
 # Run with: docker compose up --build
 # Requires: .env file (copy from .env.example and fill in values)
 
-name: if4031-m1
+name: if4031-tubes-imade
 
 # ─────────────────────────────────────────────────────────────
 # Networks

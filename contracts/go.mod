@@ -1,3 +1,3 @@
-module github.com/your-org/if4031-m1/contracts
+module github.com/wiwekaputera/if4031-tubes-imade/contracts
 
 go 1.23
