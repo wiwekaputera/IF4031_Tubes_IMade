@@ -1,0 +1,301 @@
+# IF4031 Milestone 1 — Docker Compose
+# Run with: docker compose up --build
+# Requires: .env file (copy from .env.example and fill in values)
+
+name: if4031-m1
+
+# ─────────────────────────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────────────────────────
+networks:
+  agency_net:
+    driver: bridge
+  store_net:
+    driver: bridge
+    internal: true
+  internal_api_net:
+    driver: bridge
+    internal: true
+  bus_net:
+    driver: bridge
+    internal: true
+  token_net:
+    driver: bridge
+    internal: true
+  edge_net:
+    driver: bridge
+
+# ─────────────────────────────────────────────────────────────
+# Volumes
+# ─────────────────────────────────────────────────────────────
+volumes:
+  canonical_store_data:
+  token_db_data:
+  nats_data:
+  notification_bbolt_data:
+  audit_bbolt_data:
+
+# ─────────────────────────────────────────────────────────────
+# Services
+# ─────────────────────────────────────────────────────────────
+services:
+
+  # ── Upstream mocks ──────────────────────────────────────────
+
+  bmkg-mock:
+    build:
+      context: ./services/bmkg-mock
+      dockerfile: Dockerfile
+    environment:
+      BMKG_API_KEY: ${BMKG_API_KEY}
+      BMKG_DELAY_MIN_MS: ${BMKG_DELAY_MIN_MS:-50}
+      BMKG_DELAY_MAX_MS: ${BMKG_DELAY_MAX_MS:-150}
+      BMKG_EVENT_INTERVAL_S: ${BMKG_EVENT_INTERVAL_S:-10}
+      PORT: ${BMKG_PORT:-8081}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${BMKG_PORT:-8081}:8081"
+    networks:
+      - agency_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pvmbg-mock:
+    build:
+      context: ./services/pvmbg-mock
+      dockerfile: Dockerfile
+    environment:
+      PVMBG_BEARER_TOKEN: ${PVMBG_BEARER_TOKEN}
+      PVMBG_DELAY_MIN_MS: ${PVMBG_DELAY_MIN_MS:-500}
+      PVMBG_DELAY_MAX_MS: ${PVMBG_DELAY_MAX_MS:-3000}
+      PVMBG_EVENT_INTERVAL_S: ${PVMBG_EVENT_INTERVAL_S:-10}
+      PORT: ${PVMBG_PORT:-8082}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${PVMBG_PORT:-8082}:8082"
+    networks:
+      - agency_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Data store ───────────────────────────────────────────────
+
+  canonical-store:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${CANONICAL_STORE_POSTGRES_USER:-aggregator}
+      POSTGRES_PASSWORD: ${CANONICAL_STORE_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${CANONICAL_STORE_POSTGRES_DB:-canonical}
+    volumes:
+      - canonical_store_data:/var/lib/postgresql/data
+      - ./services/canonical-store/migrations/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - store_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CANONICAL_STORE_POSTGRES_USER:-aggregator} -d ${CANONICAL_STORE_POSTGRES_DB:-canonical}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  token-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${TOKEN_DB_POSTGRES_USER:-tokenservice}
+      POSTGRES_PASSWORD: ${TOKEN_DB_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${TOKEN_DB_POSTGRES_DB:-tokendb}
+    volumes:
+      - token_db_data:/var/lib/postgresql/data
+      - ./services/token-service/migrations/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - token_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TOKEN_DB_POSTGRES_USER:-tokenservice} -d ${TOKEN_DB_POSTGRES_DB:-tokendb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Message broker ───────────────────────────────────────────
+
+  nats-jetstream:
+    image: nats:2.10-alpine
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    volumes:
+      - ./services/nats-jetstream/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats_data:/data/nats
+    networks:
+      - bus_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Core: Aggregator ─────────────────────────────────────────
+
+  aggregator:
+    build:
+      context: ./services/aggregator
+      dockerfile: Dockerfile
+    environment:
+      BMKG_BASE_URL: ${AGGREGATOR_BMKG_BASE_URL:-http://bmkg-mock:8081}
+      BMKG_API_KEY: ${AGGREGATOR_BMKG_API_KEY}
+      BMKG_TIMEOUT_MS: ${AGGREGATOR_BMKG_TIMEOUT_MS:-1000}
+      PVMBG_BASE_URL: ${AGGREGATOR_PVMBG_BASE_URL:-http://pvmbg-mock:8082}
+      PVMBG_BEARER_TOKEN: ${AGGREGATOR_PVMBG_BEARER_TOKEN}
+      PVMBG_TIMEOUT_MS: ${AGGREGATOR_PVMBG_TIMEOUT_MS:-4000}
+      PVMBG_CB_THRESHOLD: ${AGGREGATOR_PVMBG_CB_THRESHOLD:-3}
+      PVMBG_CB_PROBE_INTERVAL: ${AGGREGATOR_PVMBG_CB_PROBE_INTERVAL:-30}
+      POLL_INTERVAL_S: ${AGGREGATOR_POLL_INTERVAL_S:-3}
+      DB_DSN: ${AGGREGATOR_DB_DSN}
+      NATS_URL: ${AGGREGATOR_NATS_URL:-nats://nats-jetstream:4222}
+      PORT: ${AGGREGATOR_PORT:-8090}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      bmkg-mock:
+        condition: service_healthy
+      pvmbg-mock:
+        condition: service_healthy
+      canonical-store:
+        condition: service_healthy
+      nats-jetstream:
+        condition: service_healthy
+    networks:
+      - agency_net
+      - store_net
+      - internal_api_net
+      - bus_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8090/internal/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Auth ─────────────────────────────────────────────────────
+
+  token-service:
+    build:
+      context: ./services/token-service
+      dockerfile: Dockerfile
+    environment:
+      TOKEN_DB_DSN: ${TOKEN_DB_DSN}
+      ES256_PRIVATE_KEY_B64: ${ES256_PRIVATE_KEY_B64}
+      ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-60}
+      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-7}
+      CLIENT_MEDIA_ID: ${CLIENT_MEDIA_ID}
+      CLIENT_MEDIA_SECRET: ${CLIENT_MEDIA_SECRET}
+      CLIENT_FIELD_TEAM_ID: ${CLIENT_FIELD_TEAM_ID}
+      CLIENT_FIELD_TEAM_SECRET: ${CLIENT_FIELD_TEAM_SECRET}
+      CLIENT_INTERNAL_OPS_ID: ${CLIENT_INTERNAL_OPS_ID}
+      CLIENT_INTERNAL_OPS_SECRET: ${CLIENT_INTERNAL_OPS_SECRET}
+      PORT: ${TOKEN_SERVICE_PORT:-8083}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      token-db:
+        condition: service_healthy
+    ports:
+      - "${TOKEN_SERVICE_PORT:-8083}:8083"
+    networks:
+      - edge_net
+      - token_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Client-facing API ────────────────────────────────────────
+
+  client-api:
+    build:
+      context: ./services/client-api
+      dockerfile: Dockerfile
+    environment:
+      AGGREGATOR_BASE_URL: ${CLIENT_API_AGGREGATOR_BASE_URL:-http://aggregator:8090}
+      JWKS_URL: ${CLIENT_API_JWKS_URL:-http://token-service:8083/.well-known/jwks.json}
+      RPS_LIMIT: ${CLIENT_API_RPS_LIMIT:-100}
+      BURST: ${CLIENT_API_BURST:-20}
+      PORT: ${CLIENT_API_PORT:-8080}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      aggregator:
+        condition: service_healthy
+      token-service:
+        condition: service_healthy
+    ports:
+      - "${CLIENT_API_PORT:-8080}:8080"
+    networks:
+      - edge_net
+      - internal_api_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Consumers ────────────────────────────────────────────────
+
+  stub-sink:
+    build:
+      context: ./services/stub-sink
+      dockerfile: Dockerfile
+    environment:
+      PORT: ${STUB_SINK_PORT:-8085}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - bus_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  notification-consumer:
+    build:
+      context: ./services/notification-consumer
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: ${NATS_URL:-nats://nats-jetstream:4222}
+      STUB_SINK_URL: ${NOTIFICATION_CONSUMER_STUB_SINK_URL:-http://stub-sink:8085}
+      BBOLT_PATH: ${NOTIFICATION_CONSUMER_BBOLT_PATH:-/data/notification.db}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - notification_bbolt_data:/data
+    depends_on:
+      nats-jetstream:
+        condition: service_healthy
+      stub-sink:
+        condition: service_healthy
+    networks:
+      - bus_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  audit-consumer:
+    build:
+      context: ./services/audit-consumer
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: ${NATS_URL:-nats://nats-jetstream:4222}
+      BBOLT_PATH: ${AUDIT_CONSUMER_BBOLT_PATH:-/data/audit.db}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - audit_bbolt_data:/data
+    depends_on:
+      nats-jetstream:
+        condition: service_healthy
+    networks:
+      - bus_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8087/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
