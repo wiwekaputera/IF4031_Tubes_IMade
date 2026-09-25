@@ -12,7 +12,7 @@ type seedItem struct {
 	warning *agency.TsunamiWarning
 }
 
-// PopulateSeeds populates the given store with at least 20 historical realistic Indonesian seismic events.
+// PopulateSeeds populates the given store with at least 20 seismic events.
 func PopulateSeeds(s store.Store) {
 	seeds := []seedItem{
 		{

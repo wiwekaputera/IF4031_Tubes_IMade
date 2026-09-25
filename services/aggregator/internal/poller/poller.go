@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -13,6 +14,7 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
+	"golang.org/x/sync/errgroup"
 )
 
 type SourceStatus struct {
@@ -34,6 +36,7 @@ type Poller struct {
 	pvmbgClient *http.Client
 	breaker     *circuitbreaker.Breaker
 	logger      zerolog.Logger
+	mu          sync.Mutex
 	health      *SourceHealth
 }
 
@@ -54,15 +57,37 @@ func New(cfg *config.Config, norm *normalizer.Normalizer, repo store.CanonicalRe
 }
 
 func (p *Poller) Health() *SourceHealth {
-	return p.health
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := *p.health
+	return &h
 }
 
 func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.PollInterval*2)
 	defer cancel()
 
-	p.pollBMKG(ctx, corrID, since)
-	p.pollPVMBG(ctx, corrID, since)
+	// Per ARCHITECTURE.md:135-138, one goroutine per upstream source with
+	// errgroup, each with its own context timeout. A slow/failed PVMBG must
+	// never block the BMKG goroutine, so BMKG data does not go stale while
+	// PVMBG is timing out.
+	eg, ctx := errgroup.WithContext(ctx)
+
+	bmkgCtx, bmkgCancel := context.WithTimeout(ctx, p.cfg.BMKGTimeout)
+	defer bmkgCancel()
+	eg.Go(func() error {
+		p.pollBMKG(bmkgCtx, corrID, since)
+		return nil
+	})
+
+	pvmbgCtx, pvmbgCancel := context.WithTimeout(ctx, p.cfg.PVMBGTimeout)
+	defer pvmbgCancel()
+	eg.Go(func() error {
+		p.pollPVMBG(pvmbgCtx, corrID, since)
+		return nil
+	})
+
+	_ = eg.Wait()
 }
 
 func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
@@ -71,7 +96,9 @@ func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
 	events, err := p.fetchSeismicEvents(ctx, corrID, sinceStr)
 	if err != nil {
 		p.logger.Error().Err(err).Msg("failed to fetch BMKG seismic events")
+		p.mu.Lock()
 		p.health.BMKG.Status = "ERROR"
+		p.mu.Unlock()
 		return
 	}
 
@@ -104,8 +131,10 @@ func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
 		count++
 	}
 
+	p.mu.Lock()
 	p.health.BMKG.Status = "UP"
 	p.health.BMKG.LastSynced = time.Now().UTC()
+	p.mu.Unlock()
 	p.logger.Info().Int("events_upserted", count).Msg("BMKG poll completed")
 }
 

@@ -12,12 +12,14 @@ import (
 
 func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) {
 	if !p.breaker.Allow() {
+		p.mu.Lock()
 		stale := p.health.PVMBG.LastSynced
 		p.health.PVMBG.Status = "OUTAGE"
 		if p.health.PVMBG.StaleSince == nil {
 			t := stale
 			p.health.PVMBG.StaleSince = &t
 		}
+		p.mu.Unlock()
 		p.logger.Warn().Msg("PVMBG circuit breaker open, skipping poll")
 		return
 	}
@@ -26,15 +28,19 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 	reports, err := p.fetchVolcanicReports(ctx, corrID, sinceStr)
 	if err != nil {
 		p.breaker.RecordFailure()
+		p.mu.Lock()
 		p.health.PVMBG.Status = "ERROR"
+		p.mu.Unlock()
 		p.logger.Error().Err(err).Msg("failed to fetch PVMBG volcanic reports")
 		return
 	}
 
 	p.breaker.RecordSuccess()
-	if p.health.PVMBG.StaleSince != nil {
-		p.health.PVMBG.StaleSince = nil
-	}
+	p.mu.Lock()
+	p.health.PVMBG.Status = "UP"
+	p.health.PVMBG.LastSynced = time.Now().UTC()
+	p.health.PVMBG.StaleSince = nil
+	p.mu.Unlock()
 
 	count := 0
 	for _, report := range reports {
@@ -49,8 +55,6 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 		count++
 	}
 
-	p.health.PVMBG.Status = "UP"
-	p.health.PVMBG.LastSynced = time.Now().UTC()
 	p.logger.Info().Int("reports_upserted", count).Msg("PVMBG poll completed")
 }
 
