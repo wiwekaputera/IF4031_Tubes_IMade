@@ -2,7 +2,7 @@
 // This package contains ONLY struct definitions and JSON tags — no business logic.
 package event
 
-import "github.com/your-org/if4031-m1/contracts/hazard"
+import "github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 
 // Envelope is the message published to NATS JetStream for every new or updated HazardEvent.
 // The idempotency key is EventID:Version, set as Nats-Msg-Id header by the Outbox Relay.

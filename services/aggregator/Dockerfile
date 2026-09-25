@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS builder
 WORKDIR /app
-COPY go.mod go.sum ./
+COPY services/aggregator/go.mod services/aggregator/go.sum ./
+COPY contracts /contracts
 RUN go mod download
-COPY . .
+COPY services/aggregator/. .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/service ./cmd/main
 
 FROM gcr.io/distroless/static-debian12

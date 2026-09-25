@@ -137,12 +137,10 @@ func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (stri
 	}
 
 	env := event.Envelope{
-		EventID:    storedHazardID,
-		Version:    version,
-		EventType:  string(rec.HazardType),
-		OccurredAt: rec.OccurredAt.Format(time.RFC3339),
-		TraceID:    rec.CorrelationID,
-		Data:       he,
+		EventID: storedHazardID,
+		Version: version,
+		TraceID: rec.CorrelationID,
+		Data:    he,
 	}
 
 	payload, err := json.Marshal(env)
