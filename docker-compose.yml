@@ -44,8 +44,8 @@ services:
 
   bmkg-mock:
     build:
-      context: ./services/bmkg-mock
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/bmkg-mock/Dockerfile
     environment:
       BMKG_API_KEY: ${BMKG_API_KEY}
       BMKG_DELAY_MIN_MS: ${BMKG_DELAY_MIN_MS:-50}
@@ -65,8 +65,8 @@ services:
 
   pvmbg-mock:
     build:
-      context: ./services/pvmbg-mock
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/pvmbg-mock/Dockerfile
     environment:
       PVMBG_BEARER_TOKEN: ${PVMBG_BEARER_TOKEN}
       PVMBG_DELAY_MIN_MS: ${PVMBG_DELAY_MIN_MS:-500}
