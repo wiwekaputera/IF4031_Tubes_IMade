@@ -52,13 +52,14 @@ services:
       BMKG_DELAY_MAX_MS: ${BMKG_DELAY_MAX_MS:-150}
       BMKG_EVENT_INTERVAL_S: ${BMKG_EVENT_INTERVAL_S:-10}
       PORT: ${BMKG_PORT:-8081}
+      HEALTHCHECK_URL: http://localhost:8081/health
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${BMKG_PORT:-8081}:8081"
     networks:
       - agency_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -73,13 +74,14 @@ services:
       PVMBG_DELAY_MAX_MS: ${PVMBG_DELAY_MAX_MS:-3000}
       PVMBG_EVENT_INTERVAL_S: ${PVMBG_EVENT_INTERVAL_S:-10}
       PORT: ${PVMBG_PORT:-8082}
+      HEALTHCHECK_URL: http://localhost:8082/health
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${PVMBG_PORT:-8082}:8082"
     networks:
       - agency_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -156,6 +158,7 @@ services:
       NATS_URL: ${AGGREGATOR_NATS_URL:-nats://nats-jetstream:4222}
       PORT: ${AGGREGATOR_PORT:-8090}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTHCHECK_URL: http://localhost:8090/internal/health
     depends_on:
       bmkg-mock:
         condition: service_healthy
@@ -171,7 +174,7 @@ services:
       - internal_api_net
       - bus_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8090/internal/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -189,6 +189,7 @@ func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]haz
 		args = append(args, *filter.Since)
 		argIdx++
 	}
+	query += " ORDER BY occurred_at DESC"
 	if filter.Limit > 0 {
 		query += " LIMIT $" + strconv.Itoa(argIdx)
 		args = append(args, filter.Limit)
@@ -204,7 +205,7 @@ func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]haz
 	var events []hazard.HazardEvent
 	for rows.Next() {
 		var he hazard.HazardEvent
-		var occurredAt, ingestedAt string
+		var occurredAt, ingestedAt time.Time
 		var attrs []byte
 		if err := rows.Scan(
 			&he.HazardID, &he.Source, &he.SourceRefID, &he.HazardType, &he.Severity,
@@ -212,8 +213,8 @@ func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]haz
 		); err != nil {
 			return nil, err
 		}
-		he.OccurredAt = occurredAt
-		he.IngestedAt = ingestedAt
+		he.OccurredAt = occurredAt.Format(time.RFC3339)
+		he.IngestedAt = ingestedAt.Format(time.RFC3339)
 		if len(attrs) > 0 {
 			if err := json.Unmarshal(attrs, &he.Attributes); err != nil {
 				return nil, err
