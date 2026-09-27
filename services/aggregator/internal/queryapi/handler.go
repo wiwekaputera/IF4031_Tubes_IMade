@@ -13,8 +13,8 @@ import (
 type SourceHealthFunc func() (bmkg, pvmbg string, pvmbgStaleSince *time.Time)
 
 type Handler struct {
-	repo            store.CanonicalRepo
-	logger          zerolog.Logger
+	repo             store.CanonicalRepo
+	logger           zerolog.Logger
 	sourceHealthFunc SourceHealthFunc
 }
 
@@ -37,7 +37,6 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(healthResponse{
 		Status: "UP",
@@ -75,7 +74,6 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	events, err := h.repo.GetEvents(ctx, filter)
 	if err != nil {
 		h.logger.Error().Err(err).Msg("failed to fetch events")
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
 		return
@@ -84,16 +82,17 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	data := make([]map[string]interface{}, len(events))
 	for i, e := range events {
 		data[i] = map[string]interface{}{
-			"hazard_id":    e.HazardID,
-			"source":       string(e.Source),
-			"hazard_type":  string(e.HazardType),
-			"severity":     string(e.Severity),
-			"area_name":    e.AreaName,
-			"occurred_at":  e.OccurredAt,
-			"ingested_at":  e.IngestedAt,
+			"hazard_id":     e.HazardID,
+			"source":        string(e.Source),
+			"hazard_type":   string(e.HazardType),
+			"severity":      string(e.Severity),
+			"area_name":     e.AreaName,
+			"occurred_at":   e.OccurredAt,
+			"ingested_at":   e.IngestedAt,
 			"source_ref_id": e.SourceRefID,
-			"latitude":     e.Latitude,
-			"longitude":    e.Longitude,
+			"latitude":      e.Latitude,
+			"longitude":     e.Longitude,
+			"attributes":    e.Attributes,
 		}
 	}
 
@@ -124,9 +123,6 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		resp.Meta["sources"] = sources
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-
-	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }

@@ -167,7 +167,7 @@ func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (stri
 func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]hazard.HazardEvent, error) {
 	query := `
 		SELECT hazard_id, source, source_ref_id, hazard_type, severity, area_name,
-			latitude, longitude, occurred_at, ingested_at
+			latitude, longitude, occurred_at, ingested_at, attributes
 		FROM canonical_events
 		WHERE true
 	`
@@ -205,14 +205,20 @@ func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]haz
 	for rows.Next() {
 		var he hazard.HazardEvent
 		var occurredAt, ingestedAt string
+		var attrs []byte
 		if err := rows.Scan(
 			&he.HazardID, &he.Source, &he.SourceRefID, &he.HazardType, &he.Severity,
-			&he.AreaName, &he.Latitude, &he.Longitude, &occurredAt, &ingestedAt,
+			&he.AreaName, &he.Latitude, &he.Longitude, &occurredAt, &ingestedAt, &attrs,
 		); err != nil {
 			return nil, err
 		}
 		he.OccurredAt = occurredAt
 		he.IngestedAt = ingestedAt
+		if len(attrs) > 0 {
+			if err := json.Unmarshal(attrs, &he.Attributes); err != nil {
+				return nil, err
+			}
+		}
 		events = append(events, he)
 	}
 	if len(events) == 0 {
