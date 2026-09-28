@@ -69,15 +69,20 @@ Override the image with `CURL_IMG=...` if needed.
 === PVMBG mock (:8082) ===
   [PASS] GET /health -> 200 {"status":"UP"}
   [PASS] GET /volcanic-reports -> 200, count=44 (>=22), volcano IDs GNG-001..GNG-005 present
+=== PVMBG outage toggle (:8082) ===
+  [PASS] POST /admin/outage -> 200, outage=True (toggled ON)
+  [PASS] GET /volcanic-reports during outage -> 503
+  [PASS] POST /admin/outage -> 200, outage=False (toggled OFF)
+  [PASS] GET /volcanic-reports after outage recovery -> 200
 === Aggregator (:8090, via if4031-tubes-imade_internal_api_net) ===
   [PASS] GET /internal/health -> 200 {"status":"UP"}
   [PASS] GET /internal/events?limit=100 -> 200, meta.count=44 (>=22), sources bmkg/pvmbg UP with last_synced_at
 === Canonical store (psql) ===
   [PASS] psql \dt lists canonical_events, outbox, volcano_reference
   [PASS] SELECT count(*) FROM volcano_reference -> 5
-==================================================
-  Smoke test summary: 8 passed, 0 failed
-==================================================
+ ==================================================
+  Smoke test summary: 12 passed, 0 failed
+ ==================================================
   RESULT: ALL CHECKS PASSED
 ```
 (Exact `count` values grow over time as the background generators emit new

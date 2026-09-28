@@ -79,6 +79,16 @@ agg_get(){
   printf '%s' "$BODY" > "$RESP_FILE"
 }
 
+# host_post URL [curl args...]  -> body in $RESP_FILE, code in $HTTP_CODE
+host_post(){
+  local url="$1"; shift
+  local out
+  out="$(curl -sS -m 15 -X POST -w '\n%{http_code}' "$@" "$url" 2>/dev/null || true)"
+  HTTP_CODE="$(printf '%s' "$out" | tail -n1)"
+  BODY="$(printf '%s' "$out" | sed '$d')"
+  printf '%s' "$BODY" > "$RESP_FILE"
+}
+
 # py_check 'python using d=json.load(open(sys.argv[1]))'  -> exit 0/1
 py_check(){
   python3 - "$RESP_FILE" <<PYEOF
@@ -165,7 +175,39 @@ else
 fi
 
 # =========================================================================
-# 5) Aggregator — internal health
+# 5) PVMBG mock — /admin/outage toggle (503 when ON, 200 when OFF)
+# =========================================================================
+
+host_post "http://localhost:8082/admin/outage" -H "Authorization: Bearer ${PVMBG_BEARER_TOKEN}"
+if [[ "$HTTP_CODE" == "200" ]] && py_check 'assert d.get("outage")==True'; then
+  ok "POST /admin/outage -> 200, outage=True (toggled ON)"
+else
+  bad "POST /admin/outage -> HTTP ${HTTP_CODE:-000} (expected 200, outage=True)"
+fi
+
+host_get "http://localhost:8082/volcanic-reports" -H "Authorization: Bearer ${PVMBG_BEARER_TOKEN}"
+if [[ "$HTTP_CODE" == "503" ]]; then
+  ok "GET /volcanic-reports during outage -> 503"
+else
+  bad "GET /volcanic-reports during outage -> HTTP ${HTTP_CODE:-000} (expected 503)"
+fi
+
+host_post "http://localhost:8082/admin/outage" -H "Authorization: Bearer ${PVMBG_BEARER_TOKEN}"
+if [[ "$HTTP_CODE" == "200" ]] && py_check 'assert d.get("outage")==False'; then
+  ok "POST /admin/outage -> 200, outage=False (toggled OFF)"
+else
+  bad "POST /admin/outage -> HTTP ${HTTP_CODE:-000} (expected 200, outage=False)"
+fi
+
+host_get "http://localhost:8082/volcanic-reports" -H "Authorization: Bearer ${PVMBG_BEARER_TOKEN}"
+if [[ "$HTTP_CODE" == "200" ]]; then
+  ok "GET /volcanic-reports after outage recovery -> 200"
+else
+  bad "GET /volcanic-reports after outage recovery -> HTTP ${HTTP_CODE:-000} (expected 200)"
+fi
+
+# =========================================================================
+# 6) Aggregator — internal health
 # =========================================================================
 echo
 echo "=== Aggregator (:8090, via ${NET}) ==="
@@ -177,7 +219,7 @@ else
 fi
 
 # =========================================================================
-# 6) Aggregator — /internal/events sources + count
+# 7) Aggregator — /internal/events sources + count
 #    The aggregator only serves /internal/events (no host port); source
 #    health (bmkg/pvmbg UP + last_synced_at) is reported in meta.sources.
 #    We wait for the poller's first cycle to ingest the seeded events.
@@ -221,7 +263,7 @@ else
 fi
 
 # =========================================================================
-# 7) Canonical store — tables + volcano_reference count via psql
+# 8) Canonical store — tables + volcano_reference count via psql
 # =========================================================================
 echo
 echo "=== Canonical store (psql) ==="
