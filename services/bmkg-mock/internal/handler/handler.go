@@ -113,27 +113,17 @@ func (h *Handler) GetTsunamiWarnings(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 
-	// Public endpoint (no simulated latency)
+	// Public endpoint (no auth, no simulated latency)
 	mux.HandleFunc("/health", h.Health)
 
-	// Protected endpoints (authenticated via X-BMKG-Key)
-	// Latency jitter is applied only to data endpoints, not /health.
-	authMiddleware := func(handlerFunc http.HandlerFunc) http.Handler {
-		return AuthMiddleware(h.cfg.APIKey, http.HandlerFunc(handlerFunc))
-	}
+	// Protected data endpoints: auth + latency jitter
+	dataMiddleware := Chain(AuthMiddleware(h.cfg.APIKey), LatencyMiddleware(h.cfg.DelayMinMs, h.cfg.DelayMaxMs))
+	mux.Handle("/seismic-events", dataMiddleware(http.HandlerFunc(h.GetSeismicEvents)))
+	mux.Handle("/tsunami-warnings", dataMiddleware(http.HandlerFunc(h.GetTsunamiWarnings)))
 
-	seismicHandler := LatencyMiddleware(h.cfg.DelayMinMs, h.cfg.DelayMaxMs, authMiddleware(h.GetSeismicEvents))
-	tsunamiHandler := LatencyMiddleware(h.cfg.DelayMinMs, h.cfg.DelayMaxMs, authMiddleware(h.GetTsunamiWarnings))
-
-	mux.Handle("/seismic-events", seismicHandler)
-	mux.Handle("/tsunami-warnings", tsunamiHandler)
-
-	// Global middleware chain applied from outermost to innermost:
+	// Global middleware applied from outermost to innermost:
 	// 1. Correlation ID
 	// 2. Zerolog Request Logging
-	var handler http.Handler = mux
-	handler = LoggingMiddleware(h.logger, handler)
-	handler = CorrelationIDMiddleware(handler)
-
-	return handler
+	globalMiddleware := Chain(CorrelationIDMiddleware, LoggingMiddleware(h.logger))
+	return globalMiddleware(mux)
 }

@@ -130,25 +130,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/admin/outage", h.ToggleOutage)
 	mux.HandleFunc("/admin/schema-version", h.ToggleSchemaVersion)
 
-	// Protected data endpoint:
-	// Auth middleware validates Bearer token and rejects cross-credentials (X-BMKG-Key -> 403)
-	// Latency middleware applies delay only to /volcanic-reports when outage is OFF
-	authMiddleware := func(next http.Handler) http.Handler {
-		return AuthMiddleware(h.cfg.BearerToken, h.outage, next)
-	}
+	// Protected data endpoint: auth + latency (jitter only on /volcanic-reports when outage is OFF)
+	dataMiddleware := Chain(AuthMiddleware(h.cfg.BearerToken), LatencyMiddleware(h.cfg.DelayMinMs, h.cfg.DelayMaxMs, h.outage))
+	mux.Handle("/volcanic-reports", dataMiddleware(http.HandlerFunc(h.GetVolcanicReports)))
 
-	latencyMiddleware := func(next http.Handler) http.Handler {
-		return LatencyMiddleware(h.cfg.DelayMinMs, h.cfg.DelayMaxMs, h.outage, next)
-	}
-
-	mux.Handle("/volcanic-reports", latencyMiddleware(authMiddleware(http.HandlerFunc(h.GetVolcanicReports))))
-
-	// Global middleware chain applied from outermost to innermost:
+	// Global middleware applied from outermost to innermost:
 	// 1. Correlation ID
 	// 2. Zerolog Request Logging
-	var handler http.Handler = mux
-	handler = LoggingMiddleware(h.logger, "pvmbg-mock", handler)
-	handler = CorrelationIDMiddleware(handler)
-
-	return handler
+	globalMiddleware := Chain(CorrelationIDMiddleware, LoggingMiddleware(h.logger, "pvmbg-mock"))
+	return globalMiddleware(mux)
 }

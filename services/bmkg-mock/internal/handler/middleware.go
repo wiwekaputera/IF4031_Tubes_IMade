@@ -12,6 +12,19 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Middleware is the standard idiomatic net/http middleware signature.
+type Middleware func(http.Handler) http.Handler
+
+// Chain builds a middleware stack that executes middlewares in the order they are passed.
+func Chain(middlewares ...Middleware) Middleware {
+	return func(final http.Handler) http.Handler {
+		for i := len(middlewares) - 1; i >= 0; i-- {
+			final = middlewares[i](final)
+		}
+		return final
+	}
+}
+
 type contextKey string
 
 const (
@@ -51,22 +64,24 @@ func CorrelationIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// LatencyMiddleware injects a random jitter delay between minMs and maxMs.
-func LatencyMiddleware(minMs, maxMs int, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var delayMs int
-		if maxMs > minMs {
-			delayMs = minMs + mathrand.Intn(maxMs-minMs+1)
-		} else {
-			delayMs = minMs
-		}
+// LatencyMiddleware returns a Middleware that injects a random jitter delay between minMs and maxMs.
+func LatencyMiddleware(minMs, maxMs int) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var delayMs int
+			if maxMs > minMs {
+				delayMs = minMs + mathrand.Intn(maxMs-minMs+1)
+			} else {
+				delayMs = minMs
+			}
 
-		if delayMs > 0 {
-			time.Sleep(time.Duration(delayMs) * time.Millisecond)
-		}
+			if delayMs > 0 {
+				time.Sleep(time.Duration(delayMs) * time.Millisecond)
+			}
 
-		next.ServeHTTP(w, r)
-	})
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 type statusRecorder struct {
@@ -79,60 +94,64 @@ func (rec *statusRecorder) WriteHeader(code int) {
 	rec.ResponseWriter.WriteHeader(code)
 }
 
-// LoggingMiddleware logs request details in structured JSON using zerolog.
-func LoggingMiddleware(logger zerolog.Logger, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+// LoggingMiddleware returns a Middleware that logs request details in structured JSON using zerolog.
+func LoggingMiddleware(logger zerolog.Logger) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rec := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 
-		next.ServeHTTP(rec, r)
+			next.ServeHTTP(rec, r)
 
-		latencyMs := time.Since(start).Milliseconds()
-		corrID := CorrelationIDFromContext(r.Context())
+			latencyMs := time.Since(start).Milliseconds()
+			corrID := CorrelationIDFromContext(r.Context())
 
-		event := logger.Info()
-		if rec.statusCode >= 500 {
-			event = logger.Error()
-		} else if rec.statusCode >= 400 {
-			event = logger.Warn()
-		}
+			event := logger.Info()
+			if rec.statusCode >= 500 {
+				event = logger.Error()
+			} else if rec.statusCode >= 400 {
+				event = logger.Warn()
+			}
 
-		event.
-			Str("service", "bmkg-mock").
-			Str("correlation_id", corrID).
-			Str("method", r.Method).
-			Str("path", r.URL.Path).
-			Str("query", r.URL.RawQuery).
-			Int("status", rec.statusCode).
-			Int64("latency_ms", latencyMs).
-			Str("remote_addr", r.RemoteAddr).
-			Msg("request processed")
-	})
+			event.
+				Str("service", "bmkg-mock").
+				Str("correlation_id", corrID).
+				Str("method", r.Method).
+				Str("path", r.URL.Path).
+				Str("query", r.URL.RawQuery).
+				Int("status", rec.statusCode).
+				Int64("latency_ms", latencyMs).
+				Str("remote_addr", r.RemoteAddr).
+				Msg("request processed")
+		})
+	}
 }
 
-// AuthMiddleware validates BMKG credentials and rejects PVMBG cross-credentials.
-func AuthMiddleware(expectedKey string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 1. Cross-Credential Handling:
-		// If Authorization header (e.g. Bearer token from PVMBG) is present, explicitly reject with 403 Forbidden.
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":"Forbidden: cross-credential rejected (PVMBG Bearer credentials presented to BMKG endpoint)"}`))
-			return
-		}
+// AuthMiddleware returns a Middleware that validates BMKG credentials and rejects PVMBG cross-credentials.
+func AuthMiddleware(expectedKey string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 1. Cross-Credential Handling:
+			// If Authorization header (e.g. Bearer token from PVMBG) is present, explicitly reject with 403 Forbidden.
+			authHeader := r.Header.Get("Authorization")
+			if authHeader != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"Forbidden: cross-credential rejected (PVMBG Bearer credentials presented to BMKG endpoint)"}`))
+				return
+			}
 
-		// 2. BMKG API Key Validation:
-		// Validate incoming header X-BMKG-Key against expected key.
-		bmkgKey := strings.TrimSpace(r.Header.Get("X-BMKG-Key"))
-		if bmkgKey == "" || bmkgKey != expectedKey {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":"Unauthorized: invalid or missing X-BMKG-Key"}`))
-			return
-		}
+			// 2. BMKG API Key Validation:
+			// Validate incoming header X-BMKG-Key against expected key.
+			bmkgKey := strings.TrimSpace(r.Header.Get("X-BMKG-Key"))
+			if bmkgKey == "" || bmkgKey != expectedKey {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"Unauthorized: invalid or missing X-BMKG-Key"}`))
+				return
+			}
 
-		next.ServeHTTP(w, r)
-	})
+			next.ServeHTTP(w, r)
+		})
+	}
 }
