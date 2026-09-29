@@ -4,20 +4,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
+	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/model"
 )
 
 // Store defines the interface for managing seismic events and tsunami warnings in memory.
 type Store interface {
-	AddSeismicEvent(evt agency.SeismicEvent)
-	GetSeismicEvents(since *time.Time) []agency.SeismicEvent
-	AddTsunamiWarning(warn agency.TsunamiWarning, occurredAt time.Time)
-	GetTsunamiWarnings(since *time.Time) []agency.TsunamiWarning
+	AddSeismicEvent(evt model.SeismicEvent)
+	GetSeismicEvents(since *time.Time) []model.SeismicEvent
+	AddTsunamiWarning(warn model.TsunamiWarning, occurredAt time.Time)
+	GetTsunamiWarnings(since *time.Time) []model.TsunamiWarning
 	Count() (seismicCount int, tsunamiCount int)
 }
 
 type warningRecord struct {
-	warning    agency.TsunamiWarning
+	warning    model.TsunamiWarning
 	occurredAt time.Time
 	arrivalAt  time.Time
 }
@@ -25,20 +25,20 @@ type warningRecord struct {
 // MemoryStore is a thread-safe in-memory store for seismic events and tsunami warnings.
 type MemoryStore struct {
 	mu             sync.RWMutex
-	seismicEvents  []agency.SeismicEvent
+	seismicEvents  []model.SeismicEvent
 	tsunamiRecords []warningRecord
 }
 
 // NewMemoryStore creates a new instance of MemoryStore.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		seismicEvents:  make([]agency.SeismicEvent, 0),
+		seismicEvents:  make([]model.SeismicEvent, 0),
 		tsunamiRecords: make([]warningRecord, 0),
 	}
 }
 
 // AddSeismicEvent adds a seismic event to the store in a thread-safe manner.
-func (s *MemoryStore) AddSeismicEvent(evt agency.SeismicEvent) {
+func (s *MemoryStore) AddSeismicEvent(evt model.SeismicEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seismicEvents = append(s.seismicEvents, evt)
@@ -46,17 +46,17 @@ func (s *MemoryStore) AddSeismicEvent(evt agency.SeismicEvent) {
 
 // GetSeismicEvents retrieves seismic events occurred on or after 'since'.
 // If 'since' is nil, all events are returned.
-func (s *MemoryStore) GetSeismicEvents(since *time.Time) []agency.SeismicEvent {
+func (s *MemoryStore) GetSeismicEvents(since *time.Time) []model.SeismicEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	if since == nil {
-		result := make([]agency.SeismicEvent, len(s.seismicEvents))
+		result := make([]model.SeismicEvent, len(s.seismicEvents))
 		copy(result, s.seismicEvents)
 		return result
 	}
 
-	result := make([]agency.SeismicEvent, 0)
+	result := make([]model.SeismicEvent, 0)
 	for _, evt := range s.seismicEvents {
 		t, err := time.Parse(time.RFC3339, evt.OccurredAt)
 		if err != nil {
@@ -77,7 +77,7 @@ func (s *MemoryStore) GetSeismicEvents(since *time.Time) []agency.SeismicEvent {
 }
 
 // AddTsunamiWarning adds a tsunami warning to the store in a thread-safe manner.
-func (s *MemoryStore) AddTsunamiWarning(warn agency.TsunamiWarning, occurredAt time.Time) {
+func (s *MemoryStore) AddTsunamiWarning(warn model.TsunamiWarning, occurredAt time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -99,19 +99,19 @@ func (s *MemoryStore) AddTsunamiWarning(warn agency.TsunamiWarning, occurredAt t
 
 // GetTsunamiWarnings retrieves tsunami warnings matching the 'since' filter.
 // If 'since' is nil, all warnings are returned.
-func (s *MemoryStore) GetTsunamiWarnings(since *time.Time) []agency.TsunamiWarning {
+func (s *MemoryStore) GetTsunamiWarnings(since *time.Time) []model.TsunamiWarning {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	if since == nil {
-		result := make([]agency.TsunamiWarning, len(s.tsunamiRecords))
+		result := make([]model.TsunamiWarning, len(s.tsunamiRecords))
 		for i, rec := range s.tsunamiRecords {
 			result[i] = rec.warning
 		}
 		return result
 	}
 
-	result := make([]agency.TsunamiWarning, 0)
+	result := make([]model.TsunamiWarning, 0)
 	for _, rec := range s.tsunamiRecords {
 		// Include if event occurred at/after since, or arrival is at/after since
 		if !rec.occurredAt.Before(*since) || !rec.arrivalAt.Before(*since) {

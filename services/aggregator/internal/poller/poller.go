@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/agency"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/circuitbreaker"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
 	"golang.org/x/sync/errgroup"
 )
 

@@ -10,9 +10,9 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/handler"
+	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/model"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/seed"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/store"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
 )
 
 func setupTestApp() (*handler.Handler, store.Store, *config.Config) {
@@ -128,7 +128,7 @@ func TestSeismicEventsFilter(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d", rec.Code)
 	}
 
-	var allEvents []agency.SeismicEvent
+	var allEvents []model.SeismicEvent
 	if err := json.Unmarshal(rec.Body.Bytes(), &allEvents); err != nil {
 		t.Fatalf("failed to decode seismic events: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestSeismicEventsFilter(t *testing.T) {
 	futureRec := httptest.NewRecorder()
 	router.ServeHTTP(futureRec, futureReq)
 
-	var futureEvents []agency.SeismicEvent
+	var futureEvents []model.SeismicEvent
 	_ = json.Unmarshal(futureRec.Body.Bytes(), &futureEvents)
 	if len(futureEvents) != 0 {
 		t.Errorf("expected 0 events in future, got %d", len(futureEvents))
@@ -172,7 +172,7 @@ func TestTsunamiWarningsEndpoint(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d", rec.Code)
 	}
 
-	var warnings []agency.TsunamiWarning
+	var warnings []model.TsunamiWarning
 	if err := json.Unmarshal(rec.Body.Bytes(), &warnings); err != nil {
 		t.Fatalf("failed to decode tsunami warnings: %v", err)
 	}

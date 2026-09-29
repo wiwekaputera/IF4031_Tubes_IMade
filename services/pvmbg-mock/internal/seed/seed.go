@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
+	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/model"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/store"
 )
 
@@ -16,7 +16,7 @@ var volcanicSeedsJSON []byte
 // PopulateSeeds populates the given store with at least 20 historical realistic
 // volcanic reports using volcano IDs that match the volcano_reference table.
 func PopulateSeeds(s store.Store) {
-	var reports []agency.VolcanicReport
+	var reports []model.VolcanicReport
 	if err := json.Unmarshal(volcanicSeedsJSON, &reports); err != nil {
 		log.Fatal().Err(err).Msg("failed to unmarshal embedded volcanic seed data")
 	}

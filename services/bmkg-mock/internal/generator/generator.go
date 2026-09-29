@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/model"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/store"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
 )
 
 // Generator dynamically produces realistic seismic events and tsunami warnings.
@@ -80,7 +80,7 @@ func (g *Generator) generateEvent() {
 		}
 	}
 
-	event := agency.SeismicEvent{
+	event := model.SeismicEvent{
 		EventID:          eventID,
 		Magnitude:        mag,
 		DepthKm:          depth,
@@ -100,20 +100,20 @@ func (g *Generator) generateEvent() {
 		Msg("Generated new seismic event")
 
 	if potentialTsunami {
-		var threat agency.TsunamiThreatLevel
+		var threat model.TsunamiThreatLevel
 		if mag >= 7.5 {
-			threat = agency.ThreatAwas
+			threat = model.ThreatAwas
 		} else if mag >= 7.0 {
-			threat = agency.ThreatSiaga
+			threat = model.ThreatSiaga
 		} else {
-			threat = agency.ThreatWaspada
+			threat = model.ThreatWaspada
 		}
 
 		estMinutes := 15 + g.rng.Intn(30)
 		arrival := now.Add(time.Duration(estMinutes) * time.Minute).Format(time.RFC3339)
 
 		warningID := fmt.Sprintf("warn-bmkg-dyn-%04d", seq)
-		warning := agency.TsunamiWarning{
+		warning := model.TsunamiWarning{
 			WarningID:        warningID,
 			RelatedEventID:   eventID,
 			ThreatLevel:      threat,

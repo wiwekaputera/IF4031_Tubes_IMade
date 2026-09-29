@@ -9,17 +9,17 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/admin"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/config"
+	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/model"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/store"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
 )
 
 // Handler coordinates HTTP requests for the pvmbg-mock service.
 type Handler struct {
-	store           store.Store
-	cfg             *config.Config
-	logger          zerolog.Logger
-	outage          *admin.OutageState
-	schemaVersion   *admin.SchemaVersionState
+	store         store.Store
+	cfg           *config.Config
+	logger        zerolog.Logger
+	outage        *admin.OutageState
+	schemaVersion *admin.SchemaVersionState
 }
 
 // NewHandler creates a new HTTP Handler instance.
@@ -76,7 +76,7 @@ func (h *Handler) GetVolcanicReports(w http.ResponseWriter, r *http.Request) {
 
 	reports := h.store.GetVolcanicReports(sinceTime)
 	if reports == nil {
-		reports = make([]agency.VolcanicReport, 0)
+		reports = make([]model.VolcanicReport, 0)
 	}
 
 	if h.schemaVersion.IsEnabled() {

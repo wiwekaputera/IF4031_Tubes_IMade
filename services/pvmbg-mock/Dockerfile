@@ -2,7 +2,6 @@
 FROM golang:1.23-alpine AS builder
 WORKDIR /app
 COPY services/pvmbg-mock/go.mod services/pvmbg-mock/go.sum ./
-COPY contracts /contracts
 RUN go mod download
 COPY services/pvmbg-mock/. .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/service ./cmd/main

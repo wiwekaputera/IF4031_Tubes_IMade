@@ -5,15 +5,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/admin"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/handler"
+	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/model"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/seed"
-	"time"
-
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/store"
 )
 
@@ -23,12 +22,12 @@ func testElapsed(start time.Time) time.Duration { return time.Since(start) }
 
 func setupTestApp() (*handler.Handler, store.Store, *config.Config, *admin.OutageState, *admin.SchemaVersionState) {
 	cfg := &config.Config{
-		Port:            "8082",
-		BearerToken:     "test-pvmbg-token",
-		DelayMinMs:      10,
-		DelayMaxMs:      30,
-		EventIntervalS:  1,
-		LogLevel:        "disabled",
+		Port:           "8082",
+		BearerToken:    "test-pvmbg-token",
+		DelayMinMs:     10,
+		DelayMaxMs:     30,
+		EventIntervalS: 1,
+		LogLevel:       "disabled",
 	}
 	memStore := store.NewMemoryStore()
 	seed.PopulateSeeds(memStore)
@@ -134,7 +133,7 @@ func TestVolcanicReportsFilter(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d", rec.Code)
 	}
 
-	var allReports []agency.VolcanicReport
+	var allReports []model.VolcanicReport
 	if err := json.Unmarshal(rec.Body.Bytes(), &allReports); err != nil {
 		t.Fatalf("failed to decode volcanic reports: %v", err)
 	}
@@ -147,7 +146,7 @@ func TestVolcanicReportsFilter(t *testing.T) {
 	futureRec := httptest.NewRecorder()
 	router.ServeHTTP(futureRec, futureReq)
 
-	var futureReports []agency.VolcanicReport
+	var futureReports []model.VolcanicReport
 	_ = json.Unmarshal(futureRec.Body.Bytes(), &futureReports)
 	if len(futureReports) != 0 {
 		t.Errorf("expected 0 reports in future, got %d", len(futureReports))
@@ -216,7 +215,7 @@ func TestSchemaVersionToggle(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	var reports []agency.VolcanicReport
+	var reports []model.VolcanicReport
 	_ = json.Unmarshal(rec.Body.Bytes(), &reports)
 	if len(reports) == 0 {
 		t.Fatalf("expected reports, got none")
@@ -241,7 +240,7 @@ func TestSchemaVersionToggle(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	router.ServeHTTP(rec2, req2)
 
-	var reports2 []agency.VolcanicReport
+	var reports2 []model.VolcanicReport
 	_ = json.Unmarshal(rec2.Body.Bytes(), &reports2)
 	if len(reports2) == 0 {
 		t.Fatalf("expected reports, got none")

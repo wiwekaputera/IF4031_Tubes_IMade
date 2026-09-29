@@ -1,12 +1,13 @@
 package normalizer
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/agency"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
@@ -28,9 +29,9 @@ func (n *Normalizer) UpdateVolcanoRefs(refs map[string]store.VolcanoReference) {
 
 func (n *Normalizer) NormalizeSeismic(event agency.SeismicEvent, warning *agency.TsunamiWarning) store.UpsertRequest {
 	attributes := map[string]interface{}{
-		"magnitude":          event.Magnitude,
-		"depth_km":           event.DepthKm,
-		"potential_tsunami":  event.PotentialTsunami,
+		"magnitude":         event.Magnitude,
+		"depth_km":          event.DepthKm,
+		"potential_tsunami": event.PotentialTsunami,
 	}
 	if warning != nil {
 		attributes["tsunami_warning"] = warning
@@ -83,11 +84,21 @@ func (n *Normalizer) NormalizeVolcanic(report agency.VolcanicReport) store.Upser
 	}
 
 	attributes := map[string]interface{}{
-		"eruption_count_24h":   report.EruptionCount24h,
-		"ash_column_height_m":  report.AshColumnHeightM,
+		"eruption_count_24h":  report.EruptionCount24h,
+		"ash_column_height_m": report.AshColumnHeightM,
 	}
 	if report.ConfidenceLevel != nil {
 		attributes["confidence_level"] = *report.ConfidenceLevel
+	}
+
+	// Tolerant reader: capture any unknown/additive fields (stored as raw JSON
+	// in Extra during unmarshaling) into attributes so they are preserved
+	// without crashing or losing data.
+	for k, raw := range report.Extra {
+		var v interface{}
+		if err := json.Unmarshal(raw, &v); err == nil {
+			attributes[k] = v
+		}
 	}
 
 	occurredAt, _ := time.Parse(time.RFC3339, report.ReportedAt)

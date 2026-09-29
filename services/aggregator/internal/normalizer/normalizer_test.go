@@ -4,9 +4,9 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/agency"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
 func newTestNormalizer() *Normalizer {
@@ -19,11 +19,11 @@ func newTestNormalizer() *Normalizer {
 
 func TestSeismicSeverity(t *testing.T) {
 	tests := []struct {
-		name     string
-		magnitude float64
+		name       string
+		magnitude  float64
 		hasTsunami bool
-		threat   agency.TsunamiThreatLevel
-		expected hazard.Severity
+		threat     agency.TsunamiThreatLevel
+		expected   hazard.Severity
 	}{
 		{"tsunami awas", 7.0, true, agency.ThreatAwas, hazard.SeverityAwas},
 		{"tsunami siaga", 6.5, true, agency.ThreatSiaga, hazard.SeveritySiaga},
@@ -163,13 +163,13 @@ func TestNormalizeVolcanic(t *testing.T) {
 
 	cl := 0.85
 	report := agency.VolcanicReport{
-		ReportID:           "rep-test-001",
-		VolcanoID:          "GNG-001",
-		AlertLevel:         agency.AlertSiaga,
-		EruptionCount24h:   3,
-		AshColumnHeightM:   5000.0,
-		ReportedAt:         "2026-09-21T22:40:00Z",
-		ConfidenceLevel:    &cl,
+		ReportID:         "rep-test-001",
+		VolcanoID:        "GNG-001",
+		AlertLevel:       agency.AlertSiaga,
+		EruptionCount24h: 3,
+		AshColumnHeightM: 5000.0,
+		ReportedAt:       "2026-09-21T22:40:00Z",
+		ConfidenceLevel:  &cl,
 	}
 
 	rec := n.NormalizeVolcanic(report)
@@ -212,13 +212,13 @@ func TestNormalizeVolcanicUnknownVolcano(t *testing.T) {
 	n := newTestNormalizer()
 
 	report := agency.VolcanicReport{
-		ReportID:           "rep-test-002",
-		VolcanoID:          "GNG-999",
-		AlertLevel:         agency.AlertNormal,
-		EruptionCount24h:   0,
-		AshColumnHeightM:   0.0,
-		ReportedAt:         "2026-09-21T22:40:00Z",
-		ConfidenceLevel:    nil,
+		ReportID:         "rep-test-002",
+		VolcanoID:        "GNG-999",
+		AlertLevel:       agency.AlertNormal,
+		EruptionCount24h: 0,
+		AshColumnHeightM: 0.0,
+		ReportedAt:       "2026-09-21T22:40:00Z",
+		ConfidenceLevel:  nil,
 	}
 
 	rec := n.NormalizeVolcanic(report)

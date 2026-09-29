@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/agency"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
 )
 
 func failingPVMBGServer(t *testing.T, called *atomic.Int32) *httptest.Server {

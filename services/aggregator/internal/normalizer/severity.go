@@ -1,7 +1,7 @@
 package normalizer
 
 import (
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/agency"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 

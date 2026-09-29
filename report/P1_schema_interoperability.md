@@ -70,7 +70,7 @@ tim, dan skema mereka berevolusi secara independen.**
 - `confidence_level` tidak pernah dipaksa ke dalam struktur `VolcanicReport`
   inti secara tak terkontrol; ia adalah `*float64` dengan
   `json:"confidence_level,omitempty"`, sehingga bisa absent secara semantik
-  (`contracts/agency/agency.go:54`). Normalizer memutuskan secara implisit:
+  (`services/aggregator/internal/agency/model.go`). Normalizer memutuskan secara implisit:
   pointer `!= nil` — masuk ke `attributes`; pointer `nil` — tidak masuk.
 - Karena nilainya selamanya berada di dalam JSONB `attributes`, tidak ada
   migrasi DDL yang dibutuhkan ketika PVMBG menambah field demi field baru
@@ -104,7 +104,7 @@ tim, dan skema mereka berevolusi secara independen.**
 ### `confidence_level` mendarat di `attributes`
 
 - Kontrak pointer memungkinkan ketiadaan semantik:
-  `contracts/agency/agency.go:46,54`
+  `services/aggregator/internal/agency/model.go`
   (komentar: *"ConfidenceLevel is a pointer because it may be absent before
   schema-version is toggled"*).
 - Normalizer menuliskannya ke `attributes` hanya bila != nil:

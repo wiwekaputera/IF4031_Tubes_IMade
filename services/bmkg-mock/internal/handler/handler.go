@@ -7,8 +7,8 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/config"
+	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/model"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/store"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
 )
 
 // Handler coordinates HTTP requests for the bmkg-mock service.
@@ -66,7 +66,7 @@ func (h *Handler) GetSeismicEvents(w http.ResponseWriter, r *http.Request) {
 
 	events := h.store.GetSeismicEvents(sinceTime)
 	if events == nil {
-		events = make([]agency.SeismicEvent, 0)
+		events = make([]model.SeismicEvent, 0)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -101,7 +101,7 @@ func (h *Handler) GetTsunamiWarnings(w http.ResponseWriter, r *http.Request) {
 
 	warnings := h.store.GetTsunamiWarnings(sinceTime)
 	if warnings == nil {
-		warnings = make([]agency.TsunamiWarning, 0)
+		warnings = make([]model.TsunamiWarning, 0)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

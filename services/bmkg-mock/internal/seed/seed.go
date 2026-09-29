@@ -6,16 +6,16 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/model"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/store"
-	"github.com/wiwekaputera/if4031-tubes-imade/contracts/agency"
 )
 
 //go:embed data/seismic_seeds.json
 var seismicSeedsJSON []byte
 
 type seedItem struct {
-	Event   agency.SeismicEvent    `json:"event"`
-	Warning *agency.TsunamiWarning `json:"warning"`
+	Event   model.SeismicEvent    `json:"event"`
+	Warning *model.TsunamiWarning `json:"warning"`
 }
 
 // PopulateSeeds populates the given store with at least 20 seismic events.
