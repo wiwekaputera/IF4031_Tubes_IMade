@@ -17,70 +17,84 @@ type Store interface {
 	Count() (seismicCount int, tsunamiCount int)
 }
 
+// storedSeismicEvent wraps a seismic event together with its pre-parsed
+// occurrence timestamp, so time.Parse is never invoked on the read path.
+type storedSeismicEvent struct {
+	event      model.SeismicEvent
+	occurredAt time.Time
+}
+
 type warningRecord struct {
 	warning    model.TsunamiWarning
 	occurredAt time.Time
 	arrivalAt  time.Time
 }
 
-// MemoryStore is a thread-safe in-memory store for seismic events and tsunami warnings.
+// MemoryStore is a thread-safe in-memory store for seismic events and tsunami
+// warnings. Both collections are kept in chronological (ascending occurredAt)
+// order, so read paths can locate records with a binary search and never need to
+// sort a copy or re-parse timestamps.
 type MemoryStore struct {
 	mu             sync.RWMutex
-	seismicEvents  []model.SeismicEvent
+	seismicEvents  []storedSeismicEvent
 	tsunamiRecords []warningRecord
 }
 
 // NewMemoryStore creates a new instance of MemoryStore.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		seismicEvents:  make([]model.SeismicEvent, 0),
+		seismicEvents:  make([]storedSeismicEvent, 0),
 		tsunamiRecords: make([]warningRecord, 0),
 	}
 }
 
-// AddSeismicEvent adds a seismic event to the store in a thread-safe manner.
+// AddSeismicEvent adds a seismic event to the store in chronological order.
+// The occurred_at timestamp is parsed exactly once, at insertion time.
 func (s *MemoryStore) AddSeismicEvent(evt model.SeismicEvent) {
+	occurredAt, _ := parseTimestamp(evt.OccurredAt)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.seismicEvents = append(s.seismicEvents, evt)
+
+	idx := sort.Search(len(s.seismicEvents), func(i int) bool {
+		return !s.seismicEvents[i].occurredAt.Before(occurredAt)
+	})
+	s.seismicEvents = append(s.seismicEvents, storedSeismicEvent{})
+	copy(s.seismicEvents[idx+1:], s.seismicEvents[idx:])
+	s.seismicEvents[idx] = storedSeismicEvent{event: evt, occurredAt: occurredAt}
 }
 
 // GetSeismicEvents retrieves seismic events occurred on or after 'since'.
 // If 'since' is nil, all events are returned up to 'limit'.
-// Results are sorted chronologically by OccurredAt ascending.
+// Results are returned in chronological (ascending occurredAt) order. No sorting
+// or timestamp parsing is performed on the read path.
 func (s *MemoryStore) GetSeismicEvents(since *time.Time, limit int) []model.SeismicEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	sorted := make([]model.SeismicEvent, len(s.seismicEvents))
-	copy(sorted, s.seismicEvents)
-	sort.Slice(sorted, func(i, j int) bool {
-		ti, _ := parseTimestamp(sorted[i].OccurredAt)
-		tj, _ := parseTimestamp(sorted[j].OccurredAt)
-		return ti.Before(tj)
-	})
+	start := 0
+	if since != nil {
+		start = sort.Search(len(s.seismicEvents), func(i int) bool {
+			return !s.seismicEvents[i].occurredAt.Before(*since)
+		})
+	}
 
-	result := make([]model.SeismicEvent, 0, min(limit, len(sorted)))
-	for _, evt := range sorted {
-		if since != nil {
-			t, err := parseTimestamp(evt.OccurredAt)
-			if err == nil && t.Before(*since) {
-				continue
-			}
-		}
-		result = append(result, evt)
-		if len(result) >= limit {
-			break
-		}
+	remaining := len(s.seismicEvents) - start
+	if limit > remaining {
+		limit = remaining
+	}
+
+	result := make([]model.SeismicEvent, 0, limit)
+	for i := start; i < start+limit; i++ {
+		result = append(result, s.seismicEvents[i].event)
 	}
 	return result
 }
 
-// AddTsunamiWarning adds a tsunami warning to the store in a thread-safe manner.
+// AddTsunamiWarning adds a tsunami warning to the store in chronological order.
+// The occurrence timestamp is supplied pre-parsed; the estimated arrival is parsed
+// exactly once, at insertion time.
 func (s *MemoryStore) AddTsunamiWarning(warn model.TsunamiWarning, occurredAt time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	var arrivalAt time.Time
 	if t, err := time.Parse(time.RFC3339, warn.EstimatedArrival); err == nil {
 		arrivalAt = t
@@ -90,33 +104,43 @@ func (s *MemoryStore) AddTsunamiWarning(warn model.TsunamiWarning, occurredAt ti
 		arrivalAt = occurredAt
 	}
 
-	s.tsunamiRecords = append(s.tsunamiRecords, warningRecord{
-		warning:    warn,
-		occurredAt: occurredAt,
-		arrivalAt:  arrivalAt,
+	rec := warningRecord{warning: warn, occurredAt: occurredAt, arrivalAt: arrivalAt}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := sort.Search(len(s.tsunamiRecords), func(i int) bool {
+		return !s.tsunamiRecords[i].occurredAt.Before(rec.occurredAt)
 	})
+	s.tsunamiRecords = append(s.tsunamiRecords, warningRecord{})
+	copy(s.tsunamiRecords[idx+1:], s.tsunamiRecords[idx:])
+	s.tsunamiRecords[idx] = rec
 }
 
 // GetTsunamiWarnings retrieves tsunami warnings matching the 'since' filter.
 // If 'since' is nil, all warnings are returned up to 'limit'.
-// Results are sorted chronologically by occurredAt ascending.
+// A warning is included when it either occurred on or after 'since', or is still
+// estimated to arrive on or after 'since'. Because arrival times are not strictly
+// monotonic with occurrence times, the matching set is not a contiguous suffix, so a
+// linear scan (no copy, no sort, no parse) is used to preserve the exact filter
+// semantics. Results are returned in chronological (ascending occurredAt) order.
 func (s *MemoryStore) GetTsunamiWarnings(since *time.Time, limit int) []model.TsunamiWarning {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	sorted := make([]warningRecord, len(s.tsunamiRecords))
-	copy(sorted, s.tsunamiRecords)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].occurredAt.Before(sorted[j].occurredAt)
-	})
+	records := s.tsunamiRecords
+	if limit > len(records) {
+		limit = len(records)
+	}
 
-	result := make([]model.TsunamiWarning, 0, min(limit, len(sorted)))
-	for _, rec := range sorted {
+	result := make([]model.TsunamiWarning, 0, limit)
+	for i := 0; i < len(records); i++ {
+		if len(result) >= limit {
+			break
+		}
+		rec := &records[i]
 		if since == nil || !rec.occurredAt.Before(*since) || !rec.arrivalAt.Before(*since) {
 			result = append(result, rec.warning)
-			if len(result) >= limit {
-				break
-			}
 		}
 	}
 	return result

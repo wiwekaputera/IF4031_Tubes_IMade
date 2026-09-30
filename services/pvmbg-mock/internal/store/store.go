@@ -15,53 +15,68 @@ type Store interface {
 	Count() int
 }
 
-// MemoryStore is a thread-safe in-memory store for volcanic reports.
+// storedVolcanicReport wraps a volcanic report together with its pre-parsed
+// report timestamp, so time.Parse is never invoked on the read path.
+type storedVolcanicReport struct {
+	report     model.VolcanicReport
+	reportedAt time.Time
+}
+
+// MemoryStore is a thread-safe in-memory store for volcanic reports. Reports are
+// kept in chronological (ascending reportedAt) order, so read paths can locate
+// records with a binary search and never need to sort a copy or re-parse
+// timestamps.
 type MemoryStore struct {
 	mu              sync.RWMutex
-	volcanicReports []model.VolcanicReport
+	volcanicReports []storedVolcanicReport
 }
 
 // NewMemoryStore creates a new instance of MemoryStore.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		volcanicReports: make([]model.VolcanicReport, 0),
+		volcanicReports: make([]storedVolcanicReport, 0),
 	}
 }
 
-// AddVolcanicReport adds a volcanic report to the store in a thread-safe manner.
+// AddVolcanicReport adds a volcanic report to the store in chronological order.
+// The reported_at timestamp is parsed exactly once, at insertion time.
 func (s *MemoryStore) AddVolcanicReport(rpt model.VolcanicReport) {
+	reportedAt, _ := parseTimestamp(rpt.ReportedAt)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.volcanicReports = append(s.volcanicReports, rpt)
+
+	idx := sort.Search(len(s.volcanicReports), func(i int) bool {
+		return !s.volcanicReports[i].reportedAt.Before(reportedAt)
+	})
+	s.volcanicReports = append(s.volcanicReports, storedVolcanicReport{})
+	copy(s.volcanicReports[idx+1:], s.volcanicReports[idx:])
+	s.volcanicReports[idx] = storedVolcanicReport{report: rpt, reportedAt: reportedAt}
 }
 
 // GetVolcanicReports retrieves volcanic reports reported on or after 'since'.
 // If 'since' is nil, all reports are returned up to 'limit'.
-// Results are sorted chronologically by ReportedAt ascending.
+// Results are returned in chronological (ascending reportedAt) order. No sorting
+// or timestamp parsing is performed on the read path.
 func (s *MemoryStore) GetVolcanicReports(since *time.Time, limit int) []model.VolcanicReport {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	sorted := make([]model.VolcanicReport, len(s.volcanicReports))
-	copy(sorted, s.volcanicReports)
-	sort.Slice(sorted, func(i, j int) bool {
-		ti, _ := parseTimestamp(sorted[i].ReportedAt)
-		tj, _ := parseTimestamp(sorted[j].ReportedAt)
-		return ti.Before(tj)
-	})
+	start := 0
+	if since != nil {
+		start = sort.Search(len(s.volcanicReports), func(i int) bool {
+			return !s.volcanicReports[i].reportedAt.Before(*since)
+		})
+	}
 
-	result := make([]model.VolcanicReport, 0, min(limit, len(sorted)))
-	for _, rpt := range sorted {
-		if since != nil {
-			t, err := parseTimestamp(rpt.ReportedAt)
-			if err == nil && t.Before(*since) {
-				continue
-			}
-		}
-		result = append(result, rpt)
-		if len(result) >= limit {
-			break
-		}
+	remaining := len(s.volcanicReports) - start
+	if limit > remaining {
+		limit = remaining
+	}
+
+	result := make([]model.VolcanicReport, 0, limit)
+	for i := start; i < start+limit; i++ {
+		result = append(result, s.volcanicReports[i].report)
 	}
 	return result
 }
