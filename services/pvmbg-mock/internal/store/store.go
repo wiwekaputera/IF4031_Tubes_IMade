@@ -1,6 +1,7 @@
 package store
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 // Store defines the interface for managing volcanic reports in memory.
 type Store interface {
 	AddVolcanicReport(rpt model.VolcanicReport)
-	GetVolcanicReports(since *time.Time) []model.VolcanicReport
+	GetVolcanicReports(since *time.Time, limit int) []model.VolcanicReport
 	Count() int
 }
 
@@ -35,30 +36,31 @@ func (s *MemoryStore) AddVolcanicReport(rpt model.VolcanicReport) {
 }
 
 // GetVolcanicReports retrieves volcanic reports reported on or after 'since'.
-// If 'since' is nil, all reports are returned.
-func (s *MemoryStore) GetVolcanicReports(since *time.Time) []model.VolcanicReport {
+// If 'since' is nil, all reports are returned up to 'limit'.
+// Results are sorted chronologically by ReportedAt ascending.
+func (s *MemoryStore) GetVolcanicReports(since *time.Time, limit int) []model.VolcanicReport {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if since == nil {
-		result := make([]model.VolcanicReport, len(s.volcanicReports))
-		copy(result, s.volcanicReports)
-		return result
-	}
+	sorted := make([]model.VolcanicReport, len(s.volcanicReports))
+	copy(sorted, s.volcanicReports)
+	sort.Slice(sorted, func(i, j int) bool {
+		ti, _ := parseTimestamp(sorted[i].ReportedAt)
+		tj, _ := parseTimestamp(sorted[j].ReportedAt)
+		return ti.Before(tj)
+	})
 
-	result := make([]model.VolcanicReport, 0)
-	for _, rpt := range s.volcanicReports {
-		t, err := time.Parse(time.RFC3339, rpt.ReportedAt)
-		if err != nil {
-			t, err = time.Parse(time.RFC3339Nano, rpt.ReportedAt)
-		}
-
-		if err == nil {
-			if !t.Before(*since) {
-				result = append(result, rpt)
+	result := make([]model.VolcanicReport, 0, min(limit, len(sorted)))
+	for _, rpt := range sorted {
+		if since != nil {
+			t, err := parseTimestamp(rpt.ReportedAt)
+			if err == nil && t.Before(*since) {
+				continue
 			}
-		} else {
-			result = append(result, rpt)
+		}
+		result = append(result, rpt)
+		if len(result) >= limit {
+			break
 		}
 	}
 	return result
@@ -69,4 +71,13 @@ func (s *MemoryStore) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.volcanicReports)
+}
+
+// parseTimestamp parses an ISO 8601 timestamp string, trying RFC3339 then RFC3339Nano.
+func parseTimestamp(s string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, s)
+	}
+	return t, err
 }

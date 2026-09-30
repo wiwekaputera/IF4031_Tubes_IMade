@@ -1,6 +1,7 @@
 package store
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -10,9 +11,9 @@ import (
 // Store defines the interface for managing seismic events and tsunami warnings in memory.
 type Store interface {
 	AddSeismicEvent(evt model.SeismicEvent)
-	GetSeismicEvents(since *time.Time) []model.SeismicEvent
+	GetSeismicEvents(since *time.Time, limit int) []model.SeismicEvent
 	AddTsunamiWarning(warn model.TsunamiWarning, occurredAt time.Time)
-	GetTsunamiWarnings(since *time.Time) []model.TsunamiWarning
+	GetTsunamiWarnings(since *time.Time, limit int) []model.TsunamiWarning
 	Count() (seismicCount int, tsunamiCount int)
 }
 
@@ -45,32 +46,31 @@ func (s *MemoryStore) AddSeismicEvent(evt model.SeismicEvent) {
 }
 
 // GetSeismicEvents retrieves seismic events occurred on or after 'since'.
-// If 'since' is nil, all events are returned.
-func (s *MemoryStore) GetSeismicEvents(since *time.Time) []model.SeismicEvent {
+// If 'since' is nil, all events are returned up to 'limit'.
+// Results are sorted chronologically by OccurredAt ascending.
+func (s *MemoryStore) GetSeismicEvents(since *time.Time, limit int) []model.SeismicEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if since == nil {
-		result := make([]model.SeismicEvent, len(s.seismicEvents))
-		copy(result, s.seismicEvents)
-		return result
-	}
+	sorted := make([]model.SeismicEvent, len(s.seismicEvents))
+	copy(sorted, s.seismicEvents)
+	sort.Slice(sorted, func(i, j int) bool {
+		ti, _ := parseTimestamp(sorted[i].OccurredAt)
+		tj, _ := parseTimestamp(sorted[j].OccurredAt)
+		return ti.Before(tj)
+	})
 
-	result := make([]model.SeismicEvent, 0)
-	for _, evt := range s.seismicEvents {
-		t, err := time.Parse(time.RFC3339, evt.OccurredAt)
-		if err != nil {
-			// Fallback to RFC3339Nano if nanoseconds were included
-			t, err = time.Parse(time.RFC3339Nano, evt.OccurredAt)
-		}
-
-		if err == nil {
-			if !t.Before(*since) {
-				result = append(result, evt)
+	result := make([]model.SeismicEvent, 0, min(limit, len(sorted)))
+	for _, evt := range sorted {
+		if since != nil {
+			t, err := parseTimestamp(evt.OccurredAt)
+			if err == nil && t.Before(*since) {
+				continue
 			}
-		} else {
-			// If parsing fails for any reason, conservatively include it
-			result = append(result, evt)
+		}
+		result = append(result, evt)
+		if len(result) >= limit {
+			break
 		}
 	}
 	return result
@@ -98,24 +98,25 @@ func (s *MemoryStore) AddTsunamiWarning(warn model.TsunamiWarning, occurredAt ti
 }
 
 // GetTsunamiWarnings retrieves tsunami warnings matching the 'since' filter.
-// If 'since' is nil, all warnings are returned.
-func (s *MemoryStore) GetTsunamiWarnings(since *time.Time) []model.TsunamiWarning {
+// If 'since' is nil, all warnings are returned up to 'limit'.
+// Results are sorted chronologically by occurredAt ascending.
+func (s *MemoryStore) GetTsunamiWarnings(since *time.Time, limit int) []model.TsunamiWarning {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if since == nil {
-		result := make([]model.TsunamiWarning, len(s.tsunamiRecords))
-		for i, rec := range s.tsunamiRecords {
-			result[i] = rec.warning
-		}
-		return result
-	}
+	sorted := make([]warningRecord, len(s.tsunamiRecords))
+	copy(sorted, s.tsunamiRecords)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].occurredAt.Before(sorted[j].occurredAt)
+	})
 
-	result := make([]model.TsunamiWarning, 0)
-	for _, rec := range s.tsunamiRecords {
-		// Include if event occurred at/after since, or arrival is at/after since
-		if !rec.occurredAt.Before(*since) || !rec.arrivalAt.Before(*since) {
+	result := make([]model.TsunamiWarning, 0, min(limit, len(sorted)))
+	for _, rec := range sorted {
+		if since == nil || !rec.occurredAt.Before(*since) || !rec.arrivalAt.Before(*since) {
 			result = append(result, rec.warning)
+			if len(result) >= limit {
+				break
+			}
 		}
 	}
 	return result
@@ -126,4 +127,13 @@ func (s *MemoryStore) Count() (int, int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.seismicEvents), len(s.tsunamiRecords)
+}
+
+// parseTimestamp parses an ISO 8601 timestamp string, trying RFC3339 then RFC3339Nano.
+func parseTimestamp(s string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, s)
+	}
+	return t, err
 }

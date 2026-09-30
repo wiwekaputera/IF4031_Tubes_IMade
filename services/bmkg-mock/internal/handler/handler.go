@@ -2,7 +2,9 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -27,6 +29,31 @@ func NewHandler(s store.Store, cfg *config.Config, logger zerolog.Logger) *Handl
 	}
 }
 
+// parseLimit extracts and validates the 'limit' query parameter.
+// Returns the resolved limit and true on success, or 0 and false on invalid input.
+func parseLimit(limitStr string, defaultLimit, maxLimit int) (int, bool) {
+	if limitStr == "" {
+		return defaultLimit, true
+	}
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		return 0, false
+	}
+	if limit > maxLimit {
+		return maxLimit, true
+	}
+	return limit, true
+}
+
+// writeLimitError responds with a 400 for an invalid limit parameter.
+func writeLimitError(w http.ResponseWriter, maxLimit int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error": fmt.Sprintf("invalid 'limit' parameter: must be a positive integer between 1 and %d", maxLimit),
+	})
+}
+
 // Health handles GET /health without requiring authentication.
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -39,7 +66,7 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "UP"})
 }
 
-// GetSeismicEvents handles GET /seismic-events?since=<ISO8601>.
+// GetSeismicEvents handles GET /seismic-events?since=<ISO8601>&limit=<int>.
 func (h *Handler) GetSeismicEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -64,7 +91,13 @@ func (h *Handler) GetSeismicEvents(w http.ResponseWriter, r *http.Request) {
 		sinceTime = &t
 	}
 
-	events := h.store.GetSeismicEvents(sinceTime)
+	limit, ok := parseLimit(r.URL.Query().Get("limit"), h.cfg.DefaultPageLimit, h.cfg.MaxPageLimit)
+	if !ok {
+		writeLimitError(w, h.cfg.MaxPageLimit)
+		return
+	}
+
+	events := h.store.GetSeismicEvents(sinceTime, limit)
 	if events == nil {
 		events = make([]model.SeismicEvent, 0)
 	}
@@ -74,7 +107,7 @@ func (h *Handler) GetSeismicEvents(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(events)
 }
 
-// GetTsunamiWarnings handles GET /tsunami-warnings?since=<ISO8601>.
+// GetTsunamiWarnings handles GET /tsunami-warnings?since=<ISO8601>&limit=<int>.
 func (h *Handler) GetTsunamiWarnings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -99,7 +132,13 @@ func (h *Handler) GetTsunamiWarnings(w http.ResponseWriter, r *http.Request) {
 		sinceTime = &t
 	}
 
-	warnings := h.store.GetTsunamiWarnings(sinceTime)
+	limit, ok := parseLimit(r.URL.Query().Get("limit"), h.cfg.DefaultPageLimit, h.cfg.MaxPageLimit)
+	if !ok {
+		writeLimitError(w, h.cfg.MaxPageLimit)
+		return
+	}
+
+	warnings := h.store.GetTsunamiWarnings(sinceTime, limit)
 	if warnings == nil {
 		warnings = make([]model.TsunamiWarning, 0)
 	}

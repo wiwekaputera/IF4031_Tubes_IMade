@@ -2,8 +2,10 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -33,6 +35,31 @@ func NewHandler(s store.Store, cfg *config.Config, outage *admin.OutageState, sc
 	}
 }
 
+// parseLimit extracts and validates the 'limit' query parameter.
+// Returns the resolved limit and true on success, or 0 and false on invalid input.
+func parseLimit(limitStr string, defaultLimit, maxLimit int) (int, bool) {
+	if limitStr == "" {
+		return defaultLimit, true
+	}
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		return 0, false
+	}
+	if limit > maxLimit {
+		return maxLimit, true
+	}
+	return limit, true
+}
+
+// writeLimitError responds with a 400 for an invalid limit parameter.
+func writeLimitError(w http.ResponseWriter, maxLimit int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error": fmt.Sprintf("invalid 'limit' parameter: must be a positive integer between 1 and %d", maxLimit),
+	})
+}
+
 // Health handles GET /health without requiring authentication (no simulated latency).
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -44,7 +71,7 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "UP"})
 }
 
-// GetVolcanicReports handles GET /volcanic-reports?since=<ISO8601>.
+// GetVolcanicReports handles GET /volcanic-reports?since=<ISO8601>&limit=<int>.
 func (h *Handler) GetVolcanicReports(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -74,7 +101,13 @@ func (h *Handler) GetVolcanicReports(w http.ResponseWriter, r *http.Request) {
 		sinceTime = &t
 	}
 
-	reports := h.store.GetVolcanicReports(sinceTime)
+	limit, ok := parseLimit(r.URL.Query().Get("limit"), h.cfg.DefaultPageLimit, h.cfg.MaxPageLimit)
+	if !ok {
+		writeLimitError(w, h.cfg.MaxPageLimit)
+		return
+	}
+
+	reports := h.store.GetVolcanicReports(sinceTime, limit)
 	if reports == nil {
 		reports = make([]model.VolcanicReport, 0)
 	}

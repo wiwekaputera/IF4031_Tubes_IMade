@@ -5,13 +5,21 @@ import (
 	"strconv"
 )
 
+// DefaultPageLimit is the number of records returned when the client omits ?limit.
+const DefaultPageLimit = 50
+
+// MaxPageLimit is the hard ceiling to prevent clients from requesting huge pages.
+const MaxPageLimit = 100
+
 type Config struct {
-	Port            string
-	BearerToken     string
-	DelayMinMs      int
-	DelayMaxMs      int
-	EventIntervalS  int
-	LogLevel        string
+	Port             string
+	BearerToken      string
+	DelayMinMs       int
+	DelayMaxMs       int
+	EventIntervalS   int
+	DefaultPageLimit int
+	MaxPageLimit     int
+	LogLevel         string
 }
 
 func Load() *Config {
@@ -33,18 +41,32 @@ func Load() *Config {
 		eventIntervalS = 10
 	}
 
+	defaultLimit := getEnvAsInt("PVMBG_DEFAULT_PAGE_LIMIT", DefaultPageLimit)
+	if defaultLimit < 1 {
+		defaultLimit = DefaultPageLimit
+	}
+	maxLimit := getEnvAsInt("PVMBG_MAX_PAGE_LIMIT", MaxPageLimit)
+	if maxLimit < 1 {
+		maxLimit = MaxPageLimit
+	}
+	if defaultLimit > maxLimit {
+		defaultLimit = maxLimit
+	}
+
 	logLevel := os.Getenv("LOG_LEVEL")
 	if logLevel == "" {
 		logLevel = "info"
 	}
 
 	return &Config{
-		Port:           port,
-		BearerToken:    bearerToken,
-		DelayMinMs:     delayMinMs,
-		DelayMaxMs:     delayMaxMs,
-		EventIntervalS: eventIntervalS,
-		LogLevel:       logLevel,
+		Port:             port,
+		BearerToken:      bearerToken,
+		DelayMinMs:       delayMinMs,
+		DelayMaxMs:       delayMaxMs,
+		EventIntervalS:   eventIntervalS,
+		DefaultPageLimit: defaultLimit,
+		MaxPageLimit:     maxLimit,
+		LogLevel:         logLevel,
 	}
 }
 

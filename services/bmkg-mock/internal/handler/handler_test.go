@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -17,12 +18,14 @@ import (
 
 func setupTestApp() (*handler.Handler, store.Store, *config.Config) {
 	cfg := &config.Config{
-		Port:           "8081",
-		APIKey:         "test-bmkg-key",
-		DelayMinMs:     10,
-		DelayMaxMs:     30,
-		EventIntervalS: 1,
-		LogLevel:       "disabled",
+		Port:             "8081",
+		APIKey:           "test-bmkg-key",
+		DelayMinMs:       10,
+		DelayMaxMs:       30,
+		EventIntervalS:   1,
+		DefaultPageLimit: config.DefaultPageLimit,
+		MaxPageLimit:     config.MaxPageLimit,
+		LogLevel:         "disabled",
 	}
 	memStore := store.NewMemoryStore()
 	seed.PopulateSeeds(memStore)
@@ -244,5 +247,202 @@ func TestHealthHasNoLatency(t *testing.T) {
 	elapsed := time.Since(start)
 	if elapsed >= time.Duration(cfg.DelayMinMs)*time.Millisecond {
 		t.Errorf("expected no latency on /health, but took %v (min delay is %dms)", elapsed, cfg.DelayMinMs)
+	}
+}
+
+func TestSeismicEventsPaginationLimit(t *testing.T) {
+	h, _, cfg := setupTestApp()
+	router := h.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/seismic-events?limit=5", nil)
+	req.Header.Set("X-BMKG-Key", cfg.APIKey)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	var events []model.SeismicEvent
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("failed to decode seismic events: %v", err)
+	}
+	if len(events) != 5 {
+		t.Errorf("expected exactly 5 events, got %d", len(events))
+	}
+}
+
+func TestSeismicEventsLimitValidation(t *testing.T) {
+	h, _, cfg := setupTestApp()
+	router := h.Routes()
+
+	tests := []struct {
+		name  string
+		limit string
+	}{
+		{"zero", "0"},
+		{"negative", "-1"},
+		{"non-integer", "abc"},
+		{"float", "5.5"},
+		{"empty-after-zero", "0"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/seismic-events?limit="+tc.limit, nil)
+			req.Header.Set("X-BMKG-Key", cfg.APIKey)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 for limit=%s, got %d", tc.limit, rec.Code)
+			}
+
+			var errResp map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+				t.Fatalf("failed to decode error response: %v", err)
+			}
+			if errResp["error"] == "" {
+				t.Error("expected non-empty error message in response body")
+			}
+		})
+	}
+}
+
+func TestSeismicEventsLimitClamping(t *testing.T) {
+	h, memStore, cfg := setupTestApp()
+	router := h.Routes()
+
+	for i := 0; i < 90; i++ {
+		memStore.AddSeismicEvent(model.SeismicEvent{
+			EventID:    fmt.Sprintf("evt-extra-%04d", i),
+			OccurredAt: time.Now().Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/seismic-events?limit=9999", nil)
+	req.Header.Set("X-BMKG-Key", cfg.APIKey)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	var events []model.SeismicEvent
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("failed to decode seismic events: %v", err)
+	}
+	if len(events) != config.MaxPageLimit {
+		t.Errorf("expected %d events (clamped to MAX_PAGE_LIMIT), got %d", config.MaxPageLimit, len(events))
+	}
+}
+
+func TestSeismicEventsDefaultLimit(t *testing.T) {
+	h, memStore, cfg := setupTestApp()
+	router := h.Routes()
+
+	for i := 0; i < 90; i++ {
+		memStore.AddSeismicEvent(model.SeismicEvent{
+			EventID:    fmt.Sprintf("evt-extra-%04d", i),
+			OccurredAt: time.Now().Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/seismic-events", nil)
+	req.Header.Set("X-BMKG-Key", cfg.APIKey)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	var events []model.SeismicEvent
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("failed to decode seismic events: %v", err)
+	}
+	if len(events) > config.DefaultPageLimit {
+		t.Errorf("expected at most %d events (DEFAULT_PAGE_LIMIT), got %d", config.DefaultPageLimit, len(events))
+	}
+	if len(events) < 20 {
+		t.Errorf("expected at least 20 seeded events, got %d", len(events))
+	}
+}
+
+func TestTsunamiWarningsPaginationLimit(t *testing.T) {
+	h, _, cfg := setupTestApp()
+	router := h.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/tsunami-warnings?limit=2", nil)
+	req.Header.Set("X-BMKG-Key", cfg.APIKey)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	var warnings []model.TsunamiWarning
+	if err := json.Unmarshal(rec.Body.Bytes(), &warnings); err != nil {
+		t.Fatalf("failed to decode tsunami warnings: %v", err)
+	}
+	if len(warnings) != 2 {
+		t.Errorf("expected exactly 2 warnings, got %d", len(warnings))
+	}
+}
+
+func TestTsunamiWarningsLimitValidation(t *testing.T) {
+	h, _, cfg := setupTestApp()
+	router := h.Routes()
+
+	tests := []struct {
+		name  string
+		limit string
+	}{
+		{"zero", "0"},
+		{"negative", "-1"},
+		{"non-integer", "abc"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/tsunami-warnings?limit="+tc.limit, nil)
+			req.Header.Set("X-BMKG-Key", cfg.APIKey)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 for limit=%s, got %d", tc.limit, rec.Code)
+			}
+		})
+	}
+}
+
+func TestSeismicEventsChronologicalOrder(t *testing.T) {
+	h, _, cfg := setupTestApp()
+	router := h.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/seismic-events", nil)
+	req.Header.Set("X-BMKG-Key", cfg.APIKey)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	var events []model.SeismicEvent
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("failed to decode seismic events: %v", err)
+	}
+
+	for i := 1; i < len(events); i++ {
+		prev, _ := time.Parse(time.RFC3339, events[i-1].OccurredAt)
+		curr, _ := time.Parse(time.RFC3339, events[i].OccurredAt)
+		if curr.Before(prev) {
+			t.Errorf("events not in chronological order: event %d (%s) before event %d (%s)",
+				i, events[i].OccurredAt, i-1, events[i-1].OccurredAt)
+		}
 	}
 }
