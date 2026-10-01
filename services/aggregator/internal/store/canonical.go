@@ -41,6 +41,8 @@ type UpsertRequest struct {
 	CorrelationID string
 }
 
+const defaultQueryLimit = 1000
+
 type EventFilter struct {
 	HazardType string
 	HazardID   string
@@ -190,11 +192,12 @@ func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]haz
 		argIdx++
 	}
 	query += " ORDER BY occurred_at DESC"
-	if filter.Limit > 0 {
-		query += " LIMIT $" + strconv.Itoa(argIdx)
-		args = append(args, filter.Limit)
-		argIdx++
+	if filter.Limit <= 0 {
+		filter.Limit = defaultQueryLimit
 	}
+	query += " LIMIT $" + strconv.Itoa(argIdx)
+	args = append(args, filter.Limit)
+	argIdx++
 
 	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {

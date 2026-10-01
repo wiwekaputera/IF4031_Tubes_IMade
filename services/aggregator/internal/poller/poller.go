@@ -36,7 +36,7 @@ type Poller struct {
 	pvmbgClient *http.Client
 	breaker     *circuitbreaker.Breaker
 	logger      zerolog.Logger
-	mu          sync.Mutex
+	mu          sync.RWMutex
 	health      *SourceHealth
 }
 
@@ -57,8 +57,8 @@ func New(cfg *config.Config, norm *normalizer.Normalizer, repo store.CanonicalRe
 }
 
 func (p *Poller) Health() *SourceHealth {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	h := *p.health
 	return &h
 }

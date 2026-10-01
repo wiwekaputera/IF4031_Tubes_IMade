@@ -51,13 +51,32 @@ func parseLimit(limitStr string, defaultLimit, maxLimit int) (int, bool) {
 	return limit, true
 }
 
-// writeLimitError responds with a 400 for an invalid limit parameter.
-func writeLimitError(w http.ResponseWriter, maxLimit int) {
+// writeJSON encodes v as JSON with the given status code. Encode errors are
+// logged rather than silently discarded.
+func (h *Handler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error": fmt.Sprintf("invalid 'limit' parameter: must be a positive integer between 1 and %d", maxLimit),
-	})
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		h.logger.Error().Err(err).Msg("failed to encode JSON response")
+	}
+}
+
+// parseSinceParam extracts and validates the 'since' query parameter.
+// Returns the parsed time and true on success (nil, true when since is absent).
+// Returns nil and false on invalid input.
+func parseSinceParam(r *http.Request) (*time.Time, bool) {
+	sinceParam := r.URL.Query().Get("since")
+	if sinceParam == "" {
+		return nil, true
+	}
+	t, err := time.Parse(time.RFC3339, sinceParam)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, sinceParam)
+	}
+	if err != nil {
+		return nil, false
+	}
+	return &t, true
 }
 
 // Health handles GET /health without requiring authentication (no simulated latency).
@@ -66,9 +85,7 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "UP"})
+	h.writeJSON(w, http.StatusOK, map[string]string{"status": "UP"})
 }
 
 // GetVolcanicReports handles GET /volcanic-reports?since=<ISO8601>&limit=<int>.
@@ -83,27 +100,19 @@ func (h *Handler) GetVolcanicReports(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var sinceTime *time.Time
-	sinceParam := r.URL.Query().Get("since")
-	if sinceParam != "" {
-		t, err := time.Parse(time.RFC3339, sinceParam)
-		if err != nil {
-			t, err = time.Parse(time.RFC3339Nano, sinceParam)
-		}
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "invalid ISO 8601 'since' timestamp, expected RFC3339 format (e.g. 2026-09-22T20:00:00Z)",
-			})
-			return
-		}
-		sinceTime = &t
+	sinceTime, ok := parseSinceParam(r)
+	if !ok {
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid ISO 8601 'since' timestamp, expected RFC3339 format (e.g. 2026-09-22T20:00:00Z)",
+		})
+		return
 	}
 
 	limit, ok := parseLimit(r.URL.Query().Get("limit"), h.cfg.DefaultPageLimit, h.cfg.MaxPageLimit)
 	if !ok {
-		writeLimitError(w, h.cfg.MaxPageLimit)
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("invalid 'limit' parameter: must be a positive integer between 1 and %d", h.cfg.MaxPageLimit),
+		})
 		return
 	}
 
@@ -124,17 +133,13 @@ func (h *Handler) GetVolcanicReports(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(reports)
+	h.writeJSON(w, http.StatusOK, reports)
 }
 
 // ToggleOutage handles POST /admin/outage — toggles the outage state.
 func (h *Handler) ToggleOutage(w http.ResponseWriter, r *http.Request) {
 	state := h.outage.Toggle()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message": "outage toggled",
 		"outage":  state,
 	})
@@ -144,9 +149,7 @@ func (h *Handler) ToggleOutage(w http.ResponseWriter, r *http.Request) {
 // confidence_level appears in volcanic report responses.
 func (h *Handler) ToggleSchemaVersion(w http.ResponseWriter, r *http.Request) {
 	state := h.schemaVersion.Toggle()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message":          "schema version toggled",
 		"confidence_level": state,
 	})

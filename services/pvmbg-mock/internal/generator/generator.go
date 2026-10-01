@@ -81,11 +81,6 @@ func (g *Generator) generateReport() {
 	vt := volcanoTemplates[g.rng.Intn(len(volcanoTemplates))]
 	alertLevel := vt.alerts[g.rng.Intn(len(vt.alerts))]
 
-	latJitter := (g.rng.Float64() - 0.5) * 0.04
-	lonJitter := (g.rng.Float64() - 0.5) * 0.04
-	_ = math.Round((vt.lat+latJitter)*10000) / 10000
-	_ = math.Round((vt.lon+lonJitter)*10000) / 10000
-
 	var eruptionCount int
 	var ashHeight float64
 	switch alertLevel {

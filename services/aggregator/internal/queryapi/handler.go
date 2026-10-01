@@ -18,6 +18,29 @@ type Handler struct {
 	sourceHealthFunc SourceHealthFunc
 }
 
+func (h *Handler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		h.logger.Error().Err(err).Msg("failed to encode JSON response")
+	}
+}
+
+func parseSinceParam(r *http.Request) (*time.Time, bool) {
+	sinceParam := r.URL.Query().Get("since")
+	if sinceParam == "" {
+		return nil, true
+	}
+	t, err := time.Parse(time.RFC3339, sinceParam)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, sinceParam)
+	}
+	if err != nil {
+		return nil, false
+	}
+	return &t, true
+}
+
 func New(repo store.CanonicalRepo, logger zerolog.Logger, healthFn SourceHealthFunc) *Handler {
 	return &Handler{
 		repo:             repo,
@@ -37,8 +60,7 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(healthResponse{
+	h.writeJSON(w, http.StatusOK, healthResponse{
 		Status: "UP",
 		Time:   time.Now().UTC().Format(time.RFC3339),
 	})
@@ -64,18 +86,23 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 			filter.Limit = lim
 		}
 	}
-	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
-		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
-			filter.Since = &t
-		}
+
+	sinceTime, ok := parseSinceParam(r)
+	if !ok {
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid ISO 8601 'since' timestamp, expected RFC3339 format",
+		})
+		return
+	}
+	if sinceTime != nil {
+		filter.Since = sinceTime
 	}
 
 	ctx := r.Context()
 	events, err := h.repo.GetEvents(ctx, filter)
 	if err != nil {
 		h.logger.Error().Err(err).Msg("failed to fetch events")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
+		h.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 		return
 	}
 
@@ -123,8 +150,7 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		resp.Meta["sources"] = sources
 	}
 
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	h.writeJSON(w, http.StatusOK, resp)
 }
 
 func Routes(h *Handler) http.Handler {

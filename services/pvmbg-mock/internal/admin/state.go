@@ -15,9 +15,12 @@ func NewOutageState() *OutageState {
 
 // Toggle flips the outage state and returns the new value.
 func (s *OutageState) Toggle() bool {
-	cur := s.active.Load()
-	s.active.Store(!cur)
-	return !cur
+	for {
+		cur := s.active.Load()
+		if s.active.CompareAndSwap(cur, !cur) {
+			return !cur
+		}
+	}
 }
 
 // IsActive returns whether outage is currently active.
@@ -38,9 +41,12 @@ func NewSchemaVersionState() *SchemaVersionState {
 
 // Toggle flips the schema version state and returns the new value.
 func (s *SchemaVersionState) Toggle() bool {
-	cur := s.enabled.Load()
-	s.enabled.Store(!cur)
-	return !cur
+	for {
+		cur := s.enabled.Load()
+		if s.enabled.CompareAndSwap(cur, !cur) {
+			return !cur
+		}
+	}
 }
 
 // IsEnabled returns whether the schema version toggle is currently enabled.

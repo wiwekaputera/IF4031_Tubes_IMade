@@ -14,7 +14,7 @@ const (
 )
 
 type Breaker struct {
-	mu              sync.Mutex
+	mu              sync.RWMutex
 	state           State
 	failureCount    int
 	threshold       int
@@ -31,8 +31,8 @@ func New(threshold int, probeInterval time.Duration) *Breaker {
 }
 
 func (b *Breaker) State() State {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	return b.state
 }
 

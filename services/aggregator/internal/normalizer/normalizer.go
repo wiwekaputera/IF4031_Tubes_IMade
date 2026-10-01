@@ -2,6 +2,8 @@ package normalizer
 
 import (
 	"encoding/json"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +15,7 @@ import (
 
 type Normalizer struct {
 	logger      zerolog.Logger
+	mu          sync.RWMutex
 	volcanoRefs map[string]store.VolcanoReference
 }
 
@@ -24,7 +27,9 @@ func New(logger zerolog.Logger, volcanoRefs map[string]store.VolcanoReference) *
 }
 
 func (n *Normalizer) UpdateVolcanoRefs(refs map[string]store.VolcanoReference) {
+	n.mu.Lock()
 	n.volcanoRefs = refs
+	n.mu.Unlock()
 }
 
 func (n *Normalizer) NormalizeSeismic(event agency.SeismicEvent, warning *agency.TsunamiWarning) store.UpsertRequest {
@@ -37,7 +42,11 @@ func (n *Normalizer) NormalizeSeismic(event agency.SeismicEvent, warning *agency
 		attributes["tsunami_warning"] = warning
 	}
 
-	occurredAt, _ := time.Parse(time.RFC3339, event.OccurredAt)
+	occurredAt, err := time.Parse(time.RFC3339, event.OccurredAt)
+	if err != nil {
+		n.logger.Warn().Err(err).Str("event_id", event.EventID).Msg("failed to parse occurred_at, falling back to now")
+		occurredAt = time.Time{}
+	}
 	if occurredAt.IsZero() {
 		occurredAt = time.Now().UTC()
 	}
@@ -68,7 +77,10 @@ func (n *Normalizer) NormalizeSeismic(event agency.SeismicEvent, warning *agency
 
 func (n *Normalizer) NormalizeVolcanic(report agency.VolcanicReport) store.UpsertRequest {
 	volcanoID := report.VolcanoID
+
+	n.mu.RLock()
 	ref, ok := n.volcanoRefs[volcanoID]
+	n.mu.RUnlock()
 
 	var areaName string
 	var lat, lon float64
@@ -77,7 +89,7 @@ func (n *Normalizer) NormalizeVolcanic(report agency.VolcanicReport) store.Upser
 		lat = ref.Latitude
 		lon = ref.Longitude
 	} else {
-		areaName = "Unknown (volcano_id: " + volcanoID + ")"
+		areaName = fmt.Sprintf("Unknown (volcano_id: %s)", volcanoID)
 		lat = 0.0
 		lon = 0.0
 		n.logger.Warn().Str("volcano_id", volcanoID).Msg("volcano_id not found in reference table")
@@ -101,7 +113,11 @@ func (n *Normalizer) NormalizeVolcanic(report agency.VolcanicReport) store.Upser
 		}
 	}
 
-	occurredAt, _ := time.Parse(time.RFC3339, report.ReportedAt)
+	occurredAt, err := time.Parse(time.RFC3339, report.ReportedAt)
+	if err != nil {
+		n.logger.Warn().Err(err).Str("report_id", report.ReportID).Msg("failed to parse reported_at, falling back to now")
+		occurredAt = time.Time{}
+	}
 	if occurredAt.IsZero() {
 		occurredAt = time.Now().UTC()
 	}

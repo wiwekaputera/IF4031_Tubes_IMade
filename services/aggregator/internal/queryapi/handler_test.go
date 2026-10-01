@@ -517,3 +517,45 @@ func TestGetEvents_RepoError(t *testing.T) {
 		t.Errorf("expected 500, got %d", w.Code)
 	}
 }
+
+func TestGetEvents_InvalidSinceReturns400(t *testing.T) {
+	repo := &fakeQueryRepo{events: testEvents()}
+	h := New(repo, zerolog.Nop(), nil)
+
+	for _, sinceParam := range []string{"not-a-timestamp", "2026-13-45T99:99:99Z", "yesterday"} {
+		req := httptest.NewRequest(http.MethodGet, "/internal/events?since="+sinceParam, nil)
+		w := httptest.NewRecorder()
+		h.GetEvents(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("since=%q: expected 400, got %d", sinceParam, w.Code)
+		}
+
+		var errResp map[string]string
+		if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+			t.Fatalf("since=%q: failed to decode error response: %v", sinceParam, err)
+		}
+		if errResp["error"] != "invalid ISO 8601 'since' timestamp, expected RFC3339 format" {
+			t.Errorf("since=%q: expected error message, got %q", sinceParam, errResp["error"])
+		}
+	}
+}
+
+func TestGetEvents_ValidSinceParses(t *testing.T) {
+	repo := &fakeQueryRepo{events: testEvents()}
+	h := New(repo, zerolog.Nop(), nil)
+
+	sinceStr := "2026-09-21T10:30:00Z"
+	req := httptest.NewRequest(http.MethodGet, "/internal/events?since="+sinceStr, nil)
+	w := httptest.NewRecorder()
+	h.GetEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	wantSince, _ := time.Parse(time.RFC3339, sinceStr)
+	if got := repo.lastFilterCopy().Since; got == nil || !got.Equal(wantSince) {
+		t.Errorf("filter.Since = %v, want ~%v", got, wantSince)
+	}
+}

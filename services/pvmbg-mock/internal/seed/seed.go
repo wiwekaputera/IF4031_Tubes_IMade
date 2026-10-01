@@ -3,7 +3,6 @@ package seed
 import (
 	_ "embed"
 	"encoding/json"
-	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/model"
@@ -21,10 +20,8 @@ func PopulateSeeds(s store.Store) {
 		log.Fatal().Err(err).Msg("failed to unmarshal embedded volcanic seed data")
 	}
 
-	now := time.Now().UTC()
 	for _, rpt := range reports {
 		rpt.ConfidenceLevel = nil
 		s.AddVolcanicReport(rpt)
 	}
-	_ = now
 }
