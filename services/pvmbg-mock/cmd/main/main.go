@@ -41,7 +41,7 @@ func main() {
 		Int("event_interval_s", cfg.EventIntervalS).
 		Msg("Starting pvmbg-mock service")
 
-	memStore := store.NewMemoryStore()
+	memStore := store.NewMemoryStore(cfg.StoreMaxCapacity)
 	seed.PopulateSeeds(memStore)
 
 	seedCount := memStore.Count()

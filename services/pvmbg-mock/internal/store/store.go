@@ -26,14 +26,24 @@ type storedVolcanicReport struct {
 // kept in chronological (ascending reportedAt) order, so read paths can locate
 // records with a binary search and never need to sort a copy or re-parse
 // timestamps.
+//
+// The collection is bounded by maxCapacity: the newest maxCapacity records are
+// retained in a sliding window, evicting the oldest records from the head on
+// every overflow, so memory usage stays strictly capped.
 type MemoryStore struct {
 	mu              sync.RWMutex
+	maxCapacity     int
 	volcanicReports []storedVolcanicReport
 }
 
-// NewMemoryStore creates a new instance of MemoryStore.
-func NewMemoryStore() *MemoryStore {
+// NewMemoryStore creates a new instance of MemoryStore bounded to maxCapacity
+// records. Values below 1 are clamped to 1.
+func NewMemoryStore(maxCapacity int) *MemoryStore {
+	if maxCapacity < 1 {
+		maxCapacity = 1
+	}
 	return &MemoryStore{
+		maxCapacity:     maxCapacity,
 		volcanicReports: make([]storedVolcanicReport, 0),
 	}
 }
@@ -52,6 +62,8 @@ func (s *MemoryStore) AddVolcanicReport(rpt model.VolcanicReport) {
 	s.volcanicReports = append(s.volcanicReports, storedVolcanicReport{})
 	copy(s.volcanicReports[idx+1:], s.volcanicReports[idx:])
 	s.volcanicReports[idx] = storedVolcanicReport{report: rpt, reportedAt: reportedAt}
+
+	s.volcanicReports = evictOldest(s.volcanicReports, s.maxCapacity)
 }
 
 // GetVolcanicReports retrieves volcanic reports reported on or after 'since'.
@@ -95,4 +107,21 @@ func parseTimestamp(s string) (time.Time, error) {
 		t, err = time.Parse(time.RFC3339Nano, s)
 	}
 	return t, err
+}
+
+// evictOldest enforces the sliding-window retention cap on a chronologically
+// (ascending) ordered slice. It zeroes the dropped head elements so that any
+// slices or pointers they reference can be garbage-collected, then reslices to
+// keep the newest maxCapacity records. When len(slice) <= maxCapacity the slice
+// is returned unchanged.
+func evictOldest[T any](slice []T, maxCapacity int) []T {
+	if len(slice) <= maxCapacity {
+		return slice
+	}
+	drop := len(slice) - maxCapacity
+	for i := 0; i < drop; i++ {
+		var zero T
+		slice[i] = zero
+	}
+	return slice[drop:]
 }

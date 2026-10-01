@@ -43,7 +43,7 @@ func main() {
 		Msg("Starting bmkg-mock service")
 
 	// 3. Initialize in-memory store and populate historical seed data
-	memStore := store.NewMemoryStore()
+	memStore := store.NewMemoryStore(cfg.StoreMaxCapacity)
 	seed.PopulateSeeds(memStore)
 
 	seismicCount, tsunamiCount := memStore.Count()

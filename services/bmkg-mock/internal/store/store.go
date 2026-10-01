@@ -34,15 +34,25 @@ type warningRecord struct {
 // warnings. Both collections are kept in chronological (ascending occurredAt)
 // order, so read paths can locate records with a binary search and never need to
 // sort a copy or re-parse timestamps.
+//
+// Each collection is bounded by maxCapacity: the newest maxCapacity records are
+// retained in a sliding window, evicting the oldest records from the head on
+// every overflow, so memory usage stays strictly capped.
 type MemoryStore struct {
 	mu             sync.RWMutex
+	maxCapacity    int
 	seismicEvents  []storedSeismicEvent
 	tsunamiRecords []warningRecord
 }
 
-// NewMemoryStore creates a new instance of MemoryStore.
-func NewMemoryStore() *MemoryStore {
+// NewMemoryStore creates a new instance of MemoryStore bounded to maxCapacity
+// records. Values below 1 are clamped to 1.
+func NewMemoryStore(maxCapacity int) *MemoryStore {
+	if maxCapacity < 1 {
+		maxCapacity = 1
+	}
 	return &MemoryStore{
+		maxCapacity:    maxCapacity,
 		seismicEvents:  make([]storedSeismicEvent, 0),
 		tsunamiRecords: make([]warningRecord, 0),
 	}
@@ -62,6 +72,8 @@ func (s *MemoryStore) AddSeismicEvent(evt model.SeismicEvent) {
 	s.seismicEvents = append(s.seismicEvents, storedSeismicEvent{})
 	copy(s.seismicEvents[idx+1:], s.seismicEvents[idx:])
 	s.seismicEvents[idx] = storedSeismicEvent{event: evt, occurredAt: occurredAt}
+
+	s.seismicEvents = evictOldest(s.seismicEvents, s.maxCapacity)
 }
 
 // GetSeismicEvents retrieves seismic events occurred on or after 'since'.
@@ -115,6 +127,8 @@ func (s *MemoryStore) AddTsunamiWarning(warn model.TsunamiWarning, occurredAt ti
 	s.tsunamiRecords = append(s.tsunamiRecords, warningRecord{})
 	copy(s.tsunamiRecords[idx+1:], s.tsunamiRecords[idx:])
 	s.tsunamiRecords[idx] = rec
+
+	s.tsunamiRecords = evictOldest(s.tsunamiRecords, s.maxCapacity)
 }
 
 // GetTsunamiWarnings retrieves tsunami warnings matching the 'since' filter.
@@ -160,4 +174,21 @@ func parseTimestamp(s string) (time.Time, error) {
 		t, err = time.Parse(time.RFC3339Nano, s)
 	}
 	return t, err
+}
+
+// evictOldest enforces the sliding-window retention cap on a chronologically
+// (ascending) ordered slice. It zeroes the dropped head elements so that any
+// slices or pointers they reference can be garbage-collected, then reslices to
+// keep the newest maxCapacity records. When len(slice) <= maxCapacity the slice
+// is returned unchanged.
+func evictOldest[T any](slice []T, maxCapacity int) []T {
+	if len(slice) <= maxCapacity {
+		return slice
+	}
+	drop := len(slice) - maxCapacity
+	for i := 0; i < drop; i++ {
+		var zero T
+		slice[i] = zero
+	}
+	return slice[drop:]
 }

@@ -32,7 +32,7 @@ func setupTestApp() (*handler.Handler, store.Store, *config.Config, *admin.Outag
 		MaxPageLimit:     config.MaxPageLimit,
 		LogLevel:         "disabled",
 	}
-	memStore := store.NewMemoryStore()
+	memStore := store.NewMemoryStore(config.MaxStoreCapacity)
 	seed.PopulateSeeds(memStore)
 	outage := admin.NewOutageState()
 	schemaVersion := admin.NewSchemaVersionState()

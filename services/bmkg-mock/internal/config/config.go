@@ -11,6 +11,17 @@ const DefaultPageLimit = 50
 // MaxPageLimit is the hard ceiling to prevent clients from requesting huge pages.
 const MaxPageLimit = 100
 
+// MaxStoreCapacity is the default upper bound on the number of events retained in
+// the in-memory store. At ~5,000 records this retains under 1 MB of RAM while
+// keeping the store well above the initial seed count (≥20 records) so that seed
+// data is never prematurely evicted at startup.
+const MaxStoreCapacity = 5000
+
+// MinStoreCapacity is the smallest retention capacity allowed via configuration.
+// It is intentionally larger than the seed count so historical seed records remain
+// available until dynamically generated events displace them over many ticks.
+const MinStoreCapacity = 20
+
 // Config holds the runtime configuration parameters for the bmkg-mock service.
 type Config struct {
 	Port             string
@@ -18,6 +29,7 @@ type Config struct {
 	DelayMinMs       int
 	DelayMaxMs       int
 	EventIntervalS   int
+	StoreMaxCapacity int
 	DefaultPageLimit int
 	MaxPageLimit     int
 	LogLevel         string
@@ -55,6 +67,11 @@ func Load() *Config {
 		defaultLimit = maxLimit
 	}
 
+	storeMaxCapacity := getEnvAsInt("STORE_MAX_CAPACITY", MaxStoreCapacity)
+	if storeMaxCapacity < MinStoreCapacity {
+		storeMaxCapacity = MaxStoreCapacity
+	}
+
 	logLevel := os.Getenv("LOG_LEVEL")
 	if logLevel == "" {
 		logLevel = "info"
@@ -66,6 +83,7 @@ func Load() *Config {
 		DelayMinMs:       delayMinMs,
 		DelayMaxMs:       delayMaxMs,
 		EventIntervalS:   eventIntervalS,
+		StoreMaxCapacity: storeMaxCapacity,
 		DefaultPageLimit: defaultLimit,
 		MaxPageLimit:     maxLimit,
 		LogLevel:         logLevel,

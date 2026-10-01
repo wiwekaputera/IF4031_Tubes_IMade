@@ -27,7 +27,7 @@ func setupTestApp() (*handler.Handler, store.Store, *config.Config) {
 		MaxPageLimit:     config.MaxPageLimit,
 		LogLevel:         "disabled",
 	}
-	memStore := store.NewMemoryStore()
+	memStore := store.NewMemoryStore(config.MaxStoreCapacity)
 	seed.PopulateSeeds(memStore)
 	logger := zerolog.Nop()
 	h := handler.NewHandler(memStore, cfg, logger)
