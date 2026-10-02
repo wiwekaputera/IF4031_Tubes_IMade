@@ -21,8 +21,10 @@ import (
 )
 
 func main() {
+	// 1. Load runtime configuration
 	cfg := config.Load()
 
+	// 2. Initialize structured logging
 	zerolog.TimeFieldFormat = time.RFC3339Nano
 	logLevel, err := zerolog.ParseLevel(strings.ToLower(cfg.LogLevel))
 	if err != nil {
@@ -43,6 +45,7 @@ func main() {
 		Str("nats_url", cfg.NATSURL).
 		Msg("Starting aggregator service")
 
+	// 3. Connect to canonical PostgreSQL store via connection pool
 	dbPool, err := pgxpool.New(context.Background(), cfg.DBDSN)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
@@ -57,6 +60,7 @@ func main() {
 
 	repo := store.NewPostgresRepo(dbPool, logger)
 
+	// 4. Load static volcano references for normalizer lookups
 	volcanoRefs, err := repo.GetVolcanoReferences(ctx)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to load volcano references, using empty map")
@@ -64,8 +68,8 @@ func main() {
 	}
 	logger.Info().Int("volcano_count", len(volcanoRefs)).Msg("Loaded volcano references")
 
+	// 5. Initialize normalizer, poller, and query API handlers
 	norm := normalizer.New(logger, volcanoRefs)
-
 	p := poller.New(cfg, norm, repo, logger)
 
 	healthFn := func() (string, string, *time.Time) {
@@ -80,6 +84,7 @@ func main() {
 
 	h := queryapi.New(repo, logger, healthFn)
 
+	// 6. Start background polling loop for upstream agencies (BMKG & PVMBG)
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -87,6 +92,7 @@ func main() {
 	wg.Add(1)
 	go poller.StartPolling(ctx, &wg, p, cfg, logger)
 
+	// 7. Initialize HTTP server for internal query API
 	addr := cfg.Port
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
@@ -101,6 +107,7 @@ func main() {
 		}
 	}()
 
+	// 8. Graceful shutdown on SIGINT or SIGTERM
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
@@ -111,9 +118,11 @@ func main() {
 		logger.Error().Err(err).Msg("Server encountered fatal error")
 	}
 
+	// Stop background polling workers and wait for in-flight cycles to finish
 	cancel()
 	wg.Wait()
 
+	// Shutdown HTTP server with 5s deadline
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 

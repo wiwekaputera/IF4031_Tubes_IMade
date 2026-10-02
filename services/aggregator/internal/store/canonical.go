@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,7 +42,10 @@ type UpsertRequest struct {
 	CorrelationID string
 }
 
-const defaultQueryLimit = 1000
+const (
+	defaultQueryLimit   = 1000
+	defaultQueryTimeout = 5 * time.Second
+)
 
 type EventFilter struct {
 	HazardType string
@@ -62,11 +66,24 @@ func NewPostgresRepo(db *pgxpool.Pool, logger zerolog.Logger) *PostgresRepo {
 	}
 }
 
+// withDefaultTimeout ensures queries never hang indefinitely if the parent context has no deadline.
+func withDefaultTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 func (r *PostgresRepo) HealthCheck(ctx context.Context) error {
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
 	return r.db.Ping(ctx)
 }
 
 func (r *PostgresRepo) GetVolcanoReferences(ctx context.Context) (map[string]VolcanoReference, error) {
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
 	rows, err := r.db.Query(ctx, `SELECT volcano_id, name, latitude, longitude FROM volcano_reference`)
 	if err != nil {
 		return nil, err
@@ -85,6 +102,16 @@ func (r *PostgresRepo) GetVolcanoReferences(ctx context.Context) (map[string]Vol
 }
 
 func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (string, error) {
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
+	if rec.Sources == nil {
+		rec.Sources = make(map[string]interface{})
+	}
+	if rec.Attributes == nil {
+		rec.Attributes = make(map[string]interface{})
+	}
+
 	sourcesJSON, err := json.Marshal(rec.Sources)
 	if err != nil {
 		return "", err
@@ -120,7 +147,6 @@ func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (stri
 		rec.AreaName, rec.Latitude, rec.Longitude, rec.OccurredAt,
 		sourcesJSON, attrsJSON,
 	).Scan(&storedHazardID, &version)
-
 	if err != nil {
 		return "", err
 	}
@@ -167,66 +193,75 @@ func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (stri
 }
 
 func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]hazard.HazardEvent, error) {
-	query := `
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
+	var q strings.Builder
+	q.Grow(256)
+	q.WriteString(`
 		SELECT hazard_id, source, source_ref_id, hazard_type, severity, area_name,
 			latitude, longitude, occurred_at, ingested_at, attributes
 		FROM canonical_events
 		WHERE true
-	`
-	args := []any{}
+	`)
+
+	args := make([]any, 0, 4)
 	argIdx := 1
 
 	if filter.HazardType != "" {
-		query += " AND hazard_type = $" + strconv.Itoa(argIdx)
+		q.WriteString(" AND hazard_type = $")
+		q.WriteString(strconv.Itoa(argIdx))
 		args = append(args, filter.HazardType)
 		argIdx++
 	}
 	if filter.HazardID != "" {
-		query += " AND hazard_id = $" + strconv.Itoa(argIdx)
+		q.WriteString(" AND hazard_id = $")
+		q.WriteString(strconv.Itoa(argIdx))
 		args = append(args, filter.HazardID)
 		argIdx++
 	}
 	if filter.Since != nil {
-		query += " AND occurred_at >= $" + strconv.Itoa(argIdx)
+		q.WriteString(" AND occurred_at >= $")
+		q.WriteString(strconv.Itoa(argIdx))
 		args = append(args, *filter.Since)
 		argIdx++
 	}
-	query += " ORDER BY occurred_at DESC"
+	q.WriteString(" ORDER BY occurred_at DESC")
 	if filter.Limit <= 0 {
 		filter.Limit = defaultQueryLimit
 	}
-	query += " LIMIT $" + strconv.Itoa(argIdx)
+	q.WriteString(" LIMIT $")
+	q.WriteString(strconv.Itoa(argIdx))
 	args = append(args, filter.Limit)
-	argIdx++
 
-	rows, err := r.db.Query(ctx, query, args...)
+	rows, err := r.db.Query(ctx, q.String(), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var events []hazard.HazardEvent
+	capacity := filter.Limit
+	if capacity > 128 {
+		capacity = 128
+	}
+	events := make([]hazard.HazardEvent, 0, capacity)
+
 	for rows.Next() {
 		var he hazard.HazardEvent
 		var occurredAt, ingestedAt time.Time
-		var attrs []byte
 		if err := rows.Scan(
 			&he.HazardID, &he.Source, &he.SourceRefID, &he.HazardType, &he.Severity,
-			&he.AreaName, &he.Latitude, &he.Longitude, &occurredAt, &ingestedAt, &attrs,
+			&he.AreaName, &he.Latitude, &he.Longitude, &occurredAt, &ingestedAt, &he.Attributes,
 		); err != nil {
 			return nil, err
 		}
 		he.OccurredAt = occurredAt.Format(time.RFC3339)
 		he.IngestedAt = ingestedAt.Format(time.RFC3339)
-		if len(attrs) > 0 {
-			if err := json.Unmarshal(attrs, &he.Attributes); err != nil {
-				return nil, err
-			}
+		if he.Attributes == nil {
+			he.Attributes = make(map[string]interface{})
 		}
 		events = append(events, he)
 	}
-	if len(events) == 0 {
-		return []hazard.HazardEvent{}, nil
-	}
+
 	return events, rows.Err()
 }
