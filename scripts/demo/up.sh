@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# up.sh — Build and start the Person A stack (bmkg-mock, pvmbg-mock,
+# up.sh — Build and start the ingestion pipeline stack (bmkg-mock, pvmbg-mock,
 # canonical-store, aggregator) and wait until every service reports
 # Docker "healthy". nats-jetstream is pulled in automatically as an
 # aggregator dependency.
@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# Person A services the demo exercises (canonical-store is the DB the
+# Core services the demo exercises (canonical-store is the DB the
 # aggregator writes to, so it is part of the readiness set).
 SERVICES=(bmkg-mock pvmbg-mock canonical-store aggregator)
 BUILD_TIMEOUT="${UP_BUILD_TIMEOUT:-300}"
@@ -53,7 +53,7 @@ wait_healthy() {
   return 1
 }
 
-log "Starting Person A stack (build may take a while on first run)..."
+log "Starting ingestion pipeline stack (build may take a while on first run)..."
 docker compose up -d --build --wait "${SERVICES[@]}" 2>/dev/null || \
   docker compose up -d --build "${SERVICES[@]}"
 
@@ -63,7 +63,7 @@ done
 
 log ""
 log "==================================================="
-log "  Person A stack is READY (all services healthy)"
+log "  Ingestion pipeline is READY (all services healthy)"
 log "  bmkg-mock       http://localhost:8081   (port 8081)"
 log "  pvmbg-mock      http://localhost:8082   (port 8082)"
 log "  aggregator      http://aggregator:8090  (internal_api_net only)"

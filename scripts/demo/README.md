@@ -1,22 +1,19 @@
-# Demo Scripts — Person A Stack Walkthrough
+# Demo Scripts — Upstream Ingestion & Aggregator Pipeline
 
-Self-contained, runnable evidence for the BMKG → aggregator → canonical-store
+Self-contained, runnable evidence for the BMKG / PVMBG → aggregator → canonical-store
 pipeline. The three scripts live in `scripts/demo/` and operate against the
 compose project defined in `docker-compose.yml` (`name: if4031-tubes-imade`).
 
 ## Prerequisites
 
 1. **Docker + Docker Compose** (Compose v2).
-2. **`.env` file** at the repo root. Copy from `.env.example` and set real
-   values. The demo reads `BMKG_API_KEY` and `PVMBG_BEARER_TOKEN` from it.
+2. **`.env` file** at the repo root. Copy from `.env.example`:
    ```bash
-   cp .env.example .env   # then edit the "change-me-*" values
+   cp .env.example .env
    ```
-   The shipped `.env` already contains working demo values
-   (`BMKG_API_KEY=test-bmkg-key`, `PVMBG_BEARER_TOKEN=test-pvmbg-token`,
-   `CANONICAL_STORE_POSTGRES_PASSWORD=password`).
-3. **`python3`** on the host — used only to assert on JSON responses
-   (jq is not required).
+   The demo reads `BMKG_API_KEY`, `PVMBG_BEARER_TOKEN`, and `AGGREGATOR_DB_DSN` from it.
+3. **`python3`** on the host — used by `smoke.sh` as a built-in JSON parser for
+   response assertions (avoids requiring external tools like `jq`).
 4. **Network access** on first run so Docker can pull `postgres:16-alpine`,
    `nats:2.10-alpine`, and `curlimages/curl:8.11.0` (cached after first use).
 5. No host port is published for the **aggregator** (it is on
@@ -53,7 +50,7 @@ Override the image with `CURL_IMG=...` if needed.
 [up] canonical-store is healthy
 [up] aggregator is healthy
 [up] ===================================================
-[up]   Person A stack is READY (all services healthy)
+[up]   Ingestion pipeline is READY (all services healthy)
 [up]   bmkg-mock       http://localhost:8081   (port 8081)
 [up]   pvmbg-mock      http://localhost:8082   (port 8082)
 [up]   aggregator      http://aggregator:8090  (internal_api_net only)

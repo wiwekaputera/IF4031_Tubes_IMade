@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smoke.sh — Exercise the Person A stack against a live `docker compose up`
+# smoke.sh — Exercise the ingestion pipeline stack against a live `docker compose up`
 # stack and assert the key endpoints respond correctly.
 #
 # The aggregator is built on a distroless image (no curl) and publishes no
