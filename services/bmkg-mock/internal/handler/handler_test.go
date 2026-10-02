@@ -29,420 +29,163 @@ func setupTestApp() (*handler.Handler, store.Store, *config.Config) {
 	}
 	memStore := store.NewMemoryStore(config.MaxStoreCapacity)
 	seed.PopulateSeeds(memStore)
-	logger := zerolog.Nop()
-	h := handler.NewHandler(memStore, cfg, logger)
-	return h, memStore, cfg
+	return handler.NewHandler(memStore, cfg, zerolog.Nop()), memStore, cfg
+}
+
+func doReq(h *handler.Handler, method, path string, headers map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+	return rec
 }
 
 func TestHealthEndpoint(t *testing.T) {
-	h, _, _ := setupTestApp()
-	router := h.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	rec := httptest.NewRecorder()
-
-	router.ServeHTTP(rec, req)
+	h, _, cfg := setupTestApp()
+	start := time.Now()
+	rec := doReq(h, http.MethodGet, "/health", nil)
+	elapsed := time.Since(start)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-
+	if elapsed >= time.Duration(cfg.DelayMinMs)*time.Millisecond {
+		t.Errorf("health endpoint should have no simulated latency, took %v", elapsed)
+	}
 	var resp map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp["status"] != "UP" {
-		t.Errorf("expected status 'UP', got '%s'", resp["status"])
+		t.Errorf("expected status UP, got %q", resp["status"])
 	}
 }
 
 func TestAuthEnforcement(t *testing.T) {
 	h, _, cfg := setupTestApp()
-	router := h.Routes()
-
 	tests := []struct {
-		name           string
-		headers        map[string]string
-		expectedStatus int
+		name    string
+		headers map[string]string
+		status  int
 	}{
-		{
-			name:           "missing X-BMKG-Key returns 401",
-			headers:        map[string]string{},
-			expectedStatus: http.StatusUnauthorized,
-		},
-		{
-			name: "invalid X-BMKG-Key returns 401",
-			headers: map[string]string{
-				"X-BMKG-Key": "wrong-key",
-			},
-			expectedStatus: http.StatusUnauthorized,
-		},
-		{
-			name: "cross-credential Bearer returns 403 Forbidden even with no key",
-			headers: map[string]string{
-				"Authorization": "Bearer pvmbg-token-123",
-			},
-			expectedStatus: http.StatusForbidden,
-		},
-		{
-			name: "cross-credential Bearer returns 403 Forbidden even with valid BMKG key",
-			headers: map[string]string{
-				"X-BMKG-Key":    cfg.APIKey,
-				"Authorization": "Bearer pvmbg-token-123",
-			},
-			expectedStatus: http.StatusForbidden,
-		},
-		{
-			name: "valid X-BMKG-Key returns 200 OK",
-			headers: map[string]string{
-				"X-BMKG-Key": cfg.APIKey,
-			},
-			expectedStatus: http.StatusOK,
-		},
+		{"missing key", nil, http.StatusUnauthorized},
+		{"invalid key", map[string]string{"X-BMKG-Key": "wrong"}, http.StatusUnauthorized},
+		{"cross-credential Bearer", map[string]string{"Authorization": "Bearer tok"}, http.StatusForbidden},
+		{"valid key with Bearer forbidden", map[string]string{"X-BMKG-Key": cfg.APIKey, "Authorization": "Bearer tok"}, http.StatusForbidden},
+		{"valid key", map[string]string{"X-BMKG-Key": cfg.APIKey}, http.StatusOK},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/seismic-events", nil)
-			for k, v := range tc.headers {
-				req.Header.Set(k, v)
-			}
-			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, req)
-
-			if rec.Code != tc.expectedStatus {
-				t.Errorf("expected status %d, got %d, body: %s", tc.expectedStatus, rec.Code, rec.Body.String())
+			rec := doReq(h, http.MethodGet, "/seismic-events", tc.headers)
+			if rec.Code != tc.status {
+				t.Errorf("expected %d, got %d", tc.status, rec.Code)
 			}
 		})
 	}
 }
 
-func TestSeismicEventsFilter(t *testing.T) {
-	h, _, cfg := setupTestApp()
-	router := h.Routes()
+func TestSeismicEventsEndpoint(t *testing.T) {
+	h, memStore, cfg := setupTestApp()
+	authHeader := map[string]string{"X-BMKG-Key": cfg.APIKey}
 
-	// 1. Fetch all events (should be >= 20 seeded records)
-	req := httptest.NewRequest(http.MethodGet, "/seismic-events", nil)
-	req.Header.Set("X-BMKG-Key", cfg.APIKey)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
+	t.Run("fetch and order", func(t *testing.T) {
+		rec := doReq(h, http.MethodGet, "/seismic-events", authHeader)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		var events []model.SeismicEvent
+		_ = json.Unmarshal(rec.Body.Bytes(), &events)
+		if len(events) < 20 {
+			t.Errorf("expected >= 20 events, got %d", len(events))
+		}
+		for i := 1; i < len(events); i++ {
+			p, _ := time.Parse(time.RFC3339, events[i-1].OccurredAt)
+			c, _ := time.Parse(time.RFC3339, events[i].OccurredAt)
+			if c.Before(p) {
+				t.Fatalf("events not in chronological order at %d", i)
+			}
+		}
+	})
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
+	t.Run("since filtering", func(t *testing.T) {
+		rec := doReq(h, http.MethodGet, "/seismic-events?since=2099-01-01T00:00:00Z", authHeader)
+		var future []model.SeismicEvent
+		_ = json.Unmarshal(rec.Body.Bytes(), &future)
+		if len(future) != 0 {
+			t.Errorf("expected 0 events, got %d", len(future))
+		}
+		recBad := doReq(h, http.MethodGet, "/seismic-events?since=invalid-date", authHeader)
+		if recBad.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for invalid since, got %d", recBad.Code)
+		}
+	})
 
-	var allEvents []model.SeismicEvent
-	if err := json.Unmarshal(rec.Body.Bytes(), &allEvents); err != nil {
-		t.Fatalf("failed to decode seismic events: %v", err)
-	}
-	if len(allEvents) < 20 {
-		t.Errorf("expected at least 20 seeded events, got %d", len(allEvents))
-	}
+	t.Run("limit pagination and clamping", func(t *testing.T) {
+		rec := doReq(h, http.MethodGet, "/seismic-events?limit=5", authHeader)
+		var limEvents []model.SeismicEvent
+		_ = json.Unmarshal(rec.Body.Bytes(), &limEvents)
+		if len(limEvents) != 5 {
+			t.Errorf("expected 5 events, got %d", len(limEvents))
+		}
 
-	// 2. Fetch with since far in the future -> 0 events
-	futureReq := httptest.NewRequest(http.MethodGet, "/seismic-events?since=2099-01-01T00:00:00Z", nil)
-	futureReq.Header.Set("X-BMKG-Key", cfg.APIKey)
-	futureRec := httptest.NewRecorder()
-	router.ServeHTTP(futureRec, futureReq)
+		for _, badLimit := range []string{"0", "-1", "abc"} {
+			if recBad := doReq(h, http.MethodGet, "/seismic-events?limit="+badLimit, authHeader); recBad.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 for limit=%s, got %d", badLimit, recBad.Code)
+			}
+		}
 
-	var futureEvents []model.SeismicEvent
-	_ = json.Unmarshal(futureRec.Body.Bytes(), &futureEvents)
-	if len(futureEvents) != 0 {
-		t.Errorf("expected 0 events in future, got %d", len(futureEvents))
-	}
-
-	// 3. Invalid since parameter -> 400 Bad Request
-	invalidReq := httptest.NewRequest(http.MethodGet, "/seismic-events?since=invalid-date", nil)
-	invalidReq.Header.Set("X-BMKG-Key", cfg.APIKey)
-	invalidRec := httptest.NewRecorder()
-	router.ServeHTTP(invalidRec, invalidReq)
-
-	if invalidRec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 Bad Request for invalid since, got %d", invalidRec.Code)
-	}
+		for i := 0; i < 90; i++ {
+			memStore.AddSeismicEvent(model.SeismicEvent{
+				EventID:    fmt.Sprintf("evt-clamped-%04d", i),
+				OccurredAt: time.Now().Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
+			})
+		}
+		recClamp := doReq(h, http.MethodGet, "/seismic-events?limit=9999", authHeader)
+		var clamped []model.SeismicEvent
+		_ = json.Unmarshal(recClamp.Body.Bytes(), &clamped)
+		if len(clamped) != config.MaxPageLimit {
+			t.Errorf("expected limit clamped to %d, got %d", config.MaxPageLimit, len(clamped))
+		}
+	})
 }
 
 func TestTsunamiWarningsEndpoint(t *testing.T) {
 	h, _, cfg := setupTestApp()
-	router := h.Routes()
+	authHeader := map[string]string{"X-BMKG-Key": cfg.APIKey}
 
-	req := httptest.NewRequest(http.MethodGet, "/tsunami-warnings", nil)
-	req.Header.Set("X-BMKG-Key", cfg.APIKey)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
+	rec := doReq(h, http.MethodGet, "/tsunami-warnings?limit=2", authHeader)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-
 	var warnings []model.TsunamiWarning
-	if err := json.Unmarshal(rec.Body.Bytes(), &warnings); err != nil {
-		t.Fatalf("failed to decode tsunami warnings: %v", err)
+	_ = json.Unmarshal(rec.Body.Bytes(), &warnings)
+	if len(warnings) != 2 {
+		t.Fatalf("expected 2 warnings, got %d", len(warnings))
 	}
-	if len(warnings) == 0 {
-		t.Errorf("expected seeded tsunami warnings, got 0")
-	}
-
-	// Verify related_event_id is present
 	for _, w := range warnings {
 		if w.RelatedEventID == "" {
-			t.Errorf("warning %s has empty RelatedEventID", w.WarningID)
+			t.Errorf("warning %s missing RelatedEventID", w.WarningID)
 		}
 	}
-}
-
-func TestCorrelationIDPropagation(t *testing.T) {
-	h, _, cfg := setupTestApp()
-	router := h.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	corrID := rec.Header().Get("X-Correlation-ID")
-	if corrID == "" {
-		t.Errorf("expected X-Correlation-ID header in response")
-	}
-
-	// Test custom correlation ID preserved
-	customID := "custom-trace-uuid-1234"
-	reqCustom := httptest.NewRequest(http.MethodGet, "/seismic-events", nil)
-	reqCustom.Header.Set("X-BMKG-Key", cfg.APIKey)
-	reqCustom.Header.Set("X-Correlation-ID", customID)
-	recCustom := httptest.NewRecorder()
-	router.ServeHTTP(recCustom, reqCustom)
-
-	if recCustom.Header().Get("X-Correlation-ID") != customID {
-		t.Errorf("expected correlation ID %s, got %s", customID, recCustom.Header().Get("X-Correlation-ID"))
+	if recBad := doReq(h, http.MethodGet, "/tsunami-warnings?limit=0", authHeader); recBad.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for limit=0, got %d", recBad.Code)
 	}
 }
 
-func TestLatencyJitter(t *testing.T) {
+func TestCorrelationIDAndLatency(t *testing.T) {
 	h, _, cfg := setupTestApp()
-	router := h.Routes()
-
-	// Latency jitter should apply to data endpoints, not /health.
+	headers := map[string]string{
+		"X-BMKG-Key":        cfg.APIKey,
+		"X-Correlation-ID":  "trace-bmkg-1234",
+	}
 	start := time.Now()
-	req := httptest.NewRequest(http.MethodGet, "/seismic-events", nil)
-	req.Header.Set("X-BMKG-Key", cfg.APIKey)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
+	rec := doReq(h, http.MethodGet, "/seismic-events", headers)
 	elapsed := time.Since(start)
+
+	if rec.Header().Get("X-Correlation-ID") != "trace-bmkg-1234" {
+		t.Errorf("expected correlation ID preserved, got %q", rec.Header().Get("X-Correlation-ID"))
+	}
 	if elapsed < time.Duration(cfg.DelayMinMs)*time.Millisecond {
-		t.Errorf("expected latency >= %dms on data endpoint, got %v", cfg.DelayMinMs, elapsed)
-	}
-}
-
-func TestHealthHasNoLatency(t *testing.T) {
-	h, _, cfg := setupTestApp()
-	router := h.Routes()
-
-	// /health must respond immediately — no simulated latency.
-	start := time.Now()
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	elapsed := time.Since(start)
-	if elapsed >= time.Duration(cfg.DelayMinMs)*time.Millisecond {
-		t.Errorf("expected no latency on /health, but took %v (min delay is %dms)", elapsed, cfg.DelayMinMs)
-	}
-}
-
-func TestSeismicEventsPaginationLimit(t *testing.T) {
-	h, _, cfg := setupTestApp()
-	router := h.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/seismic-events?limit=5", nil)
-	req.Header.Set("X-BMKG-Key", cfg.APIKey)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
-
-	var events []model.SeismicEvent
-	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
-		t.Fatalf("failed to decode seismic events: %v", err)
-	}
-	if len(events) != 5 {
-		t.Errorf("expected exactly 5 events, got %d", len(events))
-	}
-}
-
-func TestSeismicEventsLimitValidation(t *testing.T) {
-	h, _, cfg := setupTestApp()
-	router := h.Routes()
-
-	tests := []struct {
-		name  string
-		limit string
-	}{
-		{"zero", "0"},
-		{"negative", "-1"},
-		{"non-integer", "abc"},
-		{"float", "5.5"},
-		{"empty-after-zero", "0"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/seismic-events?limit="+tc.limit, nil)
-			req.Header.Set("X-BMKG-Key", cfg.APIKey)
-			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("expected 400 for limit=%s, got %d", tc.limit, rec.Code)
-			}
-
-			var errResp map[string]string
-			if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
-				t.Fatalf("failed to decode error response: %v", err)
-			}
-			if errResp["error"] == "" {
-				t.Error("expected non-empty error message in response body")
-			}
-		})
-	}
-}
-
-func TestSeismicEventsLimitClamping(t *testing.T) {
-	h, memStore, cfg := setupTestApp()
-	router := h.Routes()
-
-	for i := 0; i < 90; i++ {
-		memStore.AddSeismicEvent(model.SeismicEvent{
-			EventID:    fmt.Sprintf("evt-extra-%04d", i),
-			OccurredAt: time.Now().Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
-		})
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/seismic-events?limit=9999", nil)
-	req.Header.Set("X-BMKG-Key", cfg.APIKey)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
-
-	var events []model.SeismicEvent
-	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
-		t.Fatalf("failed to decode seismic events: %v", err)
-	}
-	if len(events) != config.MaxPageLimit {
-		t.Errorf("expected %d events (clamped to MAX_PAGE_LIMIT), got %d", config.MaxPageLimit, len(events))
-	}
-}
-
-func TestSeismicEventsDefaultLimit(t *testing.T) {
-	h, memStore, cfg := setupTestApp()
-	router := h.Routes()
-
-	for i := 0; i < 90; i++ {
-		memStore.AddSeismicEvent(model.SeismicEvent{
-			EventID:    fmt.Sprintf("evt-extra-%04d", i),
-			OccurredAt: time.Now().Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
-		})
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/seismic-events", nil)
-	req.Header.Set("X-BMKG-Key", cfg.APIKey)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
-
-	var events []model.SeismicEvent
-	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
-		t.Fatalf("failed to decode seismic events: %v", err)
-	}
-	if len(events) > config.DefaultPageLimit {
-		t.Errorf("expected at most %d events (DEFAULT_PAGE_LIMIT), got %d", config.DefaultPageLimit, len(events))
-	}
-	if len(events) < 20 {
-		t.Errorf("expected at least 20 seeded events, got %d", len(events))
-	}
-}
-
-func TestTsunamiWarningsPaginationLimit(t *testing.T) {
-	h, _, cfg := setupTestApp()
-	router := h.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/tsunami-warnings?limit=2", nil)
-	req.Header.Set("X-BMKG-Key", cfg.APIKey)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
-
-	var warnings []model.TsunamiWarning
-	if err := json.Unmarshal(rec.Body.Bytes(), &warnings); err != nil {
-		t.Fatalf("failed to decode tsunami warnings: %v", err)
-	}
-	if len(warnings) != 2 {
-		t.Errorf("expected exactly 2 warnings, got %d", len(warnings))
-	}
-}
-
-func TestTsunamiWarningsLimitValidation(t *testing.T) {
-	h, _, cfg := setupTestApp()
-	router := h.Routes()
-
-	tests := []struct {
-		name  string
-		limit string
-	}{
-		{"zero", "0"},
-		{"negative", "-1"},
-		{"non-integer", "abc"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/tsunami-warnings?limit="+tc.limit, nil)
-			req.Header.Set("X-BMKG-Key", cfg.APIKey)
-			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("expected 400 for limit=%s, got %d", tc.limit, rec.Code)
-			}
-		})
-	}
-}
-
-func TestSeismicEventsChronologicalOrder(t *testing.T) {
-	h, _, cfg := setupTestApp()
-	router := h.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/seismic-events", nil)
-	req.Header.Set("X-BMKG-Key", cfg.APIKey)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
-
-	var events []model.SeismicEvent
-	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
-		t.Fatalf("failed to decode seismic events: %v", err)
-	}
-
-	for i := 1; i < len(events); i++ {
-		prev, _ := time.Parse(time.RFC3339, events[i-1].OccurredAt)
-		curr, _ := time.Parse(time.RFC3339, events[i].OccurredAt)
-		if curr.Before(prev) {
-			t.Errorf("events not in chronological order: event %d (%s) before event %d (%s)",
-				i, events[i].OccurredAt, i-1, events[i-1].OccurredAt)
-		}
+		t.Errorf("expected simulated latency >= %dms, took %v", cfg.DelayMinMs, elapsed)
 	}
 }

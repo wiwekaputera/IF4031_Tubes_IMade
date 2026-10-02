@@ -1,4 +1,4 @@
--- IF4031 Milestone 1 — Canonical Store init SQL
+-- Canonical Store Initialization SQL
 -- Owned by: aggregator service
 -- DO NOT run this manually; it is mounted as /docker-entrypoint-initdb.d/init.sql
 

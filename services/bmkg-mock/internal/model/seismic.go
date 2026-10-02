@@ -1,6 +1,4 @@
 // Package model defines the internal data models for the bmkg-mock service.
-// These structs are local to bmkg-mock and are NOT shared with other services,
-// preserving service independence per Specification Ketentuan #1.
 package model
 
 // SeismicEvent is the raw data model returned by the BMKG mock.

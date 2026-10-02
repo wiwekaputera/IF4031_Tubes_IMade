@@ -1,15 +1,6 @@
-// Package agency defines the aggregator's internal ingestion models for
-// upstream agency responses (BMKG seismic events and PVMBG volcanic reports).
-//
-// These models use the tolerant reader pattern: known fields are decoded into
-// typed struct fields, while unknown/additive fields (e.g. future schema
-// extensions like confidence_level or any new field introduced by an agency)
-// are captured dynamically into the Extra map and routed into HazardEvent
-// attributes without crashing or losing data.
-//
-// These structs are local to the aggregator and are NOT shared with the
-// upstream mock services, preserving service independence per
-// Specification Ketentuan #1.
+// Package agency defines ingestion models and unmarshaling logic for
+// upstream agency payloads from BMKG (seismic/tsunami) and PVMBG (volcanic).
+// Unrecognized attributes are captured dynamically for forward compatibility.
 package agency
 
 import "encoding/json"
@@ -55,12 +46,8 @@ const (
 	AlertAwas    VolcanicAlertLevel = "Awas"
 )
 
-// VolcanicReport is the ingestion model for PVMBG volcanic reports.
-// It uses a tolerant reader pattern: known fields are decoded into typed
-// fields, while unknown/additive fields are captured into Extra as raw JSON
-// so they can be merged into HazardEvent.Attributes without crashing or
-// losing data. confidence_level is a pointer because it may be absent before
-// schema-version is toggled.
+// VolcanicReport represents an upstream volcanic activity report from PVMBG.
+// Unknown or schema-extended fields are captured into Extra during unmarshaling.
 type VolcanicReport struct {
 	ReportID         string             `json:"report_id"`
 	VolcanoID        string             `json:"volcano_id"`
@@ -70,15 +57,11 @@ type VolcanicReport struct {
 	ReportedAt       string             `json:"reported_at"` // ISO 8601
 	ConfidenceLevel  *float64           `json:"confidence_level,omitempty"`
 
-	// Extra holds any unknown/additive fields decoded from the upstream JSON
-	// that are not part of the typed struct above. These are merged into
-	// HazardEvent.Attributes by the normalizer.
+	// Extra holds unrecognized fields for forward compatibility.
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
-// knownVolcanicFields lists JSON keys that are explicitly typed fields on
-// VolcanicReport. Any key not in this set is treated as additive and stored
-// in Extra.
+// knownVolcanicFields tracks recognized fields to identify additive attributes.
 var knownVolcanicFields = map[string]struct{}{
 	"report_id":           {},
 	"volcano_id":          {},
@@ -89,10 +72,7 @@ var knownVolcanicFields = map[string]struct{}{
 	"confidence_level":    {},
 }
 
-// UnmarshalJSON implements the tolerant reader pattern for VolcanicReport.
-// Known fields are decoded into typed struct fields; unknown/additive fields
-// are captured into Extra as raw JSON so they can be forwarded into
-// attributes without crashing or losing data.
+// UnmarshalJSON decodes known fields into the struct and captures remaining fields in Extra.
 func (r *VolcanicReport) UnmarshalJSON(data []byte) error {
 	type alias VolcanicReport
 	aux := alias{}

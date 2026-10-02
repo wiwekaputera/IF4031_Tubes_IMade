@@ -43,17 +43,15 @@ func findInitSQLPath() (string, error) {
 func waitForPostgres(dsn string, timeout time.Duration) error {
 	ctx := context.Background()
 	deadline := time.Now().Add(timeout)
-	var lastErr error
 	for time.Now().Before(deadline) {
 		conn, err := pgx.Connect(ctx, dsn)
 		if err == nil {
 			conn.Close(ctx)
 			return nil
 		}
-		lastErr = err
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("timeout waiting for postgres at %s: %w", dsn, lastErr)
+	return fmt.Errorf("timeout waiting for postgres at %s", dsn)
 }
 
 func TestMain(m *testing.M) {
@@ -61,7 +59,6 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "docker not found: %v\n", err)
 		os.Exit(1)
 	}
-
 	initSQLPath, err := findInitSQLPath()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to find init.sql: %v\n", err)
@@ -69,26 +66,20 @@ func TestMain(m *testing.M) {
 	}
 
 	exec.Command("docker", "rm", "-f", "if4031-canonical-test").Run()
-
 	cmd := exec.Command("docker", "run", "-d", "--name", "if4031-canonical-test",
-		"-e", "POSTGRES_PASSWORD=pg",
-		"-e", "POSTGRES_USER=aggregator",
-		"-e", "POSTGRES_DB=canonical",
-		"-p", "5432:5432",
-		"-v", initSQLPath+":/docker-entrypoint-initdb.d/init.sql:ro",
+		"-e", "POSTGRES_PASSWORD=pg", "-e", "POSTGRES_USER=aggregator", "-e", "POSTGRES_DB=canonical",
+		"-p", "5432:5432", "-v", initSQLPath+":/docker-entrypoint-initdb.d/init.sql:ro",
 		"postgres:16-alpine",
 	)
-	output, err := cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to start postgres container: %v\n%s\n", err, output)
+		fmt.Fprintf(os.Stderr, "failed to start postgres container: %v\n%s\n", err, out)
 		os.Exit(1)
 	}
-	containerID := strings.TrimSpace(string(output))
-
+	containerID := strings.TrimSpace(string(out))
 	dsn := "postgresql://aggregator:pg@localhost:5432/canonical?sslmode=disable"
 
 	if err := waitForPostgres(dsn, 120*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to connect to postgres: %v\n", err)
 		exec.Command("docker", "rm", "-f", containerID).Run()
 		os.Exit(1)
 	}
@@ -96,19 +87,15 @@ func TestMain(m *testing.M) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create pool: %v\n", err)
 		exec.Command("docker", "rm", "-f", containerID).Run()
 		os.Exit(1)
 	}
-
 	testPool = pool
 	testRepo = NewPostgresRepo(pool, zerolog.Nop())
 
 	code := m.Run()
-
 	pool.Close()
 	exec.Command("docker", "rm", "-f", containerID).Run()
-
 	os.Exit(code)
 }
 
@@ -127,109 +114,48 @@ func TestUpsertEvent_PreservesHazardID(t *testing.T) {
 	defer cancel()
 
 	hazardID1 := uuid.NewString()
-	source := "BMKG"
 	sourceRefID := "bmkg-test-" + uuid.NewString()
-
 	req := UpsertRequest{
-		HazardID:      hazardID1,
-		Source:        source,
-		SourceRefID:   sourceRefID,
-		HazardType:    hazard.HazardTypeSeismic,
-		Severity:      hazard.SeverityNormal,
-		AreaName:      "Jakarta",
-		Latitude:      -6.2,
-		Longitude:     106.8,
-		OccurredAt:    time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
-		Sources:       map[string]interface{}{"bmkg": map[string]interface{}{"event_id": sourceRefID, "value": 1}},
-		Attributes:    map[string]interface{}{"confidence_level": "high"},
-		CorrelationID: "test-correlation-1",
+		HazardID:    hazardID1,
+		Source:      "BMKG",
+		SourceRefID: sourceRefID,
+		HazardType:  hazard.HazardTypeSeismic,
+		Severity:    hazard.SeverityNormal,
+		AreaName:    "Jakarta",
+		OccurredAt:  time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+		Sources:     map[string]interface{}{"bmkg": map[string]interface{}{"event_id": sourceRefID}},
+		Attributes:  map[string]interface{}{"confidence_level": "high"},
 	}
 
-	returnedID1, err := testRepo.UpsertEvent(ctx, req)
-	if err != nil {
-		t.Fatalf("first UpsertEvent failed: %v", err)
-	}
-	if returnedID1 != hazardID1 {
-		t.Fatalf("expected hazard_id %s, got %s", hazardID1, returnedID1)
+	if id, err := testRepo.UpsertEvent(ctx, req); err != nil || id != hazardID1 {
+		t.Fatalf("first upsert failed: id=%s, err=%v", id, err)
 	}
 
-	hazardID2 := uuid.NewString()
+	// Second upsert with modified attributes and new UUID should preserve original HazardID
 	req2 := req
-	req2.HazardID = hazardID2
-	req2.Sources = map[string]interface{}{"pvmbg": map[string]interface{}{"report_id": "pvmbg-001", "value": 2}}
-	req2.Attributes = map[string]interface{}{"confidence_level": "medium", "extra_attr": true}
+	req2.HazardID = uuid.NewString()
+	req2.Sources = map[string]interface{}{"pvmbg": map[string]interface{}{"val": 2}}
+	req2.Attributes = map[string]interface{}{"confidence_level": "medium", "extra": true}
 
-	returnedID2, err := testRepo.UpsertEvent(ctx, req2)
-	if err != nil {
-		t.Fatalf("second UpsertEvent failed: %v", err)
+	if id, err := testRepo.UpsertEvent(ctx, req2); err != nil || id != hazardID1 {
+		t.Fatalf("expected preserved hazard_id %s, got %s (err: %v)", hazardID1, id, err)
 	}
 
-	if returnedID2 != hazardID1 {
-		t.Fatalf("hazard_id not preserved: expected %s, got %s", hazardID1, returnedID2)
-	}
-
-	var storedHazardID string
+	var storedID, outboxKey string
 	var version int64
-	err = testPool.QueryRow(ctx,
-		"SELECT hazard_id, version FROM canonical_events WHERE source = $1 AND source_ref_id = $2",
-		source, sourceRefID,
-	).Scan(&storedHazardID, &version)
-	if err != nil {
-		t.Fatalf("failed to SELECT hazard_id, version: %v", err)
+	var sourcesJSON, attrsJSON []byte
+	if err := testPool.QueryRow(ctx, "SELECT hazard_id, version, sources, attributes FROM canonical_events WHERE source = $1 AND source_ref_id = $2", "BMKG", sourceRefID).Scan(&storedID, &version, &sourcesJSON, &attrsJSON); err != nil || storedID != hazardID1 || version != 2 {
+		t.Fatalf("canonical row mismatch: id=%s, ver=%d, err=%v", storedID, version, err)
 	}
-	if storedHazardID != hazardID1 {
-		t.Errorf("SELECT hazard_id: expected %s, got %s", hazardID1, storedHazardID)
-	}
-	if version != 2 {
-		t.Errorf("SELECT version: expected 2, got %d", version)
+	if err := testPool.QueryRow(ctx, "SELECT event_key FROM outbox WHERE event_key = $1", hazardID1+":2").Scan(&outboxKey); err != nil {
+		t.Fatalf("outbox row missing for version 2: %v", err)
 	}
 
-	expectedEventKey := hazardID1 + ":2"
-	var eventKey string
-	err = testPool.QueryRow(ctx,
-		"SELECT event_key FROM outbox WHERE event_key = $1", expectedEventKey,
-	).Scan(&eventKey)
-	if err != nil {
-		t.Fatalf("outbox row with event_key %s not found: %v", expectedEventKey, err)
-	}
-	if eventKey != expectedEventKey {
-		t.Errorf("outbox event_key: expected %s, got %s", expectedEventKey, eventKey)
-	}
-
-	var sourcesJSON []byte
-	err = testPool.QueryRow(ctx,
-		"SELECT sources FROM canonical_events WHERE hazard_id = $1", hazardID1,
-	).Scan(&sourcesJSON)
-	if err != nil {
-		t.Fatalf("failed to SELECT sources: %v", err)
-	}
-	var sources map[string]interface{}
-	if err := json.Unmarshal(sourcesJSON, &sources); err != nil {
-		t.Fatalf("failed to unmarshal sources: %v", err)
-	}
-	if _, ok := sources["bmkg"]; !ok {
-		t.Error("sources merge failed: 'bmkg' key missing")
-	}
-	if _, ok := sources["pvmbg"]; !ok {
-		t.Error("sources merge failed: 'pvmbg' key missing")
-	}
-
-	var attrsJSON []byte
-	err = testPool.QueryRow(ctx,
-		"SELECT attributes FROM canonical_events WHERE hazard_id = $1", hazardID1,
-	).Scan(&attrsJSON)
-	if err != nil {
-		t.Fatalf("failed to SELECT attributes: %v", err)
-	}
-	var attrs map[string]interface{}
-	if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
-		t.Fatalf("failed to unmarshal attributes: %v", err)
-	}
-	if attrs["confidence_level"] != "medium" {
-		t.Errorf("attributes merge: expected confidence_level=medium, got %v", attrs["confidence_level"])
-	}
-	if _, ok := attrs["extra_attr"]; !ok {
-		t.Error("attributes merge failed: 'extra_attr' key missing")
+	var sources, attrs map[string]interface{}
+	_ = json.Unmarshal(sourcesJSON, &sources)
+	_ = json.Unmarshal(attrsJSON, &attrs)
+	if _, ok := sources["bmkg"]; !ok || sources["pvmbg"] == nil || attrs["confidence_level"] != "medium" || attrs["extra"] != true {
+		t.Errorf("merging failed: sources=%+v, attrs=%+v", sources, attrs)
 	}
 }
 
@@ -240,58 +166,37 @@ func TestUpsertEvent_GuardsVersionAndOutboxOnUnchangedRePoll(t *testing.T) {
 
 	hazardID := uuid.NewString()
 	req := UpsertRequest{
-		HazardID:      hazardID,
-		Source:        "BMKG",
-		SourceRefID:   "evt-idem-001",
-		HazardType:    hazard.HazardTypeSeismic,
-		Severity:      hazard.SeveritySiaga,
-		AreaName:      "Sulawesi",
-		Latitude:      -1.4,
-		Longitude:     119.8,
-		OccurredAt:    time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
-		Sources:       map[string]interface{}{"bmkg": map[string]interface{}{"event_id": "evt-idem-001"}},
-		Attributes:    map[string]interface{}{"magnitude": 6.7},
-		CorrelationID: "test-corr-1",
+		HazardID:    hazardID,
+		Source:      "BMKG",
+		SourceRefID: "evt-idem-001",
+		HazardType:  hazard.HazardTypeSeismic,
+		Severity:    hazard.SeveritySiaga,
+		AreaName:    "Sulawesi",
+		OccurredAt:  time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+		Sources:     map[string]interface{}{"bmkg": map[string]interface{}{"event_id": "evt-idem-001"}},
+		Attributes:  map[string]interface{}{"magnitude": 6.7},
 	}
 
-	// First insert
-	id1, err := testRepo.UpsertEvent(ctx, req)
-	if err != nil {
+	if id1, err := testRepo.UpsertEvent(ctx, req); err != nil || id1 != hazardID {
 		t.Fatalf("initial upsert failed: %v", err)
 	}
-	if id1 != hazardID {
-		t.Fatalf("expected hazard_id %s, got %s", hazardID, id1)
-	}
-
-	// Verify outbox has 1 row with version 1
 	var outboxCount int
-	err = testPool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE event_key LIKE $1", hazardID+"%").Scan(&outboxCount)
-	if err != nil || outboxCount != 1 {
-		t.Fatalf("expected 1 outbox row, got %d (err: %v)", outboxCount, err)
+	if _ = testPool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE event_key LIKE $1", hazardID+"%").Scan(&outboxCount); outboxCount != 1 {
+		t.Fatalf("expected 1 outbox row initially, got %d", outboxCount)
 	}
 
-	// Re-poll the exact same unchanged record
+	// Re-poll the exact same unchanged record with a new transient HazardID
 	reqRePoll := req
-	reqRePoll.HazardID = uuid.NewString() // new UUID generated on re-poll
-	id2, err := testRepo.UpsertEvent(ctx, reqRePoll)
-	if err != nil {
-		t.Fatalf("re-poll upsert failed: %v", err)
+	reqRePoll.HazardID = uuid.NewString()
+	if id2, err := testRepo.UpsertEvent(ctx, reqRePoll); err != nil || id2 != hazardID {
+		t.Fatalf("re-poll failed: id=%s, err=%v", id2, err)
 	}
-	if id2 != hazardID {
-		t.Fatalf("hazard_id should be preserved: expected %s, got %s", hazardID, id2)
-	}
-
-	// Verify version is still 1
 	var version int64
-	err = testPool.QueryRow(ctx, "SELECT version FROM canonical_events WHERE hazard_id = $1", hazardID).Scan(&version)
-	if err != nil || version != 1 {
-		t.Fatalf("expected version to remain 1 on unchanged re-poll, got %d (err: %v)", version, err)
+	if _ = testPool.QueryRow(ctx, "SELECT version FROM canonical_events WHERE hazard_id = $1", hazardID).Scan(&version); version != 1 {
+		t.Fatalf("expected version to remain 1 on unchanged re-poll, got %d", version)
 	}
-
-	// Verify outbox STILL has only 1 row (no duplicate emitted!)
-	err = testPool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE event_key LIKE $1", hazardID+"%").Scan(&outboxCount)
-	if err != nil || outboxCount != 1 {
-		t.Fatalf("expected still 1 outbox row after unchanged re-poll, got %d (err: %v)", outboxCount, err)
+	if _ = testPool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE event_key LIKE $1", hazardID+"%").Scan(&outboxCount); outboxCount != 1 {
+		t.Fatalf("expected still 1 outbox row on unchanged re-poll, got %d", outboxCount)
 	}
 }
 
@@ -300,166 +205,37 @@ func TestGetEvents_Filters(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	ts1 := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
-	ts2 := time.Date(2025, 6, 2, 10, 0, 0, 0, time.UTC)
-	ts3 := time.Date(2025, 6, 3, 10, 0, 0, 0, time.UTC)
-
-	hazardIDA := uuid.NewString()
-	hazardIDB := uuid.NewString()
-	hazardIDC := uuid.NewString()
+	ts1, ts2, ts3 := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC), time.Date(2025, 6, 2, 10, 0, 0, 0, time.UTC), time.Date(2025, 6, 3, 10, 0, 0, 0, time.UTC)
+	idA, idB, idC := uuid.NewString(), uuid.NewString(), uuid.NewString()
 
 	events := []UpsertRequest{
-		{
-			HazardID:    hazardIDA,
-			Source:      "BMKG",
-			SourceRefID: "seismic-a-" + uuid.NewString(),
-			HazardType:  hazard.HazardTypeSeismic,
-			Severity:    hazard.SeverityNormal,
-			AreaName:    "AreaA",
-			Latitude:    -6.0,
-			Longitude:   106.0,
-			OccurredAt:  ts1,
-			Sources:     map[string]interface{}{},
-			Attributes:  map[string]interface{}{},
-		},
-		{
-			HazardID:    hazardIDB,
-			Source:      "PVMBG",
-			SourceRefID: "volcanic-b-" + uuid.NewString(),
-			HazardType:  hazard.HazardTypeVolcanic,
-			Severity:    hazard.SeverityWaspada,
-			AreaName:    "AreaB",
-			Latitude:    -8.0,
-			Longitude:   112.0,
-			OccurredAt:  ts2,
-			Sources:     map[string]interface{}{},
-			Attributes:  map[string]interface{}{},
-		},
-		{
-			HazardID:    hazardIDC,
-			Source:      "BMKG",
-			SourceRefID: "seismic-c-" + uuid.NewString(),
-			HazardType:  hazard.HazardTypeSeismic,
-			Severity:    hazard.SeveritySiaga,
-			AreaName:    "AreaC",
-			Latitude:    -7.0,
-			Longitude:   110.0,
-			OccurredAt:  ts3,
-			Sources:     map[string]interface{}{},
-			Attributes:  map[string]interface{}{},
-		},
+		{HazardID: idA, Source: "BMKG", SourceRefID: "s-a-" + idA, HazardType: hazard.HazardTypeSeismic, Severity: hazard.SeverityNormal, AreaName: "AreaA", OccurredAt: ts1},
+		{HazardID: idB, Source: "PVMBG", SourceRefID: "s-b-" + idB, HazardType: hazard.HazardTypeVolcanic, Severity: hazard.SeverityWaspada, AreaName: "AreaB", OccurredAt: ts2},
+		{HazardID: idC, Source: "BMKG", SourceRefID: "s-c-" + idC, HazardType: hazard.HazardTypeSeismic, Severity: hazard.SeveritySiaga, AreaName: "AreaC", OccurredAt: ts3},
 	}
-
 	for _, e := range events {
 		if _, err := testRepo.UpsertEvent(ctx, e); err != nil {
-			t.Fatalf("failed to insert event %s: %v", e.HazardID, err)
+			t.Fatalf("seed upsert failed: %v", err)
 		}
 	}
 
-	t.Run("hazard_type", func(t *testing.T) {
-		result, err := testRepo.GetEvents(ctx, EventFilter{HazardType: "SEISMIC"})
-		if err != nil {
-			t.Fatalf("GetEvents failed: %v", err)
-		}
-		foundA, foundC := false, false
-		for _, e := range result {
-			if e.HazardID == hazardIDA {
-				foundA = true
-			}
-			if e.HazardID == hazardIDC {
-				foundC = true
-			}
-			if string(e.HazardType) != "SEISMIC" {
-				t.Errorf("hazard_type filter: expected all SEISMIC, got %s", e.HazardType)
-			}
-		}
-		if !foundA {
-			t.Error("hazard_type filter: event A (SEISMIC) not found")
-		}
-		if !foundC {
-			t.Error("hazard_type filter: event C (SEISMIC) not found")
-		}
-	})
-
-	t.Run("hazard_id", func(t *testing.T) {
-		result, err := testRepo.GetEvents(ctx, EventFilter{HazardID: hazardIDB})
-		if err != nil {
-			t.Fatalf("GetEvents failed: %v", err)
-		}
-		if len(result) != 1 {
-			t.Fatalf("hazard_id filter: expected 1 event, got %d", len(result))
-		}
-		if result[0].HazardID != hazardIDB {
-			t.Errorf("hazard_id filter: expected %s, got %s", hazardIDB, result[0].HazardID)
-		}
-	})
-
-	t.Run("since", func(t *testing.T) {
-		since := ts2.Add(-1 * time.Hour)
-		result, err := testRepo.GetEvents(ctx, EventFilter{Since: &since})
-		if err != nil {
-			t.Fatalf("GetEvents failed: %v", err)
-		}
-		foundA, foundB, foundC := false, false, false
-		for _, e := range result {
-			if e.HazardID == hazardIDA {
-				foundA = true
-			}
-			if e.HazardID == hazardIDB {
-				foundB = true
-			}
-			if e.HazardID == hazardIDC {
-				foundC = true
-			}
-		}
-		if foundA {
-			t.Error("since filter: event A (before since) should not be included")
-		}
-		if !foundB {
-			t.Error("since filter: event B should be included")
-		}
-		if !foundC {
-			t.Error("since filter: event C should be included")
-		}
-	})
-
-	t.Run("limit", func(t *testing.T) {
-		result, err := testRepo.GetEvents(ctx, EventFilter{Limit: 2})
-		if err != nil {
-			t.Fatalf("GetEvents failed: %v", err)
-		}
-		if len(result) > 2 {
-			t.Errorf("limit filter: expected at most 2 events, got %d", len(result))
-		}
-	})
-
-	t.Run("order_desc", func(t *testing.T) {
-		result, err := testRepo.GetEvents(ctx, EventFilter{})
-		if err != nil {
-			t.Fatalf("GetEvents failed: %v", err)
-		}
-		posA, posB, posC := -1, -1, -1
-		for i, e := range result {
-			if e.HazardID == hazardIDA {
-				posA = i
-			}
-			if e.HazardID == hazardIDB {
-				posB = i
-			}
-			if e.HazardID == hazardIDC {
-				posC = i
-			}
-		}
-		if posA == -1 || posB == -1 || posC == -1 {
-			t.Fatalf("order test: not all events found (A=%d, B=%d, C=%d)", posA, posB, posC)
-		}
-		if posC > posB {
-			t.Errorf("ORDER BY occurred_at DESC: C (latest) should come before B, but C at %d, B at %d", posC, posB)
-		}
-		if posB > posA {
-			t.Errorf("ORDER BY occurred_at DESC: B should come before A, but B at %d, A at %d", posB, posA)
-		}
-	})
+	// 1. Hazard type filter
+	if res, err := testRepo.GetEvents(ctx, EventFilter{HazardType: "SEISMIC"}); err != nil || len(res) != 2 {
+		t.Fatalf("expected 2 SEISMIC events, got %d (err: %v)", len(res), err)
+	}
+	// 2. Hazard ID filter
+	if res, err := testRepo.GetEvents(ctx, EventFilter{HazardID: idB}); err != nil || len(res) != 1 || res[0].HazardID != idB {
+		t.Fatalf("expected 1 event matching idB, got %+v", res)
+	}
+	// 3. Since filter (ts2 - 1h includes ts2, ts3)
+	since := ts2.Add(-time.Hour)
+	if res, err := testRepo.GetEvents(ctx, EventFilter{Since: &since}); err != nil || len(res) != 2 {
+		t.Fatalf("expected 2 events since ts2, got %d (err: %v)", len(res), err)
+	}
+	// 4. Limit & DESC order (idC newest, then idB)
+	if res, err := testRepo.GetEvents(ctx, EventFilter{Limit: 2}); err != nil || len(res) != 2 || res[0].HazardID != idC || res[1].HazardID != idB {
+		t.Fatalf("expected limit 2 ordered DESC (idC, idB), got %+v", res)
+	}
 }
 
 func TestGetVolcanoReferences(t *testing.T) {
@@ -467,29 +243,13 @@ func TestGetVolcanoReferences(t *testing.T) {
 	defer cancel()
 
 	refs, err := testRepo.GetVolcanoReferences(ctx)
-	if err != nil {
-		t.Fatalf("GetVolcanoReferences failed: %v", err)
+	if err != nil || len(refs) != 5 {
+		t.Fatalf("expected 5 volcano references, got %d (err: %v)", len(refs), err)
 	}
-
-	if len(refs) != 5 {
-		t.Fatalf("expected 5 volcano references, got %d", len(refs))
-	}
-
-	expectedIDs := []string{"GNG-001", "GNG-002", "GNG-003", "GNG-004", "GNG-005"}
-	for _, id := range expectedIDs {
+	for _, id := range []string{"GNG-001", "GNG-002", "GNG-003", "GNG-004", "GNG-005"} {
 		ref, ok := refs[id]
-		if !ok {
-			t.Errorf("missing volcano reference: %s", id)
-			continue
-		}
-		if ref.VolcanoID != id {
-			t.Errorf("volcano %s: VolcanoID mismatch (%s)", id, ref.VolcanoID)
-		}
-		if ref.Name == "" {
-			t.Errorf("volcano %s: empty name", id)
-		}
-		if ref.Latitude == 0 && ref.Longitude == 0 {
-			t.Errorf("volcano %s: zero coordinates", id)
+		if !ok || ref.Name == "" || (ref.Latitude == 0 && ref.Longitude == 0) {
+			t.Errorf("invalid volcano ref for %s: %+v", id, ref)
 		}
 	}
 }

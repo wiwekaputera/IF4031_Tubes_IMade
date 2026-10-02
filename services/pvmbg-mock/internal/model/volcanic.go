@@ -1,6 +1,4 @@
 // Package model defines the internal data models for the pvmbg-mock service.
-// These structs are local to pvmbg-mock and are NOT shared with other services,
-// preserving service independence per Specification Ketentuan #1.
 package model
 
 // VolcanicAlertLevel is the activity level enum from PVMBG.

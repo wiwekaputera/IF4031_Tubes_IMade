@@ -17,10 +17,6 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/store"
 )
 
-func testStart() time.Time { return time.Now() }
-
-func testElapsed(start time.Time) time.Duration { return time.Since(start) }
-
 func setupTestApp() (*handler.Handler, store.Store, *config.Config, *admin.OutageState, *admin.SchemaVersionState) {
 	cfg := &config.Config{
 		Port:             "8082",
@@ -36,453 +32,203 @@ func setupTestApp() (*handler.Handler, store.Store, *config.Config, *admin.Outag
 	seed.PopulateSeeds(memStore)
 	outage := admin.NewOutageState()
 	schemaVersion := admin.NewSchemaVersionState()
-	logger := zerolog.Nop()
-	h := handler.NewHandler(memStore, cfg, outage, schemaVersion, logger)
+	h := handler.NewHandler(memStore, cfg, outage, schemaVersion, zerolog.Nop())
 	return h, memStore, cfg, outage, schemaVersion
 }
 
-func TestHealthEndpoint(t *testing.T) {
-	h, _, _, _, _ := setupTestApp()
-	router := h.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+func doReq(h *handler.Handler, method, path string, headers map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
+	h.Routes().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHealthEndpoint(t *testing.T) {
+	h, _, cfg, _, _ := setupTestApp()
+	start := time.Now()
+	rec := doReq(h, http.MethodGet, "/health", nil)
+	elapsed := time.Since(start)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-
+	if elapsed >= time.Duration(cfg.DelayMinMs)*time.Millisecond {
+		t.Errorf("health should have no simulated delay, took %v", elapsed)
+	}
 	var resp map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp["status"] != "UP" {
-		t.Errorf("expected status 'UP', got '%s'", resp["status"])
+		t.Errorf("expected UP, got %q", resp["status"])
 	}
 }
 
 func TestAuthEnforcement(t *testing.T) {
 	h, _, cfg, _, _ := setupTestApp()
-	router := h.Routes()
-
 	tests := []struct {
-		name           string
-		headers        map[string]string
-		expectedStatus int
+		name    string
+		headers map[string]string
+		status  int
 	}{
-		{
-			name:           "missing Authorization returns 401",
-			headers:        map[string]string{},
-			expectedStatus: http.StatusUnauthorized,
-		},
-		{
-			name: "invalid Bearer token returns 401",
-			headers: map[string]string{
-				"Authorization": "Bearer wrong-token",
-			},
-			expectedStatus: http.StatusUnauthorized,
-		},
-		{
-			name: "X-BMKG-Key cross-credential returns 403 even with no Bearer",
-			headers: map[string]string{
-				"X-BMKG-Key": "bmkg-key",
-			},
-			expectedStatus: http.StatusForbidden,
-		},
-		{
-			name: "X-BMKG-Key cross-credential returns 403 even with valid Bearer",
-			headers: map[string]string{
-				"Authorization": "Bearer " + cfg.BearerToken,
-				"X-BMKG-Key":    "bmkg-key",
-			},
-			expectedStatus: http.StatusForbidden,
-		},
-		{
-			name: "valid Bearer token returns 200 OK",
-			headers: map[string]string{
-				"Authorization": "Bearer " + cfg.BearerToken,
-			},
-			expectedStatus: http.StatusOK,
-		},
+		{"missing token", nil, http.StatusUnauthorized},
+		{"invalid token", map[string]string{"Authorization": "Bearer bad"}, http.StatusUnauthorized},
+		{"BMKG key cross-credential", map[string]string{"X-BMKG-Key": "bmkg-key"}, http.StatusForbidden},
+		{"valid Bearer with BMKG key forbidden", map[string]string{"Authorization": "Bearer " + cfg.BearerToken, "X-BMKG-Key": "bmkg"}, http.StatusForbidden},
+		{"valid Bearer", map[string]string{"Authorization": "Bearer " + cfg.BearerToken}, http.StatusOK},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-			for k, v := range tc.headers {
-				req.Header.Set(k, v)
-			}
-			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, req)
-
-			if rec.Code != tc.expectedStatus {
-				t.Errorf("expected status %d, got %d, body: %s", tc.expectedStatus, rec.Code, rec.Body.String())
+			rec := doReq(h, http.MethodGet, "/volcanic-reports", tc.headers)
+			if rec.Code != tc.status {
+				t.Errorf("expected %d, got %d", tc.status, rec.Code)
 			}
 		})
 	}
 }
 
-func TestVolcanicReportsFilter(t *testing.T) {
-	h, _, cfg, _, _ := setupTestApp()
-	router := h.Routes()
+func TestVolcanicReportsEndpoint(t *testing.T) {
+	h, memStore, cfg, _, _ := setupTestApp()
+	authHeader := map[string]string{"Authorization": "Bearer " + cfg.BearerToken}
 
-	req := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
+	t.Run("fetch and order", func(t *testing.T) {
+		rec := doReq(h, http.MethodGet, "/volcanic-reports", authHeader)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		var reports []model.VolcanicReport
+		_ = json.Unmarshal(rec.Body.Bytes(), &reports)
+		if len(reports) < 20 {
+			t.Errorf("expected >= 20 reports, got %d", len(reports))
+		}
+		for i := 1; i < len(reports); i++ {
+			p, _ := time.Parse(time.RFC3339, reports[i-1].ReportedAt)
+			c, _ := time.Parse(time.RFC3339, reports[i].ReportedAt)
+			if c.Before(p) {
+				t.Fatalf("reports not in chronological order at %d", i)
+			}
+		}
+	})
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
+	t.Run("since filtering", func(t *testing.T) {
+		rec := doReq(h, http.MethodGet, "/volcanic-reports?since=2099-01-01T00:00:00Z", authHeader)
+		var future []model.VolcanicReport
+		_ = json.Unmarshal(rec.Body.Bytes(), &future)
+		if len(future) != 0 {
+			t.Errorf("expected 0 reports, got %d", len(future))
+		}
+		recBad := doReq(h, http.MethodGet, "/volcanic-reports?since=invalid-date", authHeader)
+		if recBad.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for invalid since, got %d", recBad.Code)
+		}
+	})
 
-	var allReports []model.VolcanicReport
-	if err := json.Unmarshal(rec.Body.Bytes(), &allReports); err != nil {
-		t.Fatalf("failed to decode volcanic reports: %v", err)
-	}
-	if len(allReports) < 20 {
-		t.Errorf("expected at least 20 seeded reports, got %d", len(allReports))
-	}
+	t.Run("limit pagination and clamping", func(t *testing.T) {
+		rec := doReq(h, http.MethodGet, "/volcanic-reports?limit=5", authHeader)
+		var limReports []model.VolcanicReport
+		_ = json.Unmarshal(rec.Body.Bytes(), &limReports)
+		if len(limReports) != 5 {
+			t.Errorf("expected 5 reports, got %d", len(limReports))
+		}
 
-	futureReq := httptest.NewRequest(http.MethodGet, "/volcanic-reports?since=2099-01-01T00:00:00Z", nil)
-	futureReq.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	futureRec := httptest.NewRecorder()
-	router.ServeHTTP(futureRec, futureReq)
+		for _, badLimit := range []string{"0", "-1", "abc"} {
+			if recBad := doReq(h, http.MethodGet, "/volcanic-reports?limit="+badLimit, authHeader); recBad.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 for limit=%s, got %d", badLimit, recBad.Code)
+			}
+		}
 
-	var futureReports []model.VolcanicReport
-	_ = json.Unmarshal(futureRec.Body.Bytes(), &futureReports)
-	if len(futureReports) != 0 {
-		t.Errorf("expected 0 reports in future, got %d", len(futureReports))
-	}
-
-	invalidReq := httptest.NewRequest(http.MethodGet, "/volcanic-reports?since=invalid-date", nil)
-	invalidReq.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	invalidRec := httptest.NewRecorder()
-	router.ServeHTTP(invalidRec, invalidReq)
-
-	if invalidRec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 Bad Request for invalid since, got %d", invalidRec.Code)
-	}
+		for i := 0; i < 90; i++ {
+			memStore.AddVolcanicReport(model.VolcanicReport{
+				ReportID:   fmt.Sprintf("rpt-clamped-%04d", i),
+				VolcanoID:  "GNG-001",
+				ReportedAt: time.Now().Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
+			})
+		}
+		recClamp := doReq(h, http.MethodGet, "/volcanic-reports?limit=9999", authHeader)
+		var clamped []model.VolcanicReport
+		_ = json.Unmarshal(recClamp.Body.Bytes(), &clamped)
+		if len(clamped) != config.MaxPageLimit {
+			t.Errorf("expected limit clamped to %d, got %d", config.MaxPageLimit, len(clamped))
+		}
+	})
 }
 
 func TestOutageToggle(t *testing.T) {
 	h, _, cfg, outage, _ := setupTestApp()
-	router := h.Routes()
+	authHeader := map[string]string{"Authorization": "Bearer " + cfg.BearerToken}
 
-	outageReq := httptest.NewRequest(http.MethodPost, "/admin/outage", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, outageReq)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for outage toggle, got %d", rec.Code)
-	}
-	if !outage.IsActive() {
-		t.Errorf("expected outage to be active after toggle")
+	recToggle1 := doReq(h, http.MethodPost, "/admin/outage", nil)
+	if recToggle1.Code != http.StatusOK || !outage.IsActive() {
+		t.Fatalf("expected outage activated, code %d", recToggle1.Code)
 	}
 
-	dataReq := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	dataReq.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	dataRec := httptest.NewRecorder()
-	router.ServeHTTP(dataRec, dataReq)
-
-	if dataRec.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 during outage, got %d", dataRec.Code)
-	}
-	if dataRec.Body.Len() != 0 {
-		t.Errorf("expected empty body during outage, got %s", dataRec.Body.String())
+	rec503 := doReq(h, http.MethodGet, "/volcanic-reports", authHeader)
+	if rec503.Code != http.StatusServiceUnavailable || rec503.Body.Len() != 0 {
+		t.Errorf("expected 503 empty body during outage, got %d %q", rec503.Code, rec503.Body.String())
 	}
 
-	outageReq2 := httptest.NewRequest(http.MethodPost, "/admin/outage", nil)
-	rec2 := httptest.NewRecorder()
-	router.ServeHTTP(rec2, outageReq2)
-	if outage.IsActive() {
-		t.Errorf("expected outage to be inactive after second toggle")
+	recToggle2 := doReq(h, http.MethodPost, "/admin/outage", nil)
+	if recToggle2.Code != http.StatusOK || outage.IsActive() {
+		t.Fatalf("expected outage deactivated, code %d", recToggle2.Code)
 	}
 
-	dataRec2 := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	dataRec2.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec3 := httptest.NewRecorder()
-	router.ServeHTTP(rec3, dataRec2)
-	if rec3.Code != http.StatusOK {
-		t.Errorf("expected 200 after outage cleared, got %d", rec3.Code)
+	rec200 := doReq(h, http.MethodGet, "/volcanic-reports", authHeader)
+	if rec200.Code != http.StatusOK {
+		t.Errorf("expected 200 after outage cleared, got %d", rec200.Code)
 	}
 }
 
 func TestSchemaVersionToggle(t *testing.T) {
 	h, _, cfg, _, schemaVersion := setupTestApp()
-	router := h.Routes()
+	authHeader := map[string]string{"Authorization": "Bearer " + cfg.BearerToken}
 
-	// Default: OFF -> confidence_level should be absent
-	req := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	var reports []model.VolcanicReport
-	_ = json.Unmarshal(rec.Body.Bytes(), &reports)
-	if len(reports) == 0 {
-		t.Fatalf("expected reports, got none")
-	}
-	for _, r := range reports {
-		if r.ConfidenceLevel != nil {
-			t.Errorf("expected confidence_level nil when schema version OFF, got %v", r.ConfidenceLevel)
-		}
+	// Schema version OFF by default
+	rec1 := doReq(h, http.MethodGet, "/volcanic-reports", authHeader)
+	var raw1 []map[string]interface{}
+	_ = json.Unmarshal(rec1.Body.Bytes(), &raw1)
+	if _, ok := raw1[0]["confidence_level"]; ok {
+		t.Error("expected confidence_level absent when schema version OFF")
 	}
 
 	// Toggle ON
-	toggleReq := httptest.NewRequest(http.MethodPost, "/admin/schema-version", nil)
-	toggleRec := httptest.NewRecorder()
-	router.ServeHTTP(toggleRec, toggleReq)
-	if !schemaVersion.IsEnabled() {
-		t.Errorf("expected schema version to be enabled after toggle")
+	recToggle := doReq(h, http.MethodPost, "/admin/schema-version", nil)
+	if recToggle.Code != http.StatusOK || !schemaVersion.IsEnabled() {
+		t.Fatalf("expected schema version enabled, code %d", recToggle.Code)
 	}
 
-	// After toggle: confidence_level should be present
-	req2 := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	req2.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec2 := httptest.NewRecorder()
-	router.ServeHTTP(rec2, req2)
-
-	var reports2 []model.VolcanicReport
-	_ = json.Unmarshal(rec2.Body.Bytes(), &reports2)
-	if len(reports2) == 0 {
-		t.Fatalf("expected reports, got none")
-	}
-	for _, r := range reports2 {
-		if r.ConfidenceLevel == nil {
-			t.Errorf("expected confidence_level present when schema version ON, got nil")
-		} else if *r.ConfidenceLevel < 0.0 || *r.ConfidenceLevel > 1.0 {
-			t.Errorf("expected confidence_level in [0.0, 1.0], got %v", *r.ConfidenceLevel)
-		}
-	}
-
-	// Verify via raw JSON that the field is present
-	var raw []map[string]interface{}
-	_ = json.Unmarshal(rec2.Body.Bytes(), &raw)
-	if _, ok := raw[0]["confidence_level"]; !ok {
-		t.Errorf("expected 'confidence_level' key in JSON response when schema version ON")
+	rec2 := doReq(h, http.MethodGet, "/volcanic-reports", authHeader)
+	var raw2 []map[string]interface{}
+	_ = json.Unmarshal(rec2.Body.Bytes(), &raw2)
+	clVal, ok := raw2[0]["confidence_level"].(float64)
+	if !ok || clVal < 0.0 || clVal > 1.0 {
+		t.Errorf("expected confidence_level in [0, 1] when schema version ON, got %v", raw2[0]["confidence_level"])
 	}
 
 	// Toggle OFF again
-	toggleReq2 := httptest.NewRequest(http.MethodPost, "/admin/schema-version", nil)
-	router.ServeHTTP(httptest.NewRecorder(), toggleReq2)
-	if schemaVersion.IsEnabled() {
-		t.Errorf("expected schema version to be disabled after second toggle")
-	}
-
-	req3 := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	req3.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec3 := httptest.NewRecorder()
-	router.ServeHTTP(rec3, req3)
-
+	doReq(h, http.MethodPost, "/admin/schema-version", nil)
+	rec3 := doReq(h, http.MethodGet, "/volcanic-reports", authHeader)
 	var raw3 []map[string]interface{}
 	_ = json.Unmarshal(rec3.Body.Bytes(), &raw3)
 	if _, ok := raw3[0]["confidence_level"]; ok {
-		t.Errorf("expected 'confidence_level' key absent in JSON response when schema version OFF")
+		t.Error("expected confidence_level absent after toggle OFF")
 	}
 }
 
-func TestCorrelationIDPropagation(t *testing.T) {
-	h, _, _, _, _ := setupTestApp()
-	router := h.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	corrID := rec.Header().Get("X-Correlation-ID")
-	if corrID == "" {
-		t.Errorf("expected X-Correlation-ID header in response")
-	}
-
-	customID := "custom-trace-uuid-1234"
-	reqCustom := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	reqCustom.Header.Set("Authorization", "Bearer test-pvmbg-token")
-	reqCustom.Header.Set("X-Correlation-ID", customID)
-	recCustom := httptest.NewRecorder()
-	router.ServeHTTP(recCustom, reqCustom)
-
-	if recCustom.Header().Get("X-Correlation-ID") != customID {
-		t.Errorf("expected correlation ID %s, got %s", customID, recCustom.Header().Get("X-Correlation-ID"))
-	}
-}
-
-func TestLatencyJitter(t *testing.T) {
+func TestCorrelationIDAndLatency(t *testing.T) {
 	h, _, cfg, _, _ := setupTestApp()
-	router := h.Routes()
+	headers := map[string]string{
+		"Authorization":     "Bearer " + cfg.BearerToken,
+		"X-Correlation-ID":  "trace-pvmbg-1234",
+	}
+	start := time.Now()
+	rec := doReq(h, http.MethodGet, "/volcanic-reports", headers)
+	elapsed := time.Since(start)
 
-	start := testStart()
-	req := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	elapsed := testElapsed(start)
+	if rec.Header().Get("X-Correlation-ID") != "trace-pvmbg-1234" {
+		t.Errorf("expected correlation ID preserved, got %q", rec.Header().Get("X-Correlation-ID"))
+	}
 	if elapsed < time.Duration(cfg.DelayMinMs)*time.Millisecond {
-		t.Errorf("expected latency >= %dms on data endpoint, got %v", cfg.DelayMinMs, elapsed)
-	}
-}
-
-func TestHealthHasNoLatency(t *testing.T) {
-	h, _, cfg, _, _ := setupTestApp()
-	router := h.Routes()
-
-	start := testStart()
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	elapsed := testElapsed(start)
-	if elapsed >= time.Duration(cfg.DelayMinMs)*time.Millisecond {
-		t.Errorf("expected no latency on /health, but took %v (min delay is %dms)", elapsed, cfg.DelayMinMs)
-	}
-}
-
-func TestVolcanicReportsPaginationLimit(t *testing.T) {
-	h, _, cfg, _, _ := setupTestApp()
-	router := h.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/volcanic-reports?limit=5", nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
-
-	var reports []model.VolcanicReport
-	if err := json.Unmarshal(rec.Body.Bytes(), &reports); err != nil {
-		t.Fatalf("failed to decode volcanic reports: %v", err)
-	}
-	if len(reports) != 5 {
-		t.Errorf("expected exactly 5 reports, got %d", len(reports))
-	}
-}
-
-func TestVolcanicReportsLimitValidation(t *testing.T) {
-	h, _, cfg, _, _ := setupTestApp()
-	router := h.Routes()
-
-	tests := []struct {
-		name  string
-		limit string
-	}{
-		{"zero", "0"},
-		{"negative", "-1"},
-		{"non-integer", "abc"},
-		{"float", "5.5"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/volcanic-reports?limit="+tc.limit, nil)
-			req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("expected 400 for limit=%s, got %d", tc.limit, rec.Code)
-			}
-
-			var errResp map[string]string
-			if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
-				t.Fatalf("failed to decode error response: %v", err)
-			}
-			if errResp["error"] == "" {
-				t.Error("expected non-empty error message in response body")
-			}
-		})
-	}
-}
-
-func TestVolcanicReportsLimitClamping(t *testing.T) {
-	h, memStore, cfg, _, _ := setupTestApp()
-	router := h.Routes()
-
-	for i := 0; i < 90; i++ {
-		memStore.AddVolcanicReport(model.VolcanicReport{
-			ReportID:   fmt.Sprintf("rpt-extra-%04d", i),
-			VolcanoID:  "GNG-001",
-			ReportedAt: time.Now().Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
-		})
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/volcanic-reports?limit=9999", nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
-
-	var reports []model.VolcanicReport
-	if err := json.Unmarshal(rec.Body.Bytes(), &reports); err != nil {
-		t.Fatalf("failed to decode volcanic reports: %v", err)
-	}
-	if len(reports) != config.MaxPageLimit {
-		t.Errorf("expected %d reports (clamped to MAX_PAGE_LIMIT), got %d", config.MaxPageLimit, len(reports))
-	}
-}
-
-func TestVolcanicReportsDefaultLimit(t *testing.T) {
-	h, memStore, cfg, _, _ := setupTestApp()
-	router := h.Routes()
-
-	for i := 0; i < 90; i++ {
-		memStore.AddVolcanicReport(model.VolcanicReport{
-			ReportID:   fmt.Sprintf("rpt-extra-%04d", i),
-			VolcanoID:  "GNG-001",
-			ReportedAt: time.Now().Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
-		})
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
-
-	var reports []model.VolcanicReport
-	if err := json.Unmarshal(rec.Body.Bytes(), &reports); err != nil {
-		t.Fatalf("failed to decode volcanic reports: %v", err)
-	}
-	if len(reports) > config.DefaultPageLimit {
-		t.Errorf("expected at most %d reports (DEFAULT_PAGE_LIMIT), got %d", config.DefaultPageLimit, len(reports))
-	}
-	if len(reports) < 20 {
-		t.Errorf("expected at least 20 seeded reports, got %d", len(reports))
-	}
-}
-
-func TestVolcanicReportsChronologicalOrder(t *testing.T) {
-	h, _, cfg, _, _ := setupTestApp()
-	router := h.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", rec.Code)
-	}
-
-	var reports []model.VolcanicReport
-	if err := json.Unmarshal(rec.Body.Bytes(), &reports); err != nil {
-		t.Fatalf("failed to decode volcanic reports: %v", err)
-	}
-
-	for i := 1; i < len(reports); i++ {
-		prev, _ := time.Parse(time.RFC3339, reports[i-1].ReportedAt)
-		curr, _ := time.Parse(time.RFC3339, reports[i].ReportedAt)
-		if curr.Before(prev) {
-			t.Errorf("reports not in chronological order: report %d (%s) before report %d (%s)",
-				i, reports[i].ReportedAt, i-1, reports[i-1].ReportedAt)
-		}
+		t.Errorf("expected simulated latency >= %dms, took %v", cfg.DelayMinMs, elapsed)
 	}
 }

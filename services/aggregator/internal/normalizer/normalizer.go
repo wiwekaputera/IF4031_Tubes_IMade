@@ -103,9 +103,7 @@ func (n *Normalizer) NormalizeVolcanic(report agency.VolcanicReport) store.Upser
 		attributes["confidence_level"] = *report.ConfidenceLevel
 	}
 
-	// Tolerant reader: capture any unknown/additive fields (stored as raw JSON
-	// in Extra during unmarshaling) into attributes so they are preserved
-	// without crashing or losing data.
+	// Preserve any unrecognized extra fields into attributes.
 	for k, raw := range report.Extra {
 		var v interface{}
 		if err := json.Unmarshal(raw, &v); err == nil {

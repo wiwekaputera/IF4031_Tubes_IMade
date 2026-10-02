@@ -80,10 +80,8 @@ func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 		pvmbgSince = since
 	}
 
-	// Per ARCHITECTURE.md:135-138, one goroutine per upstream source with
-	// errgroup, each with its own context timeout. A slow/failed PVMBG must
-	// never block the BMKG goroutine, so BMKG data does not go stale while
-	// PVMBG is timing out.
+	// Poll upstream sources concurrently with errgroup, each with its own
+	// context timeout so slow or failing sources do not block others.
 	eg, ctx := errgroup.WithContext(ctx)
 
 	bmkgCtx, bmkgCancel := context.WithTimeout(ctx, p.cfg.BMKGTimeout)

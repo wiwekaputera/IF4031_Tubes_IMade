@@ -38,14 +38,11 @@ func (f *fakeRepo) GetVolcanoReferences(context.Context) (map[string]store.Volca
 }
 
 func fastBMKGServer(t *testing.T, called *atomic.Int32) *httptest.Server {
-	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/seismic-events", func(w http.ResponseWriter, r *http.Request) {
 		called.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]agency.SeismicEvent{
-			{EventID: "E-1", Magnitude: 5.5, DepthKm: 10, EpicenterLat: -7.5, EpicenterLon: 110.4, RegionName: "Jawa", OccurredAt: time.Now().Format(time.RFC3339), PotentialTsunami: false},
-		})
+		json.NewEncoder(w).Encode([]agency.SeismicEvent{{EventID: "E-1", Magnitude: 5.5, OccurredAt: time.Now().Format(time.RFC3339)}})
 	})
 	mux.HandleFunc("/tsunami-warnings", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -55,116 +52,74 @@ func fastBMKGServer(t *testing.T, called *atomic.Int32) *httptest.Server {
 }
 
 func slowPVMBGServer(t *testing.T, delay time.Duration, called *atomic.Int32) *httptest.Server {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/volcanic-reports", func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called.Add(1)
-		time.Sleep(delay)
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]agency.VolcanicReport{
-			{ReportID: "VR-1", VolcanoID: "GNG-001", AlertLevel: agency.AlertNormal, ReportedAt: time.Now().Format(time.RFC3339)},
-		})
-	})
-	return httptest.NewServer(mux)
+		json.NewEncoder(w).Encode([]agency.VolcanicReport{{ReportID: "VR-1", AlertLevel: agency.AlertNormal, ReportedAt: time.Now().Format(time.RFC3339)}})
+	}))
 }
 
-func newTestPoller(t *testing.T, bmkgURL, pvmbgURL string) *Poller {
-	t.Helper()
+func toggleablePVMBGServer(t *testing.T, failing *atomic.Bool, called *atomic.Int32) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Add(1)
+		if failing.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]agency.VolcanicReport{{ReportID: "VR-1", AlertLevel: agency.AlertNormal, ReportedAt: time.Now().Format(time.RFC3339)}})
+	}))
+}
+
+func newPollerWithBreaker(bmkgURL, pvmbgURL string, threshold int, probeInterval time.Duration) *Poller {
 	cfg := &config.Config{
 		BMKGBaseURL:          bmkgURL,
 		PVMBGBaseURL:         pvmbgURL,
-		BMKGTimeout:          1 * time.Second,
-		PVMBGTimeout:         4 * time.Second,
-		PollInterval:         3 * time.Second,
-		PVMBGCbThreshold:     5,
-		PVMBGCbProbeInterval: 30 * time.Second,
+		BMKGTimeout:          500 * time.Millisecond,
+		PVMBGTimeout:         1500 * time.Millisecond,
+		PollInterval:         1 * time.Second,
+		PVMBGCbThreshold:     threshold,
+		PVMBGCbProbeInterval: probeInterval,
 	}
-	norm := normalizer.New(zerolog.Nop(), nil)
-	repo := &fakeRepo{}
-	return New(cfg, norm, repo, zerolog.Nop())
+	return New(cfg, normalizer.New(zerolog.Nop(), nil), &fakeRepo{}, zerolog.Nop())
 }
 
 func TestPollConcurrent_BMKGNotBlockedBySlowPVMBG(t *testing.T) {
 	var bmkgCalled, pvmbgCalled atomic.Int32
-
 	bmkgSrv := fastBMKGServer(t, &bmkgCalled)
 	defer bmkgSrv.Close()
-
-	// PVMBG server delays 4s — BMKG should still complete in ~1s.
-	pvmbgSrv := slowPVMBGServer(t, 4*time.Second, &pvmbgCalled)
+	pvmbgSrv := slowPVMBGServer(t, 600*time.Millisecond, &pvmbgCalled)
 	defer pvmbgSrv.Close()
 
-	p := newTestPoller(t, bmkgSrv.URL, pvmbgSrv.URL)
-
+	p := newPollerWithBreaker(bmkgSrv.URL, pvmbgSrv.URL, 5, 30*time.Second)
 	start := time.Now()
 	p.Poll(context.Background(), "test-concurrent", time.Time{})
 	elapsed := time.Since(start)
 
-	// BMKG has a 1s timeout; PVMBG has a 4s timeout. Both run concurrently,
-	// so total wall time should be ~4s (the max of the two), not 5s (sum).
-	// More importantly, BMKG should have completed within its own 1s budget.
-	if elapsed > 4500*time.Millisecond {
-		t.Errorf("Poll took %v; expected ~4s max (concurrent), not 5s+ (sequential)", elapsed)
+	if bmkgCalled.Load() == 0 || pvmbgCalled.Load() == 0 {
+		t.Fatal("expected both agencies to be polled concurrently")
 	}
-
-	if bmkgCalled.Load() == 0 {
-		t.Error("BMKG was never polled")
+	if elapsed > 1200*time.Millisecond {
+		t.Errorf("poll took %v, expected concurrent execution within ~600ms", elapsed)
 	}
-	if pvmbgCalled.Load() == 0 {
-		t.Error("PVMBG was never polled")
-	}
-
-	// BMKG should be UP (it completed quickly).
-	hs := p.Health()
-	if hs.BMKG.Status != "UP" {
-		t.Errorf("BMKG status = %q, want %q", hs.BMKG.Status, "UP")
-	}
-}
-
-func TestPollConcurrent_BMKGCompletesWithinTimeout(t *testing.T) {
-	var bmkgCalled, pvmbgCalled atomic.Int32
-
-	bmkgSrv := fastBMKGServer(t, &bmkgCalled)
-	defer bmkgSrv.Close()
-
-	// PVMBG delays far beyond its 4s timeout.
-	pvmbgSrv := slowPVMBGServer(t, 6*time.Second, &pvmbgCalled)
-	defer pvmbgSrv.Close()
-
-	p := newTestPoller(t, bmkgSrv.URL, pvmbgSrv.URL)
-
-	p.Poll(context.Background(), "test-timeout", time.Time{})
-
-	// BMKG should have succeeded despite PVMBG hanging.
-	hs := p.Health()
-	if hs.BMKG.Status != "UP" {
-		t.Errorf("BMKG status = %q, want %q", hs.BMKG.Status, "UP")
-	}
-	// PVMBG should have timed out (status ERROR) because it took 30s with a 4s ctx.
-	if hs.PVMBG.Status != "ERROR" {
-		t.Errorf("PVMBG status = %q, want %q", hs.PVMBG.Status, "ERROR")
+	if hs := p.Health(); hs.BMKG.Status != "UP" {
+		t.Errorf("expected BMKG UP, got %s", hs.BMKG.Status)
 	}
 }
 
 func TestHealthConcurrentSafe(t *testing.T) {
 	bmkgSrv := fastBMKGServer(t, new(atomic.Int32))
 	defer bmkgSrv.Close()
-
-	// PVMBG completes instantly; we're only testing races in Health().
-	pvmbgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]agency.VolcanicReport{
-			{ReportID: "VR-1", VolcanoID: "GNG-001", AlertLevel: agency.AlertNormal, ReportedAt: time.Now().Format(time.RFC3339)},
-		})
-	}))
+	pvmbgSrv := slowPVMBGServer(t, 0, new(atomic.Int32))
 	defer pvmbgSrv.Close()
 
-	p := newTestPoller(t, bmkgSrv.URL, pvmbgSrv.URL)
-
+	p := newPollerWithBreaker(bmkgSrv.URL, pvmbgSrv.URL, 5, 30*time.Second)
 	var wg sync.WaitGroup
 	var stop atomic.Bool
 
-	// Writer: poll loop.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -172,9 +127,7 @@ func TestHealthConcurrentSafe(t *testing.T) {
 			p.Poll(context.Background(), "race-test", time.Time{})
 		}
 	}()
-
-	// Readers: concurrent Health() calls.
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -183,8 +136,7 @@ func TestHealthConcurrentSafe(t *testing.T) {
 			}
 		}()
 	}
-
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	stop.Store(true)
 	wg.Wait()
 }

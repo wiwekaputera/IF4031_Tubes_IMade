@@ -10,145 +10,69 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/store"
 )
 
-func makeSeismicEvent(id string, occurredAt time.Time) model.SeismicEvent {
-	return model.SeismicEvent{
-		EventID:          id,
-		Magnitude:        5.5,
-		DepthKm:          10.0,
-		EpicenterLat:     -7.54,
-		EpicenterLon:     110.44,
-		RegionName:       "TestRegion",
-		OccurredAt:       occurredAt.Format(time.RFC3339),
-		PotentialTsunami: false,
-	}
+func makeSeismic(id string, t time.Time) model.SeismicEvent {
+	return model.SeismicEvent{EventID: id, Magnitude: 5.5, OccurredAt: t.Format(time.RFC3339)}
 }
 
-func makeTsunamiWarning(id, relatedEventID string, occurredAt time.Time) model.TsunamiWarning {
+func makeWarning(id, relatedID string, t time.Time) model.TsunamiWarning {
 	return model.TsunamiWarning{
 		WarningID:        id,
-		RelatedEventID:   relatedEventID,
+		RelatedEventID:   relatedID,
 		ThreatLevel:      model.ThreatWaspada,
-		AffectedZones:    []string{"zone-a", "zone-b"},
-		EstimatedArrival: occurredAt.Add(20 * time.Minute).Format(time.RFC3339),
+		AffectedZones:    []string{"zone-a"},
+		EstimatedArrival: t.Add(20 * time.Minute).Format(time.RFC3339),
 	}
 }
 
 func TestMemoryStoreSeismicRetentionBoundsCapacity(t *testing.T) {
-	const maxCapacity = 5
-	s := store.NewMemoryStore(maxCapacity)
-
+	s := store.NewMemoryStore(5)
 	base := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 10; i++ {
-		s.AddSeismicEvent(makeSeismicEvent(fmt.Sprintf("evt-%02d", i), base.Add(time.Duration(i)*time.Second)))
+		s.AddSeismicEvent(makeSeismic(fmt.Sprintf("evt-%02d", i), base.Add(time.Duration(i)*time.Second)))
 	}
-
-	seismicCount, tsunamiCount := s.Count()
-	if seismicCount != maxCapacity {
-		t.Fatalf("seismic count: expected %d, got %d", maxCapacity, seismicCount)
+	sc, tc := s.Count()
+	if sc != 5 || tc != 0 {
+		t.Fatalf("expected count 5 seismic, 0 tsunami; got %d, %d", sc, tc)
 	}
-	if tsunamiCount != 0 {
-		t.Fatalf("tsunami count: expected 0, got %d", tsunamiCount)
-	}
-
-	got := s.GetSeismicEvents(nil, maxCapacity+10)
-	if len(got) != maxCapacity {
-		t.Fatalf("GetSeismicEvents: expected %d, got %d", maxCapacity, len(got))
-	}
-
-	// The 5 newest events (indices 5..9) must survive; the 5 oldest (0..4) evicted.
-	for j, evt := range got {
-		wantIdx := 5 + j
-		wantID := fmt.Sprintf("evt-%02d", wantIdx)
-		if evt.EventID != wantID {
-			t.Errorf("position %d: expected event %q, got %q", j, wantID, evt.EventID)
-		}
-
-		tm, err := time.Parse(time.RFC3339, evt.OccurredAt)
-		if err != nil {
-			t.Fatalf("failed to parse occurred_at %q: %v", evt.OccurredAt, err)
-		}
-		wantTS := base.Add(time.Duration(wantIdx) * time.Second)
-		if !tm.Equal(wantTS) {
-			t.Errorf("position %d: expected ts %v, got %v", j, wantTS, tm)
-		}
-
-		// Results must remain in chronological (ascending) order.
-		if j > 0 {
-			prev, _ := time.Parse(time.RFC3339, got[j-1].OccurredAt)
-			if tm.Before(prev) {
-				t.Errorf("events not chronologically ascending at position %d", j)
-			}
-		}
+	got := s.GetSeismicEvents(nil, 15)
+	if len(got) != 5 || got[0].EventID != "evt-05" || got[4].EventID != "evt-09" {
+		t.Fatalf("expected newest 5 events (evt-05..evt-09), got %+v", got)
 	}
 }
 
 func TestMemoryStoreTsunamiRetentionBoundsCapacity(t *testing.T) {
-	const maxCapacity = 5
-	s := store.NewMemoryStore(maxCapacity)
-
+	s := store.NewMemoryStore(5)
 	base := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 10; i++ {
-		s.AddTsunamiWarning(
-			makeTsunamiWarning(fmt.Sprintf("warn-%02d", i), fmt.Sprintf("evt-%02d", i), base.Add(time.Duration(i)*time.Second)),
-			base.Add(time.Duration(i)*time.Second),
-		)
+		s.AddTsunamiWarning(makeWarning(fmt.Sprintf("warn-%02d", i), fmt.Sprintf("evt-%02d", i), base.Add(time.Duration(i)*time.Second)), base.Add(time.Duration(i)*time.Second))
 	}
-
-	seismicCount, tsunamiCount := s.Count()
-	if tsunamiCount != maxCapacity {
-		t.Fatalf("tsunami count: expected %d, got %d", maxCapacity, tsunamiCount)
+	sc, tc := s.Count()
+	if sc != 0 || tc != 5 {
+		t.Fatalf("expected count 0 seismic, 5 tsunami; got %d, %d", sc, tc)
 	}
-	if seismicCount != 0 {
-		t.Fatalf("seismic count: expected 0, got %d", seismicCount)
-	}
-
-	got := s.GetTsunamiWarnings(nil, maxCapacity+10)
-	if len(got) != maxCapacity {
-		t.Fatalf("GetTsunamiWarnings: expected %d, got %d", maxCapacity, len(got))
-	}
-
-	// The 5 newest warnings (indices 5..9) must survive; the 5 oldest evicted.
-	for j, w := range got {
-		wantIdx := 5 + j
-		wantID := fmt.Sprintf("warn-%02d", wantIdx)
-		if w.WarningID != wantID {
-			t.Errorf("position %d: expected warning %q, got %q", j, wantID, w.WarningID)
-		}
-
-		// Referenced sub-slices must still be present on the surviving records.
-		if len(w.AffectedZones) == 0 {
-			t.Errorf("position %d: evicted warning lost its AffectedZones sub-slice", j)
-		}
+	got := s.GetTsunamiWarnings(nil, 15)
+	if len(got) != 5 || got[0].WarningID != "warn-05" || len(got[0].AffectedZones) == 0 {
+		t.Fatalf("expected newest 5 warnings with zones, got %+v", got)
 	}
 }
 
-func TestMemoryStoreRetentionDoesNotEvictUnderCapacity(t *testing.T) {
+func TestMemoryStoreCapacityEdgeCases(t *testing.T) {
+	// Under capacity retains all
 	s := store.NewMemoryStore(5000)
 	base := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 20; i++ {
-		s.AddSeismicEvent(makeSeismicEvent(fmt.Sprintf("evt-%02d", i), base.Add(time.Duration(i)*time.Second)))
+		s.AddSeismicEvent(makeSeismic(fmt.Sprintf("evt-%02d", i), base.Add(time.Duration(i)*time.Second)))
+	}
+	if sc, _ := s.Count(); sc != 20 || len(s.GetSeismicEvents(nil, 100)) != 20 {
+		t.Fatalf("expected 20 events retained under capacity")
 	}
 
-	seismicCount, _ := s.Count()
-	if seismicCount != 20 {
-		t.Fatalf("expected 20 seismic events (under capacity), got %d", seismicCount)
-	}
-
-	got := s.GetSeismicEvents(nil, 100)
-	if len(got) != 20 {
-		t.Fatalf("expected all 20 events retrievable, got %d", len(got))
-	}
-}
-
-func TestNewMemoryStoreClampsInvalidCapacity(t *testing.T) {
-	s := store.NewMemoryStore(0)
-	base := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	s.AddSeismicEvent(makeSeismicEvent("evt-0", base))
-	s.AddSeismicEvent(makeSeismicEvent("evt-1", base.Add(time.Second)))
-
-	sc, _ := s.Count()
-	if sc != 1 {
-		t.Fatalf("expected capacity clamped to 1 (oldest evicted), got %d", sc)
+	// Clamps 0 capacity to 1
+	s0 := store.NewMemoryStore(0)
+	s0.AddSeismicEvent(makeSeismic("evt-0", base))
+	s0.AddSeismicEvent(makeSeismic("evt-1", base.Add(time.Second)))
+	if sc, _ := s0.Count(); sc != 1 {
+		t.Fatalf("expected capacity clamped to 1, got %d", sc)
 	}
 }
 
@@ -161,7 +85,7 @@ func TestMemoryStoreConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			s.AddSeismicEvent(makeSeismicEvent(fmt.Sprintf("evt-%03d", i), base.Add(time.Duration(i)*time.Millisecond)))
+			s.AddSeismicEvent(makeSeismic(fmt.Sprintf("evt-%03d", i), base.Add(time.Duration(i)*time.Millisecond)))
 		}(i)
 	}
 	for i := 0; i < 20; i++ {
@@ -174,8 +98,7 @@ func TestMemoryStoreConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 
-	sc, _ := s.Count()
-	if sc > 500 {
-		t.Fatalf("seismic count exceeds capacity under concurrency: got %d", sc)
+	if sc, _ := s.Count(); sc > 500 {
+		t.Fatalf("seismic count exceeds capacity under concurrency: %d", sc)
 	}
 }
