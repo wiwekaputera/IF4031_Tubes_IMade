@@ -129,61 +129,96 @@ func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (stri
 
 	var storedHazardID string
 	var version int64
+	var ingestedAt time.Time
+	var isNewOrUpdated bool
 	err = tx.QueryRow(ctx, `
-		INSERT INTO canonical_events
-			(hazard_id, source, source_ref_id, hazard_type, severity, area_name,
-			 latitude, longitude, occurred_at, ingested_at, sources, attributes)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11)
-		ON CONFLICT (source, source_ref_id) DO UPDATE SET
-			severity    = EXCLUDED.severity,
-			area_name   = EXCLUDED.area_name,
-			sources     = canonical_events.sources || EXCLUDED.sources,
-			attributes  = canonical_events.attributes || EXCLUDED.attributes,
-			version     = canonical_events.version + 1,
-			updated_at  = now()
-		RETURNING hazard_id, version
+		WITH pre AS (
+			SELECT version
+			FROM canonical_events
+			WHERE source = $2 AND source_ref_id = $3
+		),
+		ins AS (
+			INSERT INTO canonical_events
+				(hazard_id, source, source_ref_id, hazard_type, severity, area_name,
+				 latitude, longitude, occurred_at, ingested_at, sources, attributes)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11)
+			ON CONFLICT (source, source_ref_id) DO UPDATE SET
+				severity    = EXCLUDED.severity,
+				area_name   = EXCLUDED.area_name,
+				sources     = canonical_events.sources || EXCLUDED.sources,
+				attributes  = canonical_events.attributes || EXCLUDED.attributes,
+				version     = CASE
+					WHEN canonical_events.severity IS DISTINCT FROM EXCLUDED.severity
+					  OR canonical_events.area_name IS DISTINCT FROM EXCLUDED.area_name
+					  OR canonical_events.sources IS DISTINCT FROM (canonical_events.sources || EXCLUDED.sources)
+					  OR canonical_events.attributes IS DISTINCT FROM (canonical_events.attributes || EXCLUDED.attributes)
+					THEN canonical_events.version + 1
+					ELSE canonical_events.version
+				END,
+				updated_at  = CASE
+					WHEN canonical_events.severity IS DISTINCT FROM EXCLUDED.severity
+					  OR canonical_events.area_name IS DISTINCT FROM EXCLUDED.area_name
+					  OR canonical_events.sources IS DISTINCT FROM (canonical_events.sources || EXCLUDED.sources)
+					  OR canonical_events.attributes IS DISTINCT FROM (canonical_events.attributes || EXCLUDED.attributes)
+					THEN now()
+					ELSE canonical_events.updated_at
+				END
+			RETURNING hazard_id, version, ingested_at
+		)
+		SELECT
+			ins.hazard_id,
+			ins.version,
+			ins.ingested_at,
+			(pre.version IS NULL OR ins.version > pre.version) AS is_new_or_updated
+		FROM ins
+		LEFT JOIN pre ON true;
 	`,
 		rec.HazardID, rec.Source, rec.SourceRefID, string(rec.HazardType), string(rec.Severity),
 		rec.AreaName, rec.Latitude, rec.Longitude, rec.OccurredAt,
 		sourcesJSON, attrsJSON,
-	).Scan(&storedHazardID, &version)
+	).Scan(&storedHazardID, &version, &ingestedAt, &isNewOrUpdated)
 	if err != nil {
 		return "", err
 	}
 
-	he := hazard.HazardEvent{
-		HazardID:    storedHazardID,
-		Source:      hazard.Source(rec.Source),
-		SourceRefID: rec.SourceRefID,
-		HazardType:  rec.HazardType,
-		Severity:    rec.Severity,
-		AreaName:    rec.AreaName,
-		Latitude:    rec.Latitude,
-		Longitude:   rec.Longitude,
-		OccurredAt:  rec.OccurredAt.Format(time.RFC3339),
-		Attributes:  rec.Attributes,
-	}
+	if isNewOrUpdated {
+		he := hazard.HazardEvent{
+			HazardID:    storedHazardID,
+			Source:      hazard.Source(rec.Source),
+			SourceRefID: rec.SourceRefID,
+			HazardType:  rec.HazardType,
+			Severity:    rec.Severity,
+			AreaName:    rec.AreaName,
+			Latitude:    rec.Latitude,
+			Longitude:   rec.Longitude,
+			OccurredAt:  rec.OccurredAt.Format(time.RFC3339),
+			IngestedAt:  ingestedAt.Format(time.RFC3339),
+			Attributes:  rec.Attributes,
+		}
 
-	env := event.Envelope{
-		EventID: storedHazardID,
-		Version: version,
-		TraceID: rec.CorrelationID,
-		Data:    he,
-	}
+		env := event.Envelope{
+			EventID:    storedHazardID,
+			Version:    version,
+			EventType:  rec.HazardType,
+			OccurredAt: rec.OccurredAt.Format(time.RFC3339),
+			TraceID:    rec.CorrelationID,
+			Data:       he,
+		}
 
-	payload, err := json.Marshal(env)
-	if err != nil {
-		return "", err
-	}
+		payload, err := json.Marshal(env)
+		if err != nil {
+			return "", err
+		}
 
-	eventKey := storedHazardID + ":" + strconv.FormatInt(version, 10)
-	_, err = tx.Exec(ctx, `
-		INSERT INTO outbox (event_key, payload)
-		VALUES ($1, $2)
-		ON CONFLICT (event_key) DO NOTHING
-	`, eventKey, payload)
-	if err != nil {
-		return "", err
+		eventKey := storedHazardID + ":" + strconv.FormatInt(version, 10)
+		_, err = tx.Exec(ctx, `
+			INSERT INTO outbox (event_key, payload)
+			VALUES ($1, $2)
+			ON CONFLICT (event_key) DO NOTHING
+		`, eventKey, payload)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

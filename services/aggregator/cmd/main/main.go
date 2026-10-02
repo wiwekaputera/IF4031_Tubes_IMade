@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -41,9 +42,18 @@ func main() {
 		Str("port", cfg.Port).
 		Str("bmkg_base_url", cfg.BMKGBaseURL).
 		Str("pvmbg_base_url", cfg.PVMBGBaseURL).
-		Str("db_dsn", cfg.DBDSN).
-		Str("nats_url", cfg.NATSURL).
 		Msg("Starting aggregator service")
+
+	if u, err := url.Parse(cfg.DBDSN); err == nil {
+		logger.Info().Str("db_host", u.Host).Str("db_name", strings.TrimPrefix(u.Path, "/")).Msg("Configured database")
+	} else {
+		logger.Info().Msg("Configured database (DSN unparseable)")
+	}
+	if u, err := url.Parse(cfg.NATSURL); err == nil {
+		logger.Info().Str("nats_host", u.Host).Msg("Configured NATS")
+	} else {
+		logger.Info().Msg("Configured NATS (URL unparseable)")
+	}
 
 	// 3. Connect to canonical PostgreSQL store via connection pool
 	dbPool, err := pgxpool.New(context.Background(), cfg.DBDSN)
@@ -72,14 +82,14 @@ func main() {
 	norm := normalizer.New(logger, volcanoRefs)
 	p := poller.New(cfg, norm, repo, logger)
 
-	healthFn := func() (string, string, *time.Time) {
+	healthFn := func() (string, string, time.Time, time.Time, *time.Time) {
 		hs := p.Health()
 		var pvmbgStaleSince *time.Time
 		if hs.PVMBG.StaleSince != nil {
 			t := *hs.PVMBG.StaleSince
 			pvmbgStaleSince = &t
 		}
-		return hs.BMKG.Status, hs.PVMBG.Status, pvmbgStaleSince
+		return hs.BMKG.Status, hs.PVMBG.Status, hs.BMKG.LastSynced, hs.PVMBG.LastSynced, pvmbgStaleSince
 	}
 
 	h := queryapi.New(repo, logger, healthFn)

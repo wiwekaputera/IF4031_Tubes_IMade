@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"fmt"
 	mathrand "math/rand"
 	"net/http"
@@ -166,7 +167,7 @@ func AuthMiddleware(expectedToken string) Middleware {
 			}
 
 			token := strings.TrimSpace(authHeader[len(bearerPrefix):])
-			if token != expectedToken {
+			if subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) != 1 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"error":"Unauthorized: missing or invalid Bearer token"}`))

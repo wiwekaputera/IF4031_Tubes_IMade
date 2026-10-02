@@ -10,7 +10,7 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
 )
 
-type SourceHealthFunc func() (bmkg, pvmbg string, pvmbgStaleSince *time.Time)
+type SourceHealthFunc func() (bmkgStatus, pvmbgStatus string, bmkgLastSynced, pvmbgLastSynced time.Time, pvmbgStaleSince *time.Time)
 
 type Handler struct {
 	repo             store.CanonicalRepo
@@ -131,23 +131,31 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.sourceHealthFunc != nil {
-		bmkgStatus, pvmbgStatus, pvmbgStaleSince := h.sourceHealthFunc()
-		sources := map[string]interface{}{
-			"bmkg": map[string]interface{}{
-				"status":         bmkgStatus,
-				"last_synced_at": time.Now().UTC().Format(time.RFC3339),
-			},
+		bmkgStatus, pvmbgStatus, bmkgLastSynced, pvmbgLastSynced, pvmbgStaleSince := h.sourceHealthFunc()
+		bmkgMeta := map[string]interface{}{
+			"status": bmkgStatus,
 		}
+		if !bmkgLastSynced.IsZero() {
+			bmkgMeta["last_synced_at"] = bmkgLastSynced.UTC().Format(time.RFC3339)
+		} else {
+			bmkgMeta["last_synced_at"] = time.Now().UTC().Format(time.RFC3339)
+		}
+
 		pvmbgMeta := map[string]interface{}{
 			"status": pvmbgStatus,
 		}
 		if pvmbgStaleSince != nil {
 			pvmbgMeta["stale_since"] = pvmbgStaleSince.Format(time.RFC3339)
+		} else if !pvmbgLastSynced.IsZero() {
+			pvmbgMeta["last_synced_at"] = pvmbgLastSynced.UTC().Format(time.RFC3339)
 		} else {
 			pvmbgMeta["last_synced_at"] = time.Now().UTC().Format(time.RFC3339)
 		}
-		sources["pvmbg"] = pvmbgMeta
-		resp.Meta["sources"] = sources
+
+		resp.Meta["sources"] = map[string]interface{}{
+			"bmkg":  bmkgMeta,
+			"pvmbg": pvmbgMeta,
+		}
 	}
 
 	h.writeJSON(w, http.StatusOK, resp)

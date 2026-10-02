@@ -24,7 +24,7 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 		return
 	}
 
-	sinceStr := since.Format(time.RFC3339)
+	sinceStr := since.UTC().Format(time.RFC3339)
 	reports, err := p.fetchVolcanicReports(ctx, corrID, sinceStr)
 	if err != nil {
 		p.breaker.RecordFailure()
@@ -64,8 +64,6 @@ func StartPolling(ctx context.Context, wg *sync.WaitGroup, p *Poller, cfg *confi
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
-	lastPoll := time.Time{}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -73,8 +71,7 @@ func StartPolling(ctx context.Context, wg *sync.WaitGroup, p *Poller, cfg *confi
 			return
 		case t := <-ticker.C:
 			corrID := fmt.Sprintf("poll-%d", t.UnixNano())
-			p.Poll(ctx, corrID, lastPoll)
-			lastPoll = t
+			p.Poll(ctx, corrID, time.Time{})
 		}
 	}
 }

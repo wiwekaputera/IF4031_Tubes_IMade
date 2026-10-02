@@ -9,6 +9,8 @@ import "github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 type Envelope struct {
 	EventID    string             `json:"event_id"`
 	Version    int64              `json:"version"`
-	TraceID    string             `json:"trace_id"`    // correlation_id from the ingest cycle
+	EventType  hazard.HazardType  `json:"event_type"`
+	OccurredAt string             `json:"occurred_at"`
+	TraceID    string             `json:"trace_id"` // correlation_id from the ingest cycle
 	Data       hazard.HazardEvent `json:"data"`
 }

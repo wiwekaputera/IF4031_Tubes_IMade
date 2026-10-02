@@ -54,7 +54,7 @@ func (g *Generator) generateEvent() {
 	now := time.Now().UTC()
 	seq := atomic.AddUint64(&g.counter, 1)
 	// Example: seq=1 -> "evt-bmkg-dyn-0001"
-	eventID := fmt.Sprintf("evt-bmkg-dyn-%04d", seq)
+	eventID := fmt.Sprintf("evt-bmkg-dyn-%s-%04d", now.Format("20060102T150405"), seq)
 
 	// Pick random region
 	reg := regionTemplates[g.rng.Intn(len(regionTemplates))]
@@ -112,7 +112,7 @@ func (g *Generator) generateEvent() {
 		estMinutes := 15 + g.rng.Intn(30)
 		arrival := now.Add(time.Duration(estMinutes) * time.Minute).Format(time.RFC3339)
 
-		warningID := fmt.Sprintf("warn-bmkg-dyn-%04d", seq)
+		warningID := fmt.Sprintf("warn-bmkg-dyn-%s-%04d", now.Format("20060102T150405"), seq)
 		warning := model.TsunamiWarning{
 			WarningID:        warningID,
 			RelatedEventID:   eventID,

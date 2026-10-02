@@ -138,6 +138,10 @@ func (h *Handler) GetVolcanicReports(w http.ResponseWriter, r *http.Request) {
 
 // ToggleOutage handles POST /admin/outage — toggles the outage state.
 func (h *Handler) ToggleOutage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	state := h.outage.Toggle()
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message": "outage toggled",
@@ -148,6 +152,10 @@ func (h *Handler) ToggleOutage(w http.ResponseWriter, r *http.Request) {
 // ToggleSchemaVersion handles POST /admin/schema-version — toggles whether
 // confidence_level appears in volcanic report responses.
 func (h *Handler) ToggleSchemaVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	state := h.schemaVersion.Toggle()
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message":          "schema version toggled",

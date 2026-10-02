@@ -382,8 +382,9 @@ func TestGetEvents_MetaSourcesRealTimestamps(t *testing.T) {
 	repo := &fakeQueryRepo{events: testEvents()}
 
 	staleTime := time.Date(2026, 9, 21, 10, 30, 0, 0, time.UTC)
-	healthFn := func() (bmkg, pvmbg string, pvmbgStaleSince *time.Time) {
-		return "UP", "DOWN", &staleTime
+	bmkgSync := time.Date(2026, 9, 21, 10, 35, 0, 0, time.UTC)
+	healthFn := func() (string, string, time.Time, time.Time, *time.Time) {
+		return "UP", "DOWN", bmkgSync, time.Time{}, &staleTime
 	}
 
 	h := New(repo, zerolog.Nop(), healthFn)
@@ -467,8 +468,9 @@ func TestGetEvents_NoSourceHealthFunc(t *testing.T) {
 
 func TestGetEvents_MetaSourcesLastSyncedWhenNotStale(t *testing.T) {
 	repo := &fakeQueryRepo{events: testEvents()}
-	healthFn := func() (bmkg, pvmbg string, pvmbgStaleSince *time.Time) {
-		return "UP", "UP", nil
+	syncTime := time.Date(2026, 9, 21, 10, 30, 0, 0, time.UTC)
+	healthFn := func() (string, string, time.Time, time.Time, *time.Time) {
+		return "UP", "UP", syncTime, syncTime, nil
 	}
 
 	h := New(repo, zerolog.Nop(), healthFn)

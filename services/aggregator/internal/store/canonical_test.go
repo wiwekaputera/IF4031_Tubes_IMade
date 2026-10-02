@@ -233,6 +233,68 @@ func TestUpsertEvent_PreservesHazardID(t *testing.T) {
 	}
 }
 
+func TestUpsertEvent_GuardsVersionAndOutboxOnUnchangedRePoll(t *testing.T) {
+	truncateTables(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	hazardID := uuid.NewString()
+	req := UpsertRequest{
+		HazardID:      hazardID,
+		Source:        "BMKG",
+		SourceRefID:   "evt-idem-001",
+		HazardType:    hazard.HazardTypeSeismic,
+		Severity:      hazard.SeveritySiaga,
+		AreaName:      "Sulawesi",
+		Latitude:      -1.4,
+		Longitude:     119.8,
+		OccurredAt:    time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+		Sources:       map[string]interface{}{"bmkg": map[string]interface{}{"event_id": "evt-idem-001"}},
+		Attributes:    map[string]interface{}{"magnitude": 6.7},
+		CorrelationID: "test-corr-1",
+	}
+
+	// First insert
+	id1, err := testRepo.UpsertEvent(ctx, req)
+	if err != nil {
+		t.Fatalf("initial upsert failed: %v", err)
+	}
+	if id1 != hazardID {
+		t.Fatalf("expected hazard_id %s, got %s", hazardID, id1)
+	}
+
+	// Verify outbox has 1 row with version 1
+	var outboxCount int
+	err = testPool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE event_key LIKE $1", hazardID+"%").Scan(&outboxCount)
+	if err != nil || outboxCount != 1 {
+		t.Fatalf("expected 1 outbox row, got %d (err: %v)", outboxCount, err)
+	}
+
+	// Re-poll the exact same unchanged record
+	reqRePoll := req
+	reqRePoll.HazardID = uuid.NewString() // new UUID generated on re-poll
+	id2, err := testRepo.UpsertEvent(ctx, reqRePoll)
+	if err != nil {
+		t.Fatalf("re-poll upsert failed: %v", err)
+	}
+	if id2 != hazardID {
+		t.Fatalf("hazard_id should be preserved: expected %s, got %s", hazardID, id2)
+	}
+
+	// Verify version is still 1
+	var version int64
+	err = testPool.QueryRow(ctx, "SELECT version FROM canonical_events WHERE hazard_id = $1", hazardID).Scan(&version)
+	if err != nil || version != 1 {
+		t.Fatalf("expected version to remain 1 on unchanged re-poll, got %d (err: %v)", version, err)
+	}
+
+	// Verify outbox STILL has only 1 row (no duplicate emitted!)
+	err = testPool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE event_key LIKE $1", hazardID+"%").Scan(&outboxCount)
+	if err != nil || outboxCount != 1 {
+		t.Fatalf("expected still 1 outbox row after unchanged re-poll, got %d (err: %v)", outboxCount, err)
+	}
+}
+
 func TestGetEvents_Filters(t *testing.T) {
 	truncateTables(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

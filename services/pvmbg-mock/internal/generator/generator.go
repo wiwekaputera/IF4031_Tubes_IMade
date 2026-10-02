@@ -76,7 +76,7 @@ func (g *Generator) Start(ctx context.Context) {
 func (g *Generator) generateReport() {
 	now := time.Now().UTC()
 	seq := atomic.AddUint64(&g.counter, 1)
-	reportID := fmt.Sprintf("rpt-pvmbg-dyn-%04d", seq)
+	reportID := fmt.Sprintf("rpt-pvmbg-dyn-%s-%04d", now.Format("20060102T150405"), seq)
 
 	vt := volcanoTemplates[g.rng.Intn(len(volcanoTemplates))]
 	alertLevel := vt.alerts[g.rng.Intn(len(vt.alerts))]

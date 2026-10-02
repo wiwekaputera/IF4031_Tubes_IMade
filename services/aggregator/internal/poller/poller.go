@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -67,6 +69,17 @@ func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.PollInterval*2)
 	defer cancel()
 
+	p.mu.RLock()
+	bmkgSince := p.health.BMKG.LastSynced
+	pvmbgSince := p.health.PVMBG.LastSynced
+	p.mu.RUnlock()
+
+	// If explicit non-zero since passed, respect it (for custom queries or tests)
+	if !since.IsZero() {
+		bmkgSince = since
+		pvmbgSince = since
+	}
+
 	// Per ARCHITECTURE.md:135-138, one goroutine per upstream source with
 	// errgroup, each with its own context timeout. A slow/failed PVMBG must
 	// never block the BMKG goroutine, so BMKG data does not go stale while
@@ -76,14 +89,14 @@ func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 	bmkgCtx, bmkgCancel := context.WithTimeout(ctx, p.cfg.BMKGTimeout)
 	defer bmkgCancel()
 	eg.Go(func() error {
-		p.pollBMKG(bmkgCtx, corrID, since)
+		p.pollBMKG(bmkgCtx, corrID, bmkgSince)
 		return nil
 	})
 
 	pvmbgCtx, pvmbgCancel := context.WithTimeout(ctx, p.cfg.PVMBGTimeout)
 	defer pvmbgCancel()
 	eg.Go(func() error {
-		p.pollPVMBG(pvmbgCtx, corrID, since)
+		p.pollPVMBG(pvmbgCtx, corrID, pvmbgSince)
 		return nil
 	})
 
@@ -91,7 +104,7 @@ func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 }
 
 func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
-	sinceStr := since.Format(time.RFC3339)
+	sinceStr := since.UTC().Format(time.RFC3339)
 
 	events, err := p.fetchSeismicEvents(ctx, corrID, sinceStr)
 	if err != nil {
@@ -139,17 +152,17 @@ func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
 }
 
 func (p *Poller) fetchSeismicEvents(ctx context.Context, corrID string, since string) ([]agency.SeismicEvent, error) {
-	url := fmt.Sprintf("%s/seismic-events?since=%s", p.cfg.BMKGBaseURL, since)
+	url := fmt.Sprintf("%s/seismic-events?since=%s", p.cfg.BMKGBaseURL, url.QueryEscape(since))
 	return fetchAgencyEvents[agency.SeismicEvent](ctx, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchTsunamiWarnings(ctx context.Context, corrID string, since string) ([]agency.TsunamiWarning, error) {
-	url := fmt.Sprintf("%s/tsunami-warnings?since=%s", p.cfg.BMKGBaseURL, since)
+	url := fmt.Sprintf("%s/tsunami-warnings?since=%s", p.cfg.BMKGBaseURL, url.QueryEscape(since))
 	return fetchAgencyEvents[agency.TsunamiWarning](ctx, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchVolcanicReports(ctx context.Context, corrID string, since string) ([]agency.VolcanicReport, error) {
-	url := fmt.Sprintf("%s/volcanic-reports?since=%s", p.cfg.PVMBGBaseURL, since)
+	url := fmt.Sprintf("%s/volcanic-reports?since=%s", p.cfg.PVMBGBaseURL, url.QueryEscape(since))
 	return fetchAgencyEvents[agency.VolcanicReport](ctx, p.pvmbgClient, url, corrID, p.cfg.PVMBGBearerToken, "Authorization")
 }
 
@@ -169,7 +182,10 @@ func fetchAgencyEvents[T any](ctx context.Context, client *http.Client, url, cor
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)

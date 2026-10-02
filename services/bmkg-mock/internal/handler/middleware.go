@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"fmt"
 	mathrand "math/rand"
 	"net/http"
@@ -144,7 +145,7 @@ func AuthMiddleware(expectedKey string) Middleware {
 			// 2. BMKG API Key Validation:
 			// Validate incoming header X-BMKG-Key against expected key.
 			bmkgKey := strings.TrimSpace(r.Header.Get("X-BMKG-Key"))
-			if bmkgKey == "" || bmkgKey != expectedKey {
+			if bmkgKey == "" || subtle.ConstantTimeCompare([]byte(bmkgKey), []byte(expectedKey)) != 1 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"error":"Unauthorized: invalid or missing X-BMKG-Key"}`))
