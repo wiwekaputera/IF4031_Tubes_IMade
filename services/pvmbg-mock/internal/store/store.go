@@ -67,9 +67,7 @@ func (s *MemoryStore) AddVolcanicReport(rpt model.VolcanicReport) {
 }
 
 // GetVolcanicReports retrieves volcanic reports reported on or after 'since'.
-// If 'since' is nil, all reports are returned up to 'limit'.
-// Results are returned in chronological (ascending reportedAt) order. No sorting
-// or timestamp parsing is performed on the read path.
+// If 'since' is nil, reports are returned in chronological order up to 'limit'.
 func (s *MemoryStore) GetVolcanicReports(since *time.Time, limit int) []model.VolcanicReport {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

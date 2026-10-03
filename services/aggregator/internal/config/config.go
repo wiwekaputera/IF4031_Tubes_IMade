@@ -1,3 +1,4 @@
+// Package config manages runtime configuration for the aggregator service.
 package config
 
 import (
@@ -7,6 +8,7 @@ import (
 	"time"
 )
 
+// Config holds runtime configuration parameters for the aggregator service.
 type Config struct {
 	Port                 string
 	BMKGBaseURL          string
@@ -23,6 +25,7 @@ type Config struct {
 	LogLevel             string
 }
 
+// Load loads configuration from environment variables with sensible defaults.
 func Load() *Config {
 	return &Config{
 		Port:                 getEnv("PORT", "8090"),

@@ -1,3 +1,4 @@
+// Package store provides an in-memory, thread-safe store for seismic events and tsunami warnings.
 package store
 
 import (
@@ -17,27 +18,21 @@ type Store interface {
 	Count() (seismicCount int, tsunamiCount int)
 }
 
-// storedSeismicEvent wraps a seismic event together with its pre-parsed
-// occurrence timestamp, so time.Parse is never invoked on the read path.
+// storedSeismicEvent stores a seismic event with its pre-parsed timestamp.
 type storedSeismicEvent struct {
 	event      model.SeismicEvent
 	occurredAt time.Time
 }
 
+// warningRecord stores a tsunami warning with its pre-parsed timestamps.
 type warningRecord struct {
 	warning    model.TsunamiWarning
 	occurredAt time.Time
 	arrivalAt  time.Time
 }
 
-// MemoryStore is a thread-safe in-memory store for seismic events and tsunami
-// warnings. Both collections are kept in chronological (ascending occurredAt)
-// order, so read paths can locate records with a binary search and never need to
-// sort a copy or re-parse timestamps.
-//
-// Each collection is bounded by maxCapacity: the newest maxCapacity records are
-// retained in a sliding window, evicting the oldest records from the head on
-// every overflow, so memory usage stays strictly capped.
+// MemoryStore is a thread-safe in-memory store for seismic events and tsunami warnings.
+// Records are stored in chronological order and bounded by a sliding-window capacity.
 type MemoryStore struct {
 	mu             sync.RWMutex
 	maxCapacity    int
@@ -45,8 +40,7 @@ type MemoryStore struct {
 	tsunamiRecords []warningRecord
 }
 
-// NewMemoryStore creates a new instance of MemoryStore bounded to maxCapacity
-// records. Values below 1 are clamped to 1.
+// NewMemoryStore initializes a MemoryStore bounded to maxCapacity records.
 func NewMemoryStore(maxCapacity int) *MemoryStore {
 	if maxCapacity < 1 {
 		maxCapacity = 1
@@ -58,8 +52,7 @@ func NewMemoryStore(maxCapacity int) *MemoryStore {
 	}
 }
 
-// AddSeismicEvent adds a seismic event to the store in chronological order.
-// The occurred_at timestamp is parsed exactly once, at insertion time.
+// AddSeismicEvent inserts a seismic event into the store in chronological order.
 func (s *MemoryStore) AddSeismicEvent(evt model.SeismicEvent) {
 	occurredAt, _ := parseTimestamp(evt.OccurredAt)
 
@@ -77,9 +70,7 @@ func (s *MemoryStore) AddSeismicEvent(evt model.SeismicEvent) {
 }
 
 // GetSeismicEvents retrieves seismic events occurred on or after 'since'.
-// If 'since' is nil, all events are returned up to 'limit'.
-// Results are returned in chronological (ascending occurredAt) order. No sorting
-// or timestamp parsing is performed on the read path.
+// If 'since' is nil, events are returned in chronological order up to 'limit'.
 func (s *MemoryStore) GetSeismicEvents(since *time.Time, limit int) []model.SeismicEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -103,9 +94,7 @@ func (s *MemoryStore) GetSeismicEvents(since *time.Time, limit int) []model.Seis
 	return result
 }
 
-// AddTsunamiWarning adds a tsunami warning to the store in chronological order.
-// The occurrence timestamp is supplied pre-parsed; the estimated arrival is parsed
-// exactly once, at insertion time.
+// AddTsunamiWarning inserts a tsunami warning into the store in chronological order.
 func (s *MemoryStore) AddTsunamiWarning(warn model.TsunamiWarning, occurredAt time.Time) {
 	var arrivalAt time.Time
 	if t, err := time.Parse(time.RFC3339, warn.EstimatedArrival); err == nil {
@@ -131,13 +120,8 @@ func (s *MemoryStore) AddTsunamiWarning(warn model.TsunamiWarning, occurredAt ti
 	s.tsunamiRecords = evictOldest(s.tsunamiRecords, s.maxCapacity)
 }
 
-// GetTsunamiWarnings retrieves tsunami warnings matching the 'since' filter.
-// If 'since' is nil, all warnings are returned up to 'limit'.
-// A warning is included when it either occurred on or after 'since', or is still
-// estimated to arrive on or after 'since'. Because arrival times are not strictly
-// monotonic with occurrence times, the matching set is not a contiguous suffix, so a
-// linear scan (no copy, no sort, no parse) is used to preserve the exact filter
-// semantics. Results are returned in chronological (ascending occurredAt) order.
+// GetTsunamiWarnings retrieves tsunami warnings occurring or arriving on or after 'since'.
+// If 'since' is nil, warnings are returned in chronological order up to 'limit'.
 func (s *MemoryStore) GetTsunamiWarnings(since *time.Time, limit int) []model.TsunamiWarning {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -167,7 +151,7 @@ func (s *MemoryStore) Count() (int, int) {
 	return len(s.seismicEvents), len(s.tsunamiRecords)
 }
 
-// parseTimestamp parses an ISO 8601 timestamp string, trying RFC3339 then RFC3339Nano.
+// parseTimestamp parses an RFC3339 or RFC3339Nano timestamp string.
 func parseTimestamp(s string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
@@ -176,11 +160,7 @@ func parseTimestamp(s string) (time.Time, error) {
 	return t, err
 }
 
-// evictOldest enforces the sliding-window retention cap on a chronologically
-// (ascending) ordered slice. It zeroes the dropped head elements so that any
-// slices or pointers they reference can be garbage-collected, then reslices to
-// keep the newest maxCapacity records. When len(slice) <= maxCapacity the slice
-// is returned unchanged.
+// evictOldest caps slice length to maxCapacity, discarding the oldest elements.
 func evictOldest[T any](slice []T, maxCapacity int) []T {
 	if len(slice) <= maxCapacity {
 		return slice

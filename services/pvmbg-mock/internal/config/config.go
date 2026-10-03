@@ -1,3 +1,4 @@
+// Package config manages runtime configuration for the pvmbg-mock service.
 package config
 
 import (
@@ -5,23 +6,21 @@ import (
 	"strconv"
 )
 
-// DefaultPageLimit is the number of records returned when the client omits ?limit.
-const DefaultPageLimit = 50
+const (
+	// DefaultPageLimit is the default page size when ?limit is omitted.
+	DefaultPageLimit = 250
 
-// MaxPageLimit is the hard ceiling to prevent clients from requesting huge pages.
-const MaxPageLimit = 100
+	// MaxPageLimit is the maximum page size allowed per request.
+	MaxPageLimit = 1000
 
-// MaxStoreCapacity is the default upper bound on the number of reports retained in
-// the in-memory store. At ~5,000 records this retains under 1 MB of RAM while
-// keeping the store well above the initial seed count (≥20 records) so that seed
-// data is never prematurely evicted at startup.
-const MaxStoreCapacity = 5000
+	// MaxStoreCapacity is the default capacity for the in-memory report store.
+	MaxStoreCapacity = 100000
 
-// MinStoreCapacity is the smallest retention capacity allowed via configuration.
-// It is intentionally larger than the seed count so historical seed records remain
-// available until dynamically generated events displace them over many ticks.
-const MinStoreCapacity = 20
+	// MinStoreCapacity is the minimum allowed retention capacity.
+	MinStoreCapacity = 20
+)
 
+// Config holds runtime configuration parameters for the pvmbg-mock service.
 type Config struct {
 	Port             string
 	BearerToken      string
@@ -34,6 +33,7 @@ type Config struct {
 	LogLevel         string
 }
 
+// Load loads configuration from environment variables with sensible defaults.
 func Load() *Config {
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -134,7 +134,7 @@ func TestSeismicEventsEndpoint(t *testing.T) {
 			}
 		}
 
-		for i := 0; i < 90; i++ {
+		for i := 0; i < config.MaxPageLimit; i++ {
 			memStore.AddSeismicEvent(model.SeismicEvent{
 				EventID:    fmt.Sprintf("evt-clamped-%04d", i),
 				OccurredAt: time.Now().Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),

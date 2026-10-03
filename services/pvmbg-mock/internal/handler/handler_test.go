@@ -138,7 +138,7 @@ func TestVolcanicReportsEndpoint(t *testing.T) {
 			}
 		}
 
-		for i := 0; i < 90; i++ {
+		for i := 0; i < config.MaxPageLimit; i++ {
 			memStore.AddVolcanicReport(model.VolcanicReport{
 				ReportID:   fmt.Sprintf("rpt-clamped-%04d", i),
 				VolcanoID:  "GNG-001",
