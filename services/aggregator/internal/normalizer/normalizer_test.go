@@ -88,19 +88,20 @@ func TestNormalizeSeismic(t *testing.T) {
 
 func TestNormalizeVolcanic(t *testing.T) {
 	n := newTestNormalizer()
-	cl := 0.85
-	report := agency.VolcanicReport{
-		ReportID:         "rep-001",
-		VolcanoID:        "GNG-001",
-		AlertLevel:       agency.AlertSiaga,
-		EruptionCount24h: 3,
-		AshColumnHeightM: 5000.0,
-		ReportedAt:       "2026-09-21T22:40:00Z",
-		ConfidenceLevel:  &cl,
-		Extra: map[string]json.RawMessage{
-			"sensor_status": json.RawMessage(`"CALIBRATED"`),
-			"wind_dir":      json.RawMessage(`"NE"`),
-		},
+	rawJSON := []byte(`{
+		"report_id": "rep-001",
+		"volcano_id": "GNG-001",
+		"alert_level": "Siaga",
+		"eruption_count_24h": 3,
+		"ash_column_height_m": 5000.0,
+		"reported_at": "2026-09-21T22:40:00Z",
+		"confidence_level": 0.85,
+		"sensor_status": "CALIBRATED",
+		"wind_dir": "NE"
+	}`)
+	var report agency.VolcanicReport
+	if err := json.Unmarshal(rawJSON, &report); err != nil {
+		t.Fatalf("failed to unmarshal volcanic report: %v", err)
 	}
 
 	rec := n.NormalizeVolcanic(report)

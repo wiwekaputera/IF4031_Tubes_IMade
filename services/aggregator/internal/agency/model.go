@@ -55,7 +55,6 @@ type VolcanicReport struct {
 	EruptionCount24h int                `json:"eruption_count_24h"`
 	AshColumnHeightM float64            `json:"ash_column_height_m"`
 	ReportedAt       string             `json:"reported_at"` // ISO 8601
-	ConfidenceLevel  *float64           `json:"confidence_level,omitempty"`
 
 	// Extra holds unrecognized fields for forward compatibility.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -69,7 +68,6 @@ var knownVolcanicFields = map[string]struct{}{
 	"eruption_count_24h":  {},
 	"ash_column_height_m": {},
 	"reported_at":         {},
-	"confidence_level":    {},
 }
 
 // UnmarshalJSON decodes known fields into the struct and captures remaining fields in Extra.

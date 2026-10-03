@@ -99,9 +99,6 @@ func (n *Normalizer) NormalizeVolcanic(report agency.VolcanicReport) store.Upser
 		"eruption_count_24h":  report.EruptionCount24h,
 		"ash_column_height_m": report.AshColumnHeightM,
 	}
-	if report.ConfidenceLevel != nil {
-		attributes["confidence_level"] = *report.ConfidenceLevel
-	}
 
 	// Preserve any unrecognized extra fields into attributes.
 	for k, raw := range report.Extra {

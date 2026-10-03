@@ -151,20 +151,20 @@ func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
 
 func (p *Poller) fetchSeismicEvents(ctx context.Context, corrID string, since string) ([]agency.SeismicEvent, error) {
 	url := fmt.Sprintf("%s/seismic-events?since=%s", p.cfg.BMKGBaseURL, url.QueryEscape(since))
-	return fetchAgencyEvents[agency.SeismicEvent](ctx, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
+	return fetchAgencyEvents[agency.SeismicEvent](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchTsunamiWarnings(ctx context.Context, corrID string, since string) ([]agency.TsunamiWarning, error) {
 	url := fmt.Sprintf("%s/tsunami-warnings?since=%s", p.cfg.BMKGBaseURL, url.QueryEscape(since))
-	return fetchAgencyEvents[agency.TsunamiWarning](ctx, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
+	return fetchAgencyEvents[agency.TsunamiWarning](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchVolcanicReports(ctx context.Context, corrID string, since string) ([]agency.VolcanicReport, error) {
 	url := fmt.Sprintf("%s/volcanic-reports?since=%s", p.cfg.PVMBGBaseURL, url.QueryEscape(since))
-	return fetchAgencyEvents[agency.VolcanicReport](ctx, p.pvmbgClient, url, corrID, p.cfg.PVMBGBearerToken, "Authorization")
+	return fetchAgencyEvents[agency.VolcanicReport](ctx, p.logger, p.pvmbgClient, url, corrID, p.cfg.PVMBGBearerToken, "Authorization")
 }
 
-func fetchAgencyEvents[T any](ctx context.Context, client *http.Client, url, corrID, token, authHeader string) ([]T, error) {
+func fetchAgencyEvents[T any](ctx context.Context, logger zerolog.Logger, client *http.Client, url, corrID, token, authHeader string) ([]T, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -176,14 +176,30 @@ func fetchAgencyEvents[T any](ctx context.Context, client *http.Client, url, cor
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
+	start := time.Now()
 	resp, err := client.Do(req)
+	latencyMs := time.Since(start).Milliseconds()
+
 	if err != nil {
+		logger.Error().
+			Err(err).
+			Str("correlation_id", corrID).
+			Str("url", url).
+			Int64("latency_ms", latencyMs).
+			Msg("outbound request failed")
 		return nil, err
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
+
+	logger.Info().
+		Str("correlation_id", corrID).
+		Str("url", url).
+		Int("status_code", resp.StatusCode).
+		Int64("latency_ms", latencyMs).
+		Msg("outbound request completed")
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
