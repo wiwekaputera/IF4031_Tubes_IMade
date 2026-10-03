@@ -114,6 +114,170 @@ events — the assertions use `>=` thresholds.)
   `PVMBG_EVENT_INTERVAL_S` seconds (default 10s); the aggregator polls each
   upstream every `AGGREGATOR_POLL_INTERVAL_S` seconds (default 3s).
 
+---
+
+## Problem Demonstration Guide (P1, P2, P4)
+
+This section provides exact, copy-paste runnable commands to demonstrate compliance with the evaluation criteria for **Problem 1**, **Problem 2**, and **Problem 4**.
+
+---
+
+### Problem 1: Arsitektur & Interoperabilitas Data (Schema Evolution)
+
+#### 1. Baseline: Initial Schema Mapping (Both Sources)
+Ensure the stack is running via `bash scripts/demo/up.sh`. Query the initial schema on PVMBG:
+```bash
+curl -s -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/volcanic-reports?limit=1"
+```
+**Expected Output:** Reports contain standard fields without `confidence_level`:
+```json
+[{"report_id":"rpt-pvmbg-hist-022","volcano_id":"GNG-001","alert_level":"Siaga","eruption_count_24h":2,"ash_column_height_m":750,"reported_at":"2023-07-04T19:45:00Z"}]
+```
+
+Check the canonical store to verify Aggregator maps both sources into `HazardEvent`:
+```bash
+# PVMBG volcanic mapping (area_name joined from volcano_reference, alert_level -> severity)
+docker compose exec -T canonical-store psql -U aggregator -d canonical \
+  -c "SELECT source, hazard_type, area_name, severity, attributes FROM canonical_events WHERE source = 'PVMBG' AND attributes->>'confidence_level' IS NULL ORDER BY occurred_at DESC LIMIT 1;"
+
+# BMKG seismic mapping (magnitude, depth, tsunami correlation)
+docker compose exec -T canonical-store psql -U aggregator -d canonical \
+  -c "SELECT source, hazard_type, area_name, severity, attributes FROM canonical_events WHERE source = 'BMKG' ORDER BY occurred_at DESC LIMIT 1;"
+```
+
+#### 2. Trigger Schema Evolution at Runtime (No Restart / No Redeploy)
+Trigger the schema change on the live PVMBG mock container:
+```bash
+curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/admin/schema-version"
+```
+**Expected Output:**
+```json
+{"confidence_level":true,"message":"schema version toggled"}
+```
+
+Confirm PVMBG now emits `confidence_level`:
+```bash
+curl -s -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/volcanic-reports?limit=1"
+```
+
+#### 3. Verify Aggregator Adapts Dynamically (No Crash, No Manual Intervention)
+Wait 3–5 seconds for the next polling cycle, then inspect the canonical store:
+```bash
+docker compose exec -T canonical-store psql -U aggregator -d canonical \
+  -c "SELECT source_ref_id, severity, attributes FROM canonical_events WHERE source = 'PVMBG' AND attributes->>'confidence_level' IS NOT NULL ORDER BY occurred_at DESC LIMIT 2;"
+```
+**Expected Output:**
+```text
+           source_ref_id            | severity |                                     attributes                                     
+------------------------------------+----------+------------------------------------------------------------------------------------
+ rpt-pvmbg-dyn-20261003T...-0142    | AWAS     | {"confidence_level": 0.762, "eruption_count_24h": 1, "ash_column_height_m": 564.2}
+```
+Aggregator continues normal ingestion without errors or service restart.
+
+#### 4. Architecture Report Notes (P1)
+- **Declared Unknown Field Policy**: *Forward to `attributes` (Tolerant Reader with Additive Passthrough)*.
+- **Mechanism**: JSON Tolerant Reader pattern. In `services/aggregator/internal/agency/model.go`, `VolcanicReport.UnmarshalJSON` decodes recognized core fields into struct members and sweeps all unexpected keys into `Extra map[string]json.RawMessage`. The normalizer (`normalizer.go`) unmarshals `Extra` directly into `HazardEvent.Attributes`.
+- **Supported vs Consciously Unsupported Evolutions**:
+  - *Supported*: Additive fields (primitive/object/array), reordered keys, omitted optional/null fields.
+  - *Consciously Unsupported*: Deletion or renaming of mandatory entity keys (`volcano_id`, `alert_level`), incompatible core type mutations (e.g. `alert_level` string changed to integer), non-JSON wire protocols.
+
+---
+
+### Problem 2: Concurrency, Availability, & Graceful Degradation
+
+#### 1. Head-of-Line Blocking Prevention
+Aggregator polls BMKG and PVMBG concurrently in independent goroutines per source cycle (`services/aggregator/internal/poller/poller.go`). Slow PVMBG responses never block BMKG polling.
+
+Verify via the dedicated concurrent poller unit test:
+```bash
+(cd services/aggregator && go test -v -run TestPollConcurrent_BMKGNotBlockedBySlowPVMBG ./internal/poller)
+```
+**Live Demonstration with 3-second PVMBG Delay:**
+1. Configure delay in `.env` or set `PVMBG_DELAY_MIN_MS=3000` and `PVMBG_DELAY_MAX_MS=3000`.
+2. Reload PVMBG mock: `docker compose up -d pvmbg-mock`.
+3. Query BMKG while PVMBG is responding slowly:
+   ```bash
+   curl -o /dev/null -s -w 'BMKG latency: %{time_total}s\n' -H "X-BMKG-Key: test-bmkg-key" "http://localhost:8081/seismic-events?limit=5"
+   ```
+   **Expected Result**: BMKG request finishes in < 150 ms (well below 300 ms p95 requirement) completely unaffected by PVMBG's 3-second delay.
+
+#### 2. Sustained Load Testing (≥50 VUs for ≥60s)
+Execute the sustained load test scenario using k6:
+```bash
+# Requires k6 installed on host or run via docker
+k6 run tests/load/k6_p2.js
+```
+The test applies 50 concurrent virtual users for 60 seconds sustained load. It asserts:
+- `bmkg_only_latency`: p(95) < 300 ms
+- `error_rate`: < 1% (excluding deliberate HTTP 429 rate limiting)
+- System stability with zero unhandled crashes.
+
+#### 3. Outage Simulation & Graceful Degradation
+Simulate a full PVMBG outage at runtime:
+```bash
+curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/admin/outage"
+```
+**Verify Behavior During Outage:**
+1. BMKG seismic events continue to ingest and serve without interruption.
+2. PVMBG endpoint returns HTTP 503, tripping Aggregator's circuit breaker (`services/aggregator/internal/circuitbreaker/breaker.go`).
+3. Aggregator Query API (`/internal/events`) continues to return HTTP 200, serving cached historical data from Canonical Store alongside explicit freshness indicators (`stale_since` and `status: "DOWN"` or `"DEGRADED"`), rather than HTTP 500 or client connection timeouts:
+   ```bash
+   docker run --rm --net if4031-tubes-imade_internal_api_net curlimages/curl:8.11.0 -s "http://aggregator:8090/internal/events?limit=1" | python3 -m json.tool
+   ```
+
+**Outage Recovery:**
+Restore PVMBG to operational status:
+```bash
+curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/admin/outage"
+```
+Aggregator probes upstream, automatically resets the circuit breaker to closed state, and resumes live updates with `status: "UP"` without any service restart.
+
+---
+
+### Problem 4: Arsitektur Microservice & Flexible Storage
+
+#### 1. Independent Container Lifecycle
+Demonstrate that all components are deployed in distinct containers:
+```bash
+docker compose ps
+```
+Stop, rebuild, or restart a single service independently:
+```bash
+# Restart PVMBG mock independently
+docker compose restart pvmbg-mock
+
+# Rebuild and restart Aggregator independently
+docker compose up -d --no-deps --build aggregator
+```
+Verify other services (`bmkg-mock`, `canonical-store`) remain healthy and continue serving requests uninterrupted throughout the restart:
+```bash
+curl -s -o /dev/null -w 'BMKG HTTP: %{http_code}\n' -H "X-BMKG-Key: test-bmkg-key" "http://localhost:8081/health"
+```
+
+#### 2. Flexible Storage without Schema Migration
+Inspect records in PostgreSQL `canonical_events` before and after schema evolution:
+```bash
+docker compose exec -T canonical-store psql -U aggregator -d canonical \
+  -c "SELECT source_ref_id, attributes FROM canonical_events WHERE source = 'PVMBG' ORDER BY occurred_at DESC LIMIT 4;"
+```
+**Expected Output:**
+```text
+           source_ref_id            |                                     attributes                                     
+------------------------------------+------------------------------------------------------------------------------------
+ rpt-pvmbg-dyn-20261003T...-0142    | {"confidence_level": 0.762, "eruption_count_24h": 1, "ash_column_height_m": 564.2}
+ rpt-pvmbg-hist-022                 | {"eruption_count_24h": 2, "ash_column_height_m": 750}
+```
+Records before and after the schema change coexist side-by-side in the same table. The PostgreSQL `JSONB` column stores arbitrary additive attributes dynamically with no `ALTER TABLE` or database migration needed.
+
+#### 3. Canonical Store Network Isolation
+Confirm that `canonical-store` publishes **zero host ports** and is accessible strictly by `aggregator` on the internal network `store_net`:
+```bash
+docker inspect $(docker compose ps -q canonical-store) --format '{{json .NetworkSettings.Ports}}'
+```
+**Expected Output:** `{"5432/tcp":null}` (port 5432 is not bound to host interface). External consumers and client-facing APIs obtain data exclusively through Aggregator's API (`http://aggregator:8090/internal/events`).
+
+---
+
 ## Re-run
 
 ```bash
@@ -126,3 +290,4 @@ bash scripts/demo/down.sh   # tear down + remove volumes (clean slate)
 Re-run `up.sh` after `down.sh` to verify a fresh DB comes back to ≥22 events.
 `up.sh` is idempotent — running it while the stack is already up is a no-op
 that rebuilds images and re-confirms health.
+
