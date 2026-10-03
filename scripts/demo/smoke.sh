@@ -233,7 +233,15 @@ for _ in {1..90}; do
 import sys,json
 try:
     d=json.load(open(sys.argv[1]))
-    print(d.get("meta",{}).get("count",0))
+    m=d.get("meta",{})
+    cnt=m.get("count",0)
+    src=m.get("sources",{})
+    b=src.get("bmkg",{}).get("status")
+    p=src.get("pvmbg",{}).get("status")
+    if cnt>=22 and b=="UP" and p=="UP":
+        print(cnt)
+    else:
+        print(0)
 except Exception:
     print(0)
 PYEOF
