@@ -1,0 +1,379 @@
+[
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-001",
+      "magnitude": 7.5,
+      "depth_km": 10,
+      "epicenter_lat": -0.8988,
+      "epicenter_lon": 119.8474,
+      "region_name": "Sulawesi Tengah (Palu)",
+      "occurred_at": "2018-09-28T10:02:43Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-001",
+      "related_event_id": "evt-bmkg-hist-001",
+      "threat_level": "Siaga",
+      "affected_zones": [
+        "Palu",
+        "Donggala"
+      ],
+      "estimated_arrival": "2018-09-28T10:25:00Z"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-002",
+      "magnitude": 9.1,
+      "depth_km": 30,
+      "epicenter_lat": 3.316,
+      "epicenter_lon": 95.854,
+      "region_name": "Aceh (Samudera Hindia)",
+      "occurred_at": "2004-12-26T00:58:53Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-002",
+      "related_event_id": "evt-bmkg-hist-002",
+      "threat_level": "Awas",
+      "affected_zones": [
+        "Banda Aceh",
+        "Meulaboh",
+        "Aceh Barat"
+      ],
+      "estimated_arrival": "2004-12-26T01:30:00Z"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-003",
+      "magnitude": 6.3,
+      "depth_km": 12,
+      "epicenter_lat": -7.962,
+      "epicenter_lon": 110.458,
+      "region_name": "D.I. Yogyakarta (Bantul)",
+      "occurred_at": "2006-05-27T05:54:00Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-004",
+      "magnitude": 7.8,
+      "depth_km": 20,
+      "epicenter_lat": -3.484,
+      "epicenter_lon": 100.114,
+      "region_name": "Sumatera Barat (Mentawai)",
+      "occurred_at": "2010-10-25T14:42:22Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-004",
+      "related_event_id": "evt-bmkg-hist-004",
+      "threat_level": "Awas",
+      "affected_zones": [
+        "Kepulauan Mentawai",
+        "Padang"
+      ],
+      "estimated_arrival": "2010-10-25T15:20:00Z"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-005",
+      "magnitude": 6.2,
+      "depth_km": 55,
+      "epicenter_lat": -9.799,
+      "epicenter_lon": 114.53,
+      "region_name": "Bali (Nusa Dua)",
+      "occurred_at": "2011-10-13T03:16:00Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-006",
+      "magnitude": 6.9,
+      "depth_km": 31,
+      "epicenter_lat": -8.287,
+      "epicenter_lon": 116.451,
+      "region_name": "Lombok, NTB",
+      "occurred_at": "2018-08-05T11:46:35Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-006",
+      "related_event_id": "evt-bmkg-hist-006",
+      "threat_level": "Waspada",
+      "affected_zones": [
+        "Lombok Barat",
+        "Lombok Utara"
+      ],
+      "estimated_arrival": "2018-08-05T12:05:00Z"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-007",
+      "magnitude": 5.6,
+      "depth_km": 10,
+      "epicenter_lat": -6.834,
+      "epicenter_lon": 107.095,
+      "region_name": "Jawa Barat (Cianjur)",
+      "occurred_at": "2022-11-21T06:21:10Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-008",
+      "magnitude": 7.6,
+      "depth_km": 81,
+      "epicenter_lat": -0.725,
+      "epicenter_lon": 99.867,
+      "region_name": "Sumatera Barat (Padang)",
+      "occurred_at": "2009-09-30T10:16:09Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-009",
+      "magnitude": 7.8,
+      "depth_km": 28,
+      "epicenter_lat": -8.48,
+      "epicenter_lon": 122.338,
+      "region_name": "Nusa Tenggara Timur (Flores)",
+      "occurred_at": "1992-12-12T05:29:00Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-009",
+      "related_event_id": "evt-bmkg-hist-009",
+      "threat_level": "Awas",
+      "affected_zones": [
+        "Maumere",
+        "Flores Timur"
+      ],
+      "estimated_arrival": "1992-12-12T06:00:00Z"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-010",
+      "magnitude": 6.2,
+      "depth_km": 18,
+      "epicenter_lat": -2.977,
+      "epicenter_lon": 118.903,
+      "region_name": "Sulawesi Barat (Majene)",
+      "occurred_at": "2021-01-14T18:28:17Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-011",
+      "magnitude": 6.5,
+      "depth_km": 18,
+      "epicenter_lat": -3.686,
+      "epicenter_lon": 128.337,
+      "region_name": "Maluku (Ambon)",
+      "occurred_at": "2019-09-25T23:46:44Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-012",
+      "magnitude": 8.6,
+      "depth_km": 30,
+      "epicenter_lat": 2.074,
+      "epicenter_lon": 97.013,
+      "region_name": "Sumatera Utara (Nias)",
+      "occurred_at": "2005-03-28T16:09:36Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-012",
+      "related_event_id": "evt-bmkg-hist-012",
+      "threat_level": "Awas",
+      "affected_zones": [
+        "Gunungsitoli",
+        "Nias Selatan"
+      ],
+      "estimated_arrival": "2005-03-28T16:45:00Z"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-013",
+      "magnitude": 7.7,
+      "depth_km": 34,
+      "epicenter_lat": -9.284,
+      "epicenter_lon": 107.419,
+      "region_name": "Jawa Barat (Pangandaran)",
+      "occurred_at": "2006-07-17T08:19:28Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-013",
+      "related_event_id": "evt-bmkg-hist-013",
+      "threat_level": "Siaga",
+      "affected_zones": [
+        "Pangandaran",
+        "Cilacap"
+      ],
+      "estimated_arrival": "2006-07-17T09:00:00Z"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-014",
+      "magnitude": 5.4,
+      "depth_km": 10,
+      "epicenter_lat": -2.533,
+      "epicenter_lon": 140.683,
+      "region_name": "Papua (Jayapura)",
+      "occurred_at": "2023-02-09T06:28:02Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-015",
+      "magnitude": 6.1,
+      "depth_km": 82,
+      "epicenter_lat": -8.95,
+      "epicenter_lon": 112.48,
+      "region_name": "Jawa Timur (Malang)",
+      "occurred_at": "2021-04-10T07:00:16Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-016",
+      "magnitude": 8.4,
+      "depth_km": 34,
+      "epicenter_lat": -4.52,
+      "epicenter_lon": 101.374,
+      "region_name": "Bengkulu",
+      "occurred_at": "2007-09-12T11:10:26Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-016",
+      "related_event_id": "evt-bmkg-hist-016",
+      "threat_level": "Siaga",
+      "affected_zones": [
+        "Kota Bengkulu",
+        "Mukomuko"
+      ],
+      "estimated_arrival": "2007-09-12T11:50:00Z"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-017",
+      "magnitude": 6,
+      "depth_km": 15,
+      "epicenter_lat": -8.15,
+      "epicenter_lon": 124.95,
+      "region_name": "Nusa Tenggara Timur (Alor)",
+      "occurred_at": "2004-11-12T04:26:00Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-018",
+      "magnitude": 7.1,
+      "depth_km": 24,
+      "epicenter_lat": -3.57,
+      "epicenter_lon": 135.56,
+      "region_name": "Papua (Nabire)",
+      "occurred_at": "2004-11-26T02:25:00Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-019",
+      "magnitude": 5.9,
+      "depth_km": 10,
+      "epicenter_lat": -9.92,
+      "epicenter_lon": 120.21,
+      "region_name": "Nusa Tenggara Timur (Sumba)",
+      "occurred_at": "2018-10-02T00:16:00Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-020",
+      "magnitude": 7.3,
+      "depth_km": 40,
+      "epicenter_lat": 1.88,
+      "epicenter_lon": 126.52,
+      "region_name": "Sulawesi Utara (Laut Maluku)",
+      "occurred_at": "2014-11-15T02:31:41Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-020",
+      "related_event_id": "evt-bmkg-hist-020",
+      "threat_level": "Waspada",
+      "affected_zones": [
+        "Bitung",
+        "Manado"
+      ],
+      "estimated_arrival": "2014-11-15T03:00:00Z"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-021",
+      "magnitude": 7.2,
+      "depth_km": 10,
+      "epicenter_lat": -0.53,
+      "epicenter_lon": 128.02,
+      "region_name": "Maluku Utara (Halmahera)",
+      "occurred_at": "2019-07-14T09:10:50Z",
+      "potential_tsunami": false
+    },
+    "warning": null
+  },
+  {
+    "event": {
+      "event_id": "evt-bmkg-hist-022",
+      "magnitude": 6.9,
+      "depth_km": 52,
+      "epicenter_lat": -7.54,
+      "epicenter_lon": 104.58,
+      "region_name": "Banten (Sumur)",
+      "occurred_at": "2019-08-02T12:03:25Z",
+      "potential_tsunami": true
+    },
+    "warning": {
+      "warning_id": "warn-bmkg-hist-022",
+      "related_event_id": "evt-bmkg-hist-022",
+      "threat_level": "Waspada",
+      "affected_zones": [
+        "Pandeglang",
+        "Lebak"
+      ],
+      "estimated_arrival": "2019-08-02T12:40:00Z"
+    }
+  }
+]

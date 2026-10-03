@@ -1,0 +1,178 @@
+[
+  {
+    "report_id": "rpt-pvmbg-hist-001",
+    "volcano_id": "GNG-001",
+    "alert_level": "Normal",
+    "eruption_count_24h": 0,
+    "ash_column_height_m": 0,
+    "reported_at": "2024-01-02T08:00:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-002",
+    "volcano_id": "GNG-001",
+    "alert_level": "Waspada",
+    "eruption_count_24h": 1,
+    "ash_column_height_m": 200,
+    "reported_at": "2024-02-10T14:30:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-003",
+    "volcano_id": "GNG-001",
+    "alert_level": "Siaga",
+    "eruption_count_24h": 2,
+    "ash_column_height_m": 800,
+    "reported_at": "2024-03-15T09:15:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-004",
+    "volcano_id": "GNG-002",
+    "alert_level": "Normal",
+    "eruption_count_24h": 0,
+    "ash_column_height_m": 0,
+    "reported_at": "2024-01-05T06:00:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-005",
+    "volcano_id": "GNG-002",
+    "alert_level": "Normal",
+    "eruption_count_24h": 0,
+    "ash_column_height_m": 0,
+    "reported_at": "2024-04-20T12:00:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-006",
+    "volcano_id": "GNG-002",
+    "alert_level": "Waspada",
+    "eruption_count_24h": 1,
+    "ash_column_height_m": 350,
+    "reported_at": "2024-05-12T18:45:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-007",
+    "volcano_id": "GNG-003",
+    "alert_level": "Normal",
+    "eruption_count_24h": 0,
+    "ash_column_height_m": 0,
+    "reported_at": "2024-02-18T07:30:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-008",
+    "volcano_id": "GNG-003",
+    "alert_level": "Siaga",
+    "eruption_count_24h": 3,
+    "ash_column_height_m": 1200,
+    "reported_at": "2024-06-08T16:20:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-009",
+    "volcano_id": "GNG-003",
+    "alert_level": "Awas",
+    "eruption_count_24h": 5,
+    "ash_column_height_m": 5000,
+    "reported_at": "2024-07-01T03:10:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-010",
+    "volcano_id": "GNG-004",
+    "alert_level": "Normal",
+    "eruption_count_24h": 0,
+    "ash_column_height_m": 0,
+    "reported_at": "2024-01-15T10:00:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-011",
+    "volcano_id": "GNG-004",
+    "alert_level": "Waspada",
+    "eruption_count_24h": 1,
+    "ash_column_height_m": 450,
+    "reported_at": "2024-03-22T15:40:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-012",
+    "volcano_id": "GNG-004",
+    "alert_level": "Siaga",
+    "eruption_count_24h": 2,
+    "ash_column_height_m": 900,
+    "reported_at": "2024-08-14T11:25:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-013",
+    "volcano_id": "GNG-005",
+    "alert_level": "Normal",
+    "eruption_count_24h": 0,
+    "ash_column_height_m": 0,
+    "reported_at": "2024-02-01T09:00:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-014",
+    "volcano_id": "GNG-005",
+    "alert_level": "Normal",
+    "eruption_count_24h": 0,
+    "ash_column_height_m": 0,
+    "reported_at": "2024-04-11T14:00:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-015",
+    "volcano_id": "GNG-005",
+    "alert_level": "Waspada",
+    "eruption_count_24h": 1,
+    "ash_column_height_m": 600,
+    "reported_at": "2024-05-30T20:15:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-016",
+    "volcano_id": "GNG-005",
+    "alert_level": "Siaga",
+    "eruption_count_24h": 2,
+    "ash_column_height_m": 1100,
+    "reported_at": "2024-09-03T05:50:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-017",
+    "volcano_id": "GNG-001",
+    "alert_level": "Awas",
+    "eruption_count_24h": 4,
+    "ash_column_height_m": 3500,
+    "reported_at": "2023-11-28T22:30:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-018",
+    "volcano_id": "GNG-003",
+    "alert_level": "Waspada",
+    "eruption_count_24h": 1,
+    "ash_column_height_m": 500,
+    "reported_at": "2023-12-14T13:05:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-019",
+    "volcano_id": "GNG-002",
+    "alert_level": "Siaga",
+    "eruption_count_24h": 3,
+    "ash_column_height_m": 1500,
+    "reported_at": "2023-10-09T08:20:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-020",
+    "volcano_id": "GNG-004",
+    "alert_level": "Normal",
+    "eruption_count_24h": 0,
+    "ash_column_height_m": 0,
+    "reported_at": "2023-08-17T17:00:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-021",
+    "volcano_id": "GNG-005",
+    "alert_level": "Normal",
+    "eruption_count_24h": 0,
+    "ash_column_height_m": 0,
+    "reported_at": "2023-09-21T10:30:00Z"
+  },
+  {
+    "report_id": "rpt-pvmbg-hist-022",
+    "volcano_id": "GNG-001",
+    "alert_level": "Siaga",
+    "eruption_count_24h": 2,
+    "ash_column_height_m": 750,
+    "reported_at": "2023-07-04T19:45:00Z"
+  }
+]

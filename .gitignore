@@ -1,2 +1,21 @@
+# Environment
 .env
+
+# Data files
 *.db
+
+# Compiled binaries
+services/*/main
+scripts/*/healthcheck
+
+# macOS
+.DS_Store
+
+# Keys and secrets
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+*.swp

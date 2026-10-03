@@ -6,8 +6,8 @@ package hazard
 type Source string
 
 const (
-	SourceBMKG   Source = "BMKG"
-	SourcePVMBG  Source = "PVMBG"
+	SourceBMKG  Source = "BMKG"
+	SourcePVMBG Source = "PVMBG"
 )
 
 // HazardType classifies the kind of disaster.
@@ -22,10 +22,10 @@ const (
 type Severity string
 
 const (
-	SeverityNormal   Severity = "NORMAL"
-	SeverityWaspada  Severity = "WASPADA"
-	SeveritySiaga    Severity = "SIAGA"
-	SeverityAwas     Severity = "AWAS"
+	SeverityNormal  Severity = "NORMAL"
+	SeverityWaspada Severity = "WASPADA"
+	SeveritySiaga   Severity = "SIAGA"
+	SeverityAwas    Severity = "AWAS"
 )
 
 // HazardEvent is the canonical representation of a disaster event stored by BNPB.

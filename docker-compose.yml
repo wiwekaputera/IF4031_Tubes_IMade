@@ -44,42 +44,44 @@ services:
 
   bmkg-mock:
     build:
-      context: ./services/bmkg-mock
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/bmkg-mock/Dockerfile
     environment:
       BMKG_API_KEY: ${BMKG_API_KEY}
       BMKG_DELAY_MIN_MS: ${BMKG_DELAY_MIN_MS:-50}
       BMKG_DELAY_MAX_MS: ${BMKG_DELAY_MAX_MS:-150}
       BMKG_EVENT_INTERVAL_S: ${BMKG_EVENT_INTERVAL_S:-10}
       PORT: ${BMKG_PORT:-8081}
+      HEALTHCHECK_URL: http://localhost:8081/health
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${BMKG_PORT:-8081}:8081"
     networks:
       - agency_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   pvmbg-mock:
     build:
-      context: ./services/pvmbg-mock
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/pvmbg-mock/Dockerfile
     environment:
       PVMBG_BEARER_TOKEN: ${PVMBG_BEARER_TOKEN}
       PVMBG_DELAY_MIN_MS: ${PVMBG_DELAY_MIN_MS:-500}
       PVMBG_DELAY_MAX_MS: ${PVMBG_DELAY_MAX_MS:-3000}
       PVMBG_EVENT_INTERVAL_S: ${PVMBG_EVENT_INTERVAL_S:-10}
       PORT: ${PVMBG_PORT:-8082}
+      HEALTHCHECK_URL: http://localhost:8082/health
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${PVMBG_PORT:-8082}:8082"
     networks:
       - agency_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -140,8 +142,8 @@ services:
 
   aggregator:
     build:
-      context: ./services/aggregator
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/aggregator/Dockerfile
     environment:
       BMKG_BASE_URL: ${AGGREGATOR_BMKG_BASE_URL:-http://bmkg-mock:8081}
       BMKG_API_KEY: ${AGGREGATOR_BMKG_API_KEY}
@@ -156,6 +158,7 @@ services:
       NATS_URL: ${AGGREGATOR_NATS_URL:-nats://nats-jetstream:4222}
       PORT: ${AGGREGATOR_PORT:-8090}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTHCHECK_URL: http://localhost:8090/internal/health
     depends_on:
       bmkg-mock:
         condition: service_healthy
@@ -171,7 +174,7 @@ services:
       - internal_api_net
       - bus_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8090/internal/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -342,6 +342,22 @@ Delay: jittered 50–150 ms (env: `BMKG_DELAY_MIN_MS`, `BMKG_DELAY_MAX_MS`).
 Seed: ≥20 historical records at startup.  
 New events: ≥1 per 10 s (env: `BMKG_EVENT_INTERVAL_S`).
 
+**Internal data flow (single process):**
+
+```mermaid
+flowchart LR
+    SEED["seed\nPopulateSeeds(): load ≥20 historical records"]
+    STORE["in-memory store\n(MemoryStore, sync.RWMutex)"]
+    GEN["generator\nStart(ctx) → ticker → generateEvent()"]
+    HAND["handler\nGET /seismic-events, GET /tsunami-warnings, GET /health\n(latency jitter + X-BMKG-Key middleware)"]
+    SEED -->|AddSeismicEvent\nAddTsunamiWarning| STORE
+    GEN -->|atomic counter / fmt.Sprintf\nAddSeismicEvent\nAddTsunamiWarning| STORE
+    STORE -->|GetSeismicEvents\nGetTsunamiWarnings| HAND
+```
+
+- The store is the shared data plane: both the seed initializer and the generator *write* to it; the HTTP handler *reads* from it.
+- The generator's `Start(ctx)` loop drives the ticker; graceful shutdown cancels the context.
+
 ### 4.5 PVMBG Mock (port 8082)
 
 ```
@@ -354,6 +370,21 @@ Auth: `Authorization: Bearer <pvmbg-token>` — rejects with 401 if absent/wrong
 Delay: random 500 ms–3 s (env: `PVMBG_DELAY_MIN_MS`, `PVMBG_DELAY_MAX_MS`).  
 Outage: when active, return 503 or no response (env: configurable behavior).  
 Seed: ≥20 historical records at startup.
+
+**Internal data flow (single process):**
+
+```mermaid
+flowchart LR
+    SEED["seed\nPopulateSeeds(): load ≥20 historical records"]
+    STORE["in-memory store\n(MemoryStore, sync.RWMutex)"]
+    GEN["generator\nStart(ctx) → ticker → generateEvent()"]
+    HAND["handler\nGET /volcanic-reports\nPOST /admin/outage, POST /admin/schema-version, GET /health\n(Bearer Token + latency middleware)"]
+    SEED -->|AddVolcanicReport| STORE
+    GEN -->|AddVolcanicReport| STORE
+    STORE -->|GetVolcanicReports| HAND
+```
+
+- Structure mirrors the BMKG mock, but the generator emits `VolcanicReport` data (including the optional `confidence_level` field) and the handler exposes the `/admin/*` control endpoints in addition to `GET /volcanic-reports`.
 
 ### 4.6 Stub Sink (internal, `bus_net`)
 

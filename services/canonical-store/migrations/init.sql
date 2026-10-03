@@ -1,4 +1,4 @@
--- IF4031 Milestone 1 — Canonical Store init SQL
+-- Canonical Store Initialization SQL
 -- Owned by: aggregator service
 -- DO NOT run this manually; it is mounted as /docker-entrypoint-initdb.d/init.sql
 
@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS volcano_reference (
   longitude    DOUBLE PRECISION NOT NULL
 );
 
--- TODO (Person A): populate with all volcano_ids used in pvmbg-mock seed data
+-- Reference data for volcanoes used in PVMBG mock seed data
 INSERT INTO volcano_reference (volcano_id, name, latitude, longitude) VALUES
   ('GNG-001', 'Gunung Merapi',   -7.5407,  110.4457),
   ('GNG-002', 'Gunung Semeru',   -8.1080,  112.9220),
