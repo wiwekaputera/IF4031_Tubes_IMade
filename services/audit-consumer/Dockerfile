@@ -1,12 +1,18 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS builder
 WORKDIR /app
-COPY go.mod go.sum ./
+COPY contracts ./contracts
+WORKDIR /app/services/audit-consumer
+COPY services/audit-consumer/go.mod services/audit-consumer/go.sum ./
 RUN go mod download
-COPY . .
+COPY services/audit-consumer/ ./
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/service ./cmd/main
+COPY scripts/healthcheck /build/healthcheck
+WORKDIR /build/healthcheck
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bin/healthcheck .
 
 FROM gcr.io/distroless/static-debian12
 COPY --from=builder /bin/service /service
+COPY --from=builder /bin/healthcheck /healthcheck
 ENTRYPOINT ["/service"]
 
