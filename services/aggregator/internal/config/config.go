@@ -22,6 +22,8 @@ type Config struct {
 	PollInterval         time.Duration
 	DBDSN                string
 	NATSURL              string
+	OutboxPollInterval   time.Duration
+	OutboxBatchSize      int
 	LogLevel             string
 }
 
@@ -40,6 +42,8 @@ func Load() *Config {
 		PollInterval:         getDurationEnv("POLL_INTERVAL_S", 3, time.Second),
 		DBDSN:                getEnv("DB_DSN", ""),
 		NATSURL:              getEnv("NATS_URL", "nats://nats-jetstream:4222"),
+		OutboxPollInterval:   getDurationEnv("OUTBOX_POLL_INTERVAL_MS", 500, time.Millisecond),
+		OutboxBatchSize:      getIntEnv("OUTBOX_BATCH_SIZE", 100),
 		LogLevel:             strings.ToLower(getEnv("LOG_LEVEL", "info")),
 	}
 }

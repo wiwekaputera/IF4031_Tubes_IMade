@@ -54,6 +54,13 @@ type EventFilter struct {
 	Limit      int
 }
 
+// OutboxRecord is a committed canonical event waiting to be published.
+type OutboxRecord struct {
+	ID       int64
+	EventKey string
+	Payload  []byte
+}
+
 type PostgresRepo struct {
 	db     *pgxpool.Pool
 	logger zerolog.Logger
@@ -225,6 +232,54 @@ func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (stri
 		return "", err
 	}
 	return storedHazardID, nil
+}
+
+// GetUnpublishedOutbox returns the oldest committed events that have not yet
+// been acknowledged by the broker. The relay is intentionally single-threaded
+// per Aggregator process; broker message IDs make retry after a crash safe.
+func (r *PostgresRepo) GetUnpublishedOutbox(ctx context.Context, limit int) ([]OutboxRecord, error) {
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT id, event_key, payload
+		FROM outbox
+		WHERE published_at IS NULL
+		ORDER BY id
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := make([]OutboxRecord, 0, limit)
+	for rows.Next() {
+		var record OutboxRecord
+		if err := rows.Scan(&record.ID, &record.EventKey, &record.Payload); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+// MarkOutboxPublished records successful broker acknowledgement. If the
+// process crashes before this update, JetStream deduplicates the retry using
+// the row's event key.
+func (r *PostgresRepo) MarkOutboxPublished(ctx context.Context, id int64) error {
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
+	_, err := r.db.Exec(ctx, `
+		UPDATE outbox
+		SET published_at = now()
+		WHERE id = $1 AND published_at IS NULL
+	`, id)
+	return err
 }
 
 func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]hazard.HazardEvent, error) {
