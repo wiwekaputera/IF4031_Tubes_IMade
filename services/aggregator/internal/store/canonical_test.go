@@ -253,3 +253,41 @@ func TestGetVolcanoReferences(t *testing.T) {
 		}
 	}
 }
+
+func TestOutboxPendingRowsAreOnlyClearedAfterMarkPublished(t *testing.T) {
+	truncateTables(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	hazardID := uuid.NewString()
+	if _, err := testRepo.UpsertEvent(ctx, UpsertRequest{
+		HazardID:    hazardID,
+		Source:      "BMKG",
+		SourceRefID: "outbox-test-" + hazardID,
+		HazardType:  hazard.HazardTypeSeismic,
+		Severity:    hazard.SeverityNormal,
+		AreaName:    "Jakarta",
+		OccurredAt:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertEvent() error = %v", err)
+	}
+
+	rows, err := testRepo.GetUnpublishedOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetUnpublishedOutbox() error = %v", err)
+	}
+	if len(rows) != 1 || rows[0].EventKey != hazardID+":1" || len(rows[0].Payload) == 0 {
+		t.Fatalf("pending rows = %+v, want one event with key %q", rows, hazardID+":1")
+	}
+
+	if err := testRepo.MarkOutboxPublished(ctx, rows[0].ID); err != nil {
+		t.Fatalf("MarkOutboxPublished() error = %v", err)
+	}
+	rows, err = testRepo.GetUnpublishedOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetUnpublishedOutbox() after mark error = %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("pending rows after marking = %d, want 0", len(rows))
+	}
+}

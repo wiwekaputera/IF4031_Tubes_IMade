@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/outboxrelay"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/poller"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/queryapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
@@ -70,7 +72,38 @@ func main() {
 
 	repo := store.NewPostgresRepo(dbPool, logger)
 
-	// 4. Load static volcano references for normalizer lookups
+	// 4. Connect to JetStream and ensure the event stream is ready before
+	// starting ingestion, so every committed outbox row has a delivery path.
+	nc, err := nats.Connect(
+		cfg.NATSURL,
+		nats.Name("BNPB Aggregator"),
+		nats.Timeout(5*time.Second),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(time.Second),
+	)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to connect to NATS")
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize JetStream")
+	}
+	if err := outboxrelay.EnsureStream(js); err != nil {
+		logger.Fatal().Err(err).Msg("failed to ensure JetStream event stream")
+	}
+	logger.Info().Str("stream", "BNPB_EVENTS").Msg("JetStream event stream ready")
+
+	relay := outboxrelay.New(
+		repo,
+		outboxrelay.NewJetStreamPublisher(js),
+		logger,
+		cfg.OutboxPollInterval,
+		cfg.OutboxBatchSize,
+	)
+
+	// 5. Load static volcano references for normalizer lookups
 	volcanoRefs, err := repo.GetVolcanoReferences(ctx)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to load volcano references, using empty map")
@@ -78,7 +111,7 @@ func main() {
 	}
 	logger.Info().Int("volcano_count", len(volcanoRefs)).Msg("Loaded volcano references")
 
-	// 5. Initialize normalizer, poller, and query API handlers
+	// 6. Initialize normalizer, poller, and query API handlers
 	norm := normalizer.New(logger, volcanoRefs)
 	p := poller.New(cfg, norm, repo, logger)
 
@@ -94,15 +127,19 @@ func main() {
 
 	h := queryapi.New(repo, logger, healthFn)
 
-	// 6. Start background polling loop for upstream agencies (BMKG & PVMBG)
+	// 7. Start background polling loop and transactional outbox relay.
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	wg.Add(1)
+	wg.Add(2)
 	go poller.StartPolling(ctx, &wg, p, cfg, logger)
+	go func() {
+		defer wg.Done()
+		relay.Run(ctx)
+	}()
 
-	// 7. Initialize HTTP server for internal query API
+	// 8. Initialize HTTP server for internal query API
 	addr := cfg.Port
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
@@ -117,7 +154,7 @@ func main() {
 		}
 	}()
 
-	// 8. Graceful shutdown on SIGINT or SIGTERM
+	// 9. Graceful shutdown on SIGINT or SIGTERM
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
