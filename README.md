@@ -89,16 +89,28 @@ curl -X POST http://localhost:8083/oauth/token \
 
 ### Problem 5 — Fan-out Demo
 ```bash
-# 1. Check events received by stub-sink
-curl http://localhost:8085/received
+# 1. Start the ingestion and event-distribution services
+docker compose up -d canonical-store nats-jetstream bmkg-mock pvmbg-mock aggregator \
+  stub-sink notification-consumer audit-consumer
 
-# 2. Stop notification-consumer
+# 2. Follow the independent durable consumers receiving published events
+docker compose logs -f aggregator notification-consumer audit-consumer stub-sink
+
+# 3. Inspect notifications accepted by the internal stub sink
+docker run --rm --network if4031-tubes-imade_bus_net curlimages/curl:8.10.1 \
+  http://stub-sink:8085/received
+
+# 4. Stop one consumer; audit-consumer and the producer keep running
 docker compose stop notification-consumer
 
-# 3. Verify audit-consumer still receives events, producer unaffected
-
-# 4. Restart notification-consumer and verify catch-up
+# 5. Let more events arrive, then restart it. Its durable subscription catches up.
+sleep 10
+docker compose logs --since 10s aggregator audit-consumer
 docker compose start notification-consumer
+docker compose logs -f notification-consumer
+
+# Stop the demo stack when finished
+docker compose down
 ```
 
 ### Load Test (Problem 2)

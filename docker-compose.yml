@@ -245,27 +245,29 @@ services:
 
   stub-sink:
     build:
-      context: ./services/stub-sink
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/stub-sink/Dockerfile
     environment:
       PORT: ${STUB_SINK_PORT:-8085}
+      HEALTHCHECK_URL: http://localhost:8085/health
       LOG_LEVEL: ${LOG_LEVEL:-info}
     networks:
       - bus_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   notification-consumer:
     build:
-      context: ./services/notification-consumer
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/notification-consumer/Dockerfile
     environment:
       NATS_URL: ${NATS_URL:-nats://nats-jetstream:4222}
       STUB_SINK_URL: ${NOTIFICATION_CONSUMER_STUB_SINK_URL:-http://stub-sink:8085}
       BBOLT_PATH: ${NOTIFICATION_CONSUMER_BBOLT_PATH:-/data/notification.db}
+      HEALTHCHECK_URL: http://localhost:8086/health
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - notification_bbolt_data:/data
@@ -277,18 +279,19 @@ services:
     networks:
       - bus_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8086/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   audit-consumer:
     build:
-      context: ./services/audit-consumer
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/audit-consumer/Dockerfile
     environment:
       NATS_URL: ${NATS_URL:-nats://nats-jetstream:4222}
       BBOLT_PATH: ${AUDIT_CONSUMER_BBOLT_PATH:-/data/audit.db}
+      HEALTHCHECK_URL: http://localhost:8087/health
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - audit_bbolt_data:/data
@@ -298,7 +301,7 @@ services:
     networks:
       - bus_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8087/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
