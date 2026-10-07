@@ -14,6 +14,7 @@ import (
 
 	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/httpapi"
+	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/keys"
 )
 
 func main() {
@@ -32,8 +33,15 @@ func main() {
 		logger = logger.Level(lvl)
 	}
 
+	// Initialize ES256 private key and JWKS
+	keyManager, err := keys.NewKeyManager(cfg.PrivateKeyB64)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("token-service: failed to initialize signing key")
+	}
+
 	logger.Info().
 		Str("port", cfg.Port).
+		Str("kid", keyManager.ActiveKeyID()).
 		Str("issuer", cfg.TokenIssuer).
 		Str("audience", cfg.TokenAudience).
 		Dur("access_token_ttl", cfg.AccessTokenTTL).
@@ -66,6 +74,7 @@ func main() {
 	// Setup HTTP routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.HealthHandler(dbPool))
+	mux.HandleFunc("GET /.well-known/jwks.json", httpapi.JWKSHandler(keyManager))
 
 	// Chain middlewares: CorrelationID -> Logging -> Handlers
 	handler := httpapi.CorrelationIDMiddleware(httpapi.LoggingMiddleware(logger, mux))
