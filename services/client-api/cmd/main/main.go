@@ -1,9 +1,3 @@
-// Command client-api is the client-facing REST gateway.
-// Owner: Person B. See ARCHITECTURE.md §3.5–§3.7 and §4.1 for the full contract.
-//
-// Bootstrap only: serves GET /health so the container can become healthy.
-// JWT verification, scope projection, rate limiting, and the aggregator proxy
-// are added in later tickets (B-20..B-26).
 package main
 
 import (
