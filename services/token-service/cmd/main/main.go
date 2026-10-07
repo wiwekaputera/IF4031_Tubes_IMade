@@ -12,9 +12,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
+	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/clients"
 	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/httpapi"
+	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/issuer"
 	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/keys"
+	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/store"
 )
 
 func main() {
@@ -71,10 +74,16 @@ func main() {
 	}
 	logger.Info().Msg("token-service: connected to token-db")
 
+	// Setup client registry, refresh token store, and issuer
+	clientRegistry := clients.NewRegistry(cfg)
+	refreshStore := store.NewPGStore(dbPool)
+	tokenIssuer := issuer.NewIssuer(cfg, keyManager, clientRegistry, refreshStore)
+
 	// Setup HTTP routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.HealthHandler(dbPool))
 	mux.HandleFunc("GET /.well-known/jwks.json", httpapi.JWKSHandler(keyManager))
+	mux.HandleFunc("POST /oauth/token", httpapi.TokenHandler(tokenIssuer))
 
 	// Chain middlewares: CorrelationID -> Logging -> Handlers
 	handler := httpapi.CorrelationIDMiddleware(httpapi.LoggingMiddleware(logger, mux))
