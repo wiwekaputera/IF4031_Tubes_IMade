@@ -1,5 +1,3 @@
-// Package hazard defines the canonical HazardEvent type and related enums.
-// This package contains ONLY struct definitions and JSON tags — no business logic.
 package hazard
 
 // Source identifies the upstream agency that produced the event.
