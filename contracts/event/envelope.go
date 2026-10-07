@@ -1,5 +1,3 @@
-// Package event defines the NATS event envelope published to the message broker.
-// This package contains ONLY struct definitions and JSON tags — no business logic.
 package event
 
 import "github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
@@ -18,6 +16,6 @@ type Envelope struct {
 	Version    int64              `json:"version"`
 	EventType  hazard.HazardType  `json:"event_type"`
 	OccurredAt string             `json:"occurred_at"`
-	TraceID    string             `json:"trace_id"` // correlation_id from the ingest cycle
+	TraceID    string             `json:"trace_id"`
 	Data       hazard.HazardEvent `json:"data"`
 }

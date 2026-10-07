@@ -1,7 +1,3 @@
-# IF4031 Milestone 1 — Docker Compose
-# Run with: docker compose up --build
-# Requires: .env file (copy from .env.example and fill in values)
-
 name: if4031-tubes-imade
 
 # ─────────────────────────────────────────────────────────────
@@ -183,8 +179,8 @@ services:
 
   token-service:
     build:
-      context: ./services/token-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/token-service/Dockerfile
     environment:
       TOKEN_DB_DSN: ${TOKEN_DB_DSN}
       ES256_PRIVATE_KEY_B64: ${ES256_PRIVATE_KEY_B64}
@@ -198,6 +194,7 @@ services:
       CLIENT_INTERNAL_OPS_SECRET: ${CLIENT_INTERNAL_OPS_SECRET}
       PORT: ${TOKEN_SERVICE_PORT:-8083}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTHCHECK_URL: http://localhost:8083/health
     depends_on:
       token-db:
         condition: service_healthy
@@ -207,7 +204,7 @@ services:
       - edge_net
       - token_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -216,8 +213,8 @@ services:
 
   client-api:
     build:
-      context: ./services/client-api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/client-api/Dockerfile
     environment:
       AGGREGATOR_BASE_URL: ${CLIENT_API_AGGREGATOR_BASE_URL:-http://aggregator:8090}
       JWKS_URL: ${CLIENT_API_JWKS_URL:-http://token-service:8083/.well-known/jwks.json}
@@ -225,6 +222,7 @@ services:
       BURST: ${CLIENT_API_BURST:-20}
       PORT: ${CLIENT_API_PORT:-8080}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTHCHECK_URL: http://localhost:8080/health
     depends_on:
       aggregator:
         condition: service_healthy
@@ -236,7 +234,7 @@ services:
       - edge_net
       - internal_api_net
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      test: ["CMD", "/healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5
