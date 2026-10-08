@@ -16,6 +16,7 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/httpapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/jwks"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/ratelimit"
+	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/upstream"
 )
 
 func main() {
@@ -79,9 +80,17 @@ func main() {
 		Logger:      logger,
 	})
 
+	// Upstream Aggregator client
+	aggClient := upstream.NewClient(upstream.Options{
+		BaseURL: cfg.AggregatorBaseURL,
+		Timeout: 2 * time.Second,
+		Logger:  logger,
+	})
+
 	// Setup HTTP routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.HealthHandler())
+	mux.HandleFunc("GET /v1/events", httpapi.EventsHandler(aggClient))
 
 	// Chain middlewares: CorrelationID -> Logging -> Auth -> Rate limit -> Handler
 	handler := httpapi.CorrelationIDMiddleware(
