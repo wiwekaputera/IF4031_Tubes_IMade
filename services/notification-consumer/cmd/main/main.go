@@ -209,17 +209,25 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed creating JetStream context")
 	}
-	sub, err := js.PullSubscribe(
-		event.SubjectFilter,
-		consumerDurable,
-		nats.BindStream(event.StreamName),
-		nats.AckExplicit(),
-		nats.AckWait(ackWait),
-		nats.MaxDeliver(5),
-		nats.MaxAckPending(1),
-	)
+	var sub *nats.Subscription
+	for retries := 0; retries < 30; retries++ {
+		sub, err = js.PullSubscribe(
+			event.SubjectFilter,
+			consumerDurable,
+			nats.BindStream(event.StreamName),
+			nats.AckExplicit(),
+			nats.AckWait(ackWait),
+			nats.MaxDeliver(5),
+			nats.MaxAckPending(1),
+		)
+		if err == nil {
+			break
+		}
+		logger.Warn().Err(err).Msg("stream not ready yet, retrying subscription in 1s...")
+		time.Sleep(time.Second)
+	}
 	if err != nil {
-		logger.Fatal().Err(err).Msg("failed creating durable JetStream subscription")
+		logger.Fatal().Err(err).Msg("failed creating durable JetStream subscription after retries")
 	}
 	state, err := openState(dbPath)
 	if err != nil {

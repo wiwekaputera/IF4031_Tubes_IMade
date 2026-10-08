@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
 type SourceHealthFunc func() (bmkgStatus, pvmbgStatus string, bmkgLastSynced, pvmbgLastSynced time.Time, pvmbgStaleSince *time.Time)
@@ -49,26 +50,16 @@ func New(repo store.CanonicalRepo, logger zerolog.Logger, healthFn SourceHealthF
 	}
 }
 
-type healthResponse struct {
-	Status string `json:"status"`
-	Time   string `json:"time"`
-}
-
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, healthResponse{
+	h.writeJSON(w, http.StatusOK, hazard.HealthResponse{
 		Status: "UP",
 		Time:   time.Now().UTC().Format(time.RFC3339),
 	})
-}
-
-type eventsResponse struct {
-	Data []map[string]interface{} `json:"data"`
-	Meta map[string]interface{}   `json:"meta"`
 }
 
 func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
@@ -106,55 +97,44 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := make([]map[string]interface{}, len(events))
-	for i, e := range events {
-		data[i] = map[string]interface{}{
-			"hazard_id":     e.HazardID,
-			"source":        string(e.Source),
-			"hazard_type":   string(e.HazardType),
-			"severity":      string(e.Severity),
-			"area_name":     e.AreaName,
-			"occurred_at":   e.OccurredAt,
-			"ingested_at":   e.IngestedAt,
-			"source_ref_id": e.SourceRefID,
-			"latitude":      e.Latitude,
-			"longitude":     e.Longitude,
-			"attributes":    e.Attributes,
-		}
+	if events == nil {
+		events = make([]hazard.HazardEvent, 0)
 	}
 
-	resp := eventsResponse{
-		Data: data,
-		Meta: map[string]interface{}{
-			"count": len(data),
+	resp := hazard.EventsResponse{
+		Data: events,
+		Meta: hazard.EventsMeta{
+			Count: len(events),
 		},
 	}
 
 	if h.sourceHealthFunc != nil {
 		bmkgStatus, pvmbgStatus, bmkgLastSynced, pvmbgLastSynced, pvmbgStaleSince := h.sourceHealthFunc()
-		bmkgMeta := map[string]interface{}{
-			"status": bmkgStatus,
+
+		bmkgMeta := hazard.SourceHealthMeta{
+			Status: bmkgStatus,
 		}
 		if !bmkgLastSynced.IsZero() {
-			bmkgMeta["last_synced_at"] = bmkgLastSynced.UTC().Format(time.RFC3339)
+			bmkgMeta.LastSyncedAt = bmkgLastSynced.UTC().Format(time.RFC3339)
 		} else {
-			bmkgMeta["last_synced_at"] = time.Now().UTC().Format(time.RFC3339)
+			bmkgMeta.LastSyncedAt = time.Now().UTC().Format(time.RFC3339)
 		}
 
-		pvmbgMeta := map[string]interface{}{
-			"status": pvmbgStatus,
+		pvmbgMeta := hazard.SourceHealthMeta{
+			Status: pvmbgStatus,
 		}
 		if pvmbgStaleSince != nil {
-			pvmbgMeta["stale_since"] = pvmbgStaleSince.Format(time.RFC3339)
+			staleStr := pvmbgStaleSince.UTC().Format(time.RFC3339)
+			pvmbgMeta.StaleSince = &staleStr
 		} else if !pvmbgLastSynced.IsZero() {
-			pvmbgMeta["last_synced_at"] = pvmbgLastSynced.UTC().Format(time.RFC3339)
+			pvmbgMeta.LastSyncedAt = pvmbgLastSynced.UTC().Format(time.RFC3339)
 		} else {
-			pvmbgMeta["last_synced_at"] = time.Now().UTC().Format(time.RFC3339)
+			pvmbgMeta.LastSyncedAt = time.Now().UTC().Format(time.RFC3339)
 		}
 
-		resp.Meta["sources"] = map[string]interface{}{
-			"bmkg":  bmkgMeta,
-			"pvmbg": pvmbgMeta,
+		resp.Meta.Sources = &hazard.SourcesMeta{
+			BMKG:  bmkgMeta,
+			PVMBG: pvmbgMeta,
 		}
 	}
 

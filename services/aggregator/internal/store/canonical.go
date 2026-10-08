@@ -25,6 +25,7 @@ type CanonicalRepo interface {
 	UpsertEvent(ctx context.Context, rec UpsertRequest) (string, error)
 	GetEvents(ctx context.Context, filter EventFilter) ([]hazard.HazardEvent, error)
 	GetVolcanoReferences(ctx context.Context) (map[string]VolcanoReference, error)
+	GetLatestEventTime(ctx context.Context, source string) (time.Time, error)
 }
 
 type UpsertRequest struct {
@@ -106,6 +107,25 @@ func (r *PostgresRepo) GetVolcanoReferences(ctx context.Context) (map[string]Vol
 		result[ref.VolcanoID] = ref
 	}
 	return result, rows.Err()
+}
+
+func (r *PostgresRepo) GetLatestEventTime(ctx context.Context, source string) (time.Time, error) {
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
+	var maxTime *time.Time
+	err := r.db.QueryRow(ctx, `
+		SELECT MAX(occurred_at)
+		FROM canonical_events
+		WHERE source = $1
+	`, source).Scan(&maxTime)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if maxTime == nil {
+		return time.Time{}, nil
+	}
+	return maxTime.UTC(), nil
 }
 
 func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (string, error) {

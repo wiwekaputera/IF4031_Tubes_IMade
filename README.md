@@ -2,13 +2,13 @@
 
 > **Course:** IF4031 — Arsitektur Aplikasi Terdistribusi  
 > **Milestone:** 1 — Distributed Systems Foundation  
-> **Source of Truth:** [Specification.md](file:///Users/Agung/Documents/wiwekaputera/ITB/semester-7/aat/IF4031_Tubes_IMade/Specification.md)  
-> **Architecture & Contracts:** [ARCHITECTURE.md](file:///Users/Agung/Documents/wiwekaputera/ITB/semester-7/aat/IF4031_Tubes_IMade/ARCHITECTURE.md)  
-> **Work Distribution:** [WORKDIST.md](file:///Users/Agung/Documents/wiwekaputera/ITB/semester-7/aat/IF4031_Tubes_IMade/WORKDIST.md)  
+> **Architecture & Contracts:** [ARCHITECTURE.md](ARCHITECTURE.md)  
 
 ---
 
 ## Service Status & Overview
+
+All 11 microservices in the distributed system compile, have container health checks, and build cleanly in Docker Compose.
 
 | Service | Port | Network | Status | Description |
 | :--- | :---: | :--- | :---: | :--- |
@@ -31,6 +31,7 @@
 Seluruh layanan upstream pipeline maupun edge authentication gateway (`token-service` dan `client-api`) telah operasional. Gunakan skrip otomatisasi di `scripts/demo/` untuk menjalankan dan memverifikasi sistem:
 
 ### 1. Configure Environment Variables
+Copy the template and verify secrets/keys (the default values work out of the box for local development):
 ```bash
 cp .env.example .env
 # Edit .env to set local passwords and keys (see .env.example for descriptions)
@@ -57,13 +58,36 @@ Jalankan pengujian otomatis untuk memvalidasi fungsionalitas sistem:
 Untuk menghentikan kontainer dan membersihkan volume:
 ```bash
 bash scripts/demo/down.sh
+# or
+docker compose down -v
+```
+
+---
+
+## Live Logging & Observability
+
+All services utilize **Zerolog** to output structured JSON logs directly to `stdout`.
+
+To follow logs in real time:
+```bash
+# Stream aggregator logs
+docker compose logs -f aggregator
+
+# Stream multiple ingestion services together
+docker compose logs -f aggregator bmkg-mock pvmbg-mock
+
+# Pretty-print structured JSON with jq
+docker compose logs -f aggregator | jq .
+
+# Trace a specific request across all services by Correlation ID
+docker compose logs -f | grep "<correlation-id>"
 ```
 
 ---
 
 ## Demo Scenarios
 
-Detailed execution steps and expected output are documented in [scripts/demo/README.md](file:///Users/Agung/Documents/wiwekaputera/ITB/semester-7/aat/IF4031_Tubes_IMade/scripts/demo/README.md).
+Detailed execution walkthroughs and expected outputs are documented in [scripts/demo/README.md](scripts/demo/README.md).
 
 ### Problem 1 — Schema Evolution (Tolerant Reader)
 1. **Initial state:** Query PVMBG mock; records contain standard fields without `confidence_level`:
@@ -75,7 +99,7 @@ Detailed execution steps and expected output are documented in [scripts/demo/REA
    curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/admin/schema-version"
    ```
 3. **Verify Aggregator adapts without restart:**
-   Inspect the canonical PostgreSQL store; `confidence_level` dynamically lands in `attributes` (JSONB) with zero schema migration:
+   Inspect the canonical PostgreSQL store; `confidence_level` dynamically lands in `attributes` (`JSONB`) with zero DDL migrations:
    ```bash
    docker compose exec -T canonical-store psql -U aggregator -d canonical \
      -c "SELECT source_ref_id, severity, attributes FROM canonical_events WHERE source = 'PVMBG' AND attributes->>'confidence_level' IS NOT NULL ORDER BY occurred_at DESC LIMIT 2;"
@@ -94,7 +118,7 @@ Detailed execution steps and expected output are documented in [scripts/demo/REA
    curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/admin/outage"
    ```
 3. **Verify Graceful Degradation:**
-   Aggregator trips its circuit breaker to `OUTAGE`. Querying Aggregator's internal query API serves cached historical data with `status: "OUTAGE"` and `stale_since` metadata rather than failing with HTTP 500 or timeout:
+   Aggregator trips its circuit breaker to `OUTAGE`. Querying Aggregator's internal query API serves cached historical data with `status: "OUTAGE"` and `stale_since` metadata rather than failing with HTTP 500 or timing out:
    ```bash
    docker run --rm --net if4031-tubes-imade_internal_api_net curlimages/curl:8.11.0 -s "http://aggregator:8090/internal/events?limit=1"
    ```
@@ -102,7 +126,7 @@ Detailed execution steps and expected output are documented in [scripts/demo/REA
    ```bash
    curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/admin/outage"
    ```
-   The circuit breaker probes upstream and automatically returns to `UP` state without restart.
+   The circuit breaker probes upstream and automatically returns to `UP` state without service restart.
 
 ---
 
@@ -172,11 +196,11 @@ Detailed execution steps and expected output are documented in [scripts/demo/REA
    ```bash
    docker compose restart aggregator
    ```
-   Verify other services stay healthy throughout the restart:
+   Verify upstream mocks stay healthy throughout the restart:
    ```bash
    curl -s http://localhost:8081/health
    ```
-2. **Zero-DDL Dynamic Storage:**
+2. **Transactional Outbox & Zero-DDL Dynamic Storage:**
    Pre- and post-schema evolution records coexist seamlessly inside PostgreSQL `canonical_events`:
    ```bash
    docker compose exec -T canonical-store psql -U aggregator -d canonical \
@@ -192,32 +216,36 @@ Detailed execution steps and expected output are documented in [scripts/demo/REA
    ```
 2. **Inspect Notifications Accepted by Stub Sink:**
    ```bash
-   docker run --rm --network if4031-tubes-imade_bus_net curlimages/curl:8.11.0 -s http://stub-sink:8085/received
+   docker run --rm --network if4031-tubes-imade_bus_net curlimages/curl:8.11.0 -s http://stub-sink:8085/received | jq .
    ```
-3. **Stop One Consumer (Producer and other consumer unaffected):**
+3. **Fault Tolerance (Stop One Consumer):**
    ```bash
    docker compose stop notification-consumer
    ```
+   *The producer and `audit-consumer` continue processing unaffected.*
 4. **Restart Consumer & Verify Catch-up:**
    ```bash
    sleep 10
    docker compose start notification-consumer
    docker compose logs -f notification-consumer
    ```
-   The durable consumer retrieves missed events from JetStream without message loss or duplication.
+   The durable consumer retrieves missed messages from JetStream without message loss or duplication.
 
 ---
 
 ## Load Testing (Problem 2)
 
-Load testing is authored in [tests/load/k6_p2.js](file:///Users/Agung/Documents/wiwekaputera/ITB/semester-7/aat/IF4031_Tubes_IMade/tests/load/k6_p2.js). Once `client-api` is deployed:
+Load testing is authored in [tests/load/k6_p2.js](tests/load/k6_p2.js).
+
+To execute the sustained load test (50 VUs for 60s):
 ```bash
-# Obtain Bearer token from token-service
+# 1. Obtain Bearer token from token-service
 TOKEN=$(curl -s -X POST http://localhost:8083/oauth/token \
-  -d "grant_type=client_credentials&client_id=$CLIENT_FIELD_TEAM_ID&client_secret=$CLIENT_FIELD_TEAM_SECRET" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=field-team-client&client_secret=secret-field-team" \
   | jq -r .access_token)
 
-# Run 50 VUs sustained for 60s
+# 2. Run k6 with the active token
 k6 run -e TOKEN=$TOKEN tests/load/k6_p2.js
 ```
 
@@ -225,14 +253,18 @@ k6 run -e TOKEN=$TOKEN tests/load/k6_p2.js
 
 ## Key Configuration Variables
 
-All configuration is managed through environment variables defined in [.env.example](file:///Users/Agung/Documents/wiwekaputera/ITB/semester-7/aat/IF4031_Tubes_IMade/.env.example):
+All configuration is managed through environment variables defined in [.env.example](.env.example):
 
 | Variable | Default | Service | Description |
 | :--- | :---: | :--- | :--- |
-| `BMKG_API_KEY` | — | `bmkg-mock`, `aggregator` | API key for BMKG authentication |
-| `PVMBG_BEARER_TOKEN` | — | `pvmbg-mock`, `aggregator` | Bearer token for PVMBG authentication |
+| `BMKG_API_KEY` | `test-bmkg-key` | `bmkg-mock`, `aggregator` | API key for BMKG authentication |
+| `PVMBG_BEARER_TOKEN` | `test-pvmbg-token` | `pvmbg-mock`, `aggregator` | Bearer token for PVMBG authentication |
 | `POLL_INTERVAL_S` | `3` | `aggregator` | Upstream polling interval in seconds |
 | `PVMBG_CB_THRESHOLD` | `3` | `aggregator` | Consecutive failure threshold to trip circuit breaker |
 | `PVMBG_CB_PROBE_INTERVAL` | `30` | `aggregator` | Half-open probe interval in seconds |
+| `TOKEN_DB_DSN` | `postgres://token_user:...` | `token-service` | PostgreSQL connection string for refresh tokens |
+| `ES256_PRIVATE_KEY_B64` | `...` | `token-service` | Base64-encoded SEC1 EC private key for JWT signing |
 | `ACCESS_TOKEN_TTL` | `60` | `token-service` | Access token TTL in seconds (default: 60s) |
-| `CLIENT_API_RPS_LIMIT` | `100` | `client-api` | Rate limit token bucket requests/sec |
+| `REFRESH_TOKEN_TTL_DAYS`| `7` | `token-service` | Refresh token lifespan in days |
+| `CLIENT_API_RPS_LIMIT` | `100` | `client-api` | Token bucket request rate limit (req/s) |
+| `CLIENT_API_BURST` | `20` | `client-api` | Token bucket maximum burst capacity |

@@ -16,8 +16,19 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 	"golang.org/x/sync/errgroup"
 )
+
+const defaultBatchPageLimit = 250
+
+func parseAgencyTime(s string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, s)
+	}
+	return t, err
+}
 
 type SourceStatus struct {
 	Status     string
@@ -65,9 +76,42 @@ func (p *Poller) Health() *SourceHealth {
 	return &h
 }
 
+func (p *Poller) HydrateWatermarks(ctx context.Context) error {
+	bmkgTime, err := p.repo.GetLatestEventTime(ctx, string(hazard.SourceBMKG))
+	if err != nil {
+		p.logger.Warn().Err(err).Msg("failed to hydrate BMKG watermark from database")
+	} else if !bmkgTime.IsZero() {
+		p.mu.Lock()
+		p.health.BMKG.LastSynced = bmkgTime
+		p.mu.Unlock()
+		p.logger.Info().Time("last_synced", bmkgTime).Msg("hydrated BMKG watermark from database")
+	}
+
+	pvmbgTime, err := p.repo.GetLatestEventTime(ctx, string(hazard.SourcePVMBG))
+	if err != nil {
+		p.logger.Warn().Err(err).Msg("failed to hydrate PVMBG watermark from database")
+	} else if !pvmbgTime.IsZero() {
+		p.mu.Lock()
+		p.health.PVMBG.LastSynced = pvmbgTime
+		p.mu.Unlock()
+		p.logger.Info().Time("last_synced", pvmbgTime).Msg("hydrated PVMBG watermark from database")
+	}
+
+	return nil
+}
+
 func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
-	ctx, cancel := context.WithTimeout(ctx, p.cfg.PollInterval*2)
-	defer cancel()
+	// If context has no deadline, assign a generous cycle timeout so multi-page
+	// backlog draining can complete without hanging indefinitely.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		timeout := p.cfg.PollInterval * 10
+		if timeout < 30*time.Second {
+			timeout = 30 * time.Second
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
 	p.mu.RLock()
 	bmkgSince := p.health.BMKG.LastSynced
@@ -80,21 +124,16 @@ func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 		pvmbgSince = since
 	}
 
-	// Poll upstream sources concurrently with errgroup, each with its own
-	// context timeout so slow or failing sources do not block others.
-	eg, ctx := errgroup.WithContext(ctx)
+	// Poll upstream sources concurrently with errgroup.
+	eg, egCtx := errgroup.WithContext(ctx)
 
-	bmkgCtx, bmkgCancel := context.WithTimeout(ctx, p.cfg.BMKGTimeout)
-	defer bmkgCancel()
 	eg.Go(func() error {
-		p.pollBMKG(bmkgCtx, corrID, bmkgSince)
+		p.pollBMKG(egCtx, corrID, bmkgSince)
 		return nil
 	})
 
-	pvmbgCtx, pvmbgCancel := context.WithTimeout(ctx, p.cfg.PVMBGTimeout)
-	defer pvmbgCancel()
 	eg.Go(func() error {
-		p.pollPVMBG(pvmbgCtx, corrID, pvmbgSince)
+		p.pollPVMBG(egCtx, corrID, pvmbgSince)
 		return nil
 	})
 
@@ -102,65 +141,108 @@ func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 }
 
 func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
-	sinceStr := since.UTC().Format(time.RFC3339)
+	currentSince := since
+	totalUpserted := 0
 
-	events, err := p.fetchSeismicEvents(ctx, corrID, sinceStr)
-	if err != nil {
-		p.logger.Error().Err(err).Msg("failed to fetch BMKG seismic events")
-		p.mu.Lock()
-		p.health.BMKG.Status = "ERROR"
-		p.mu.Unlock()
-		return
-	}
-
-	warningsMap := make(map[string]agency.TsunamiWarning)
-	warnings, err := p.fetchTsunamiWarnings(ctx, corrID, sinceStr)
-	if err != nil {
-		p.logger.Warn().Err(err).Msg("failed to fetch BMKG tsunami warnings")
-	} else {
-		for _, w := range warnings {
-			warningsMap[w.RelatedEventID] = w
-		}
-	}
-
-	count := 0
-	for _, evt := range events {
-		var warning *agency.TsunamiWarning
-		if w, ok := warningsMap[evt.EventID]; ok {
-			warning = &w
+	for {
+		select {
+		case <-ctx.Done():
+			p.logger.Warn().Msg("BMKG poll cancelled by context")
+			return
+		default:
 		}
 
-		rec := p.normalizer.NormalizeSeismic(evt, warning)
-		rec.CorrelationID = corrID
+		sinceStr := currentSince.UTC().Format(time.RFC3339)
 
-		id, err := p.repo.UpsertEvent(ctx, rec)
+		events, err := p.fetchSeismicEvents(ctx, corrID, sinceStr)
 		if err != nil {
-			p.logger.Error().Err(err).Str("event_id", evt.EventID).Msg("failed to upsert seismic event")
-			continue
+			p.logger.Error().Err(err).Msg("failed to fetch BMKG seismic events")
+			p.mu.Lock()
+			p.health.BMKG.Status = "ERROR"
+			p.mu.Unlock()
+			return
 		}
-		_ = id
-		count++
+
+		warningsMap := make(map[string]agency.TsunamiWarning)
+		warnings, err := p.fetchTsunamiWarnings(ctx, corrID, sinceStr)
+		if err != nil {
+			p.logger.Warn().Err(err).Msg("failed to fetch BMKG tsunami warnings")
+		} else {
+			for _, w := range warnings {
+				warningsMap[w.RelatedEventID] = w
+			}
+		}
+
+		p.mu.Lock()
+		p.health.BMKG.Status = "UP"
+		p.mu.Unlock()
+
+		if len(events) == 0 {
+			break
+		}
+
+		var latestTime time.Time
+		for _, evt := range events {
+			var warning *agency.TsunamiWarning
+			if w, ok := warningsMap[evt.EventID]; ok {
+				warning = &w
+			}
+
+			rec := p.normalizer.NormalizeSeismic(evt, warning)
+			rec.CorrelationID = corrID
+
+			id, err := p.repo.UpsertEvent(ctx, rec)
+			if err != nil {
+				p.logger.Error().Err(err).Str("event_id", evt.EventID).Msg("failed to upsert seismic event")
+				continue
+			}
+			_ = id
+			totalUpserted++
+
+			t, err := parseAgencyTime(evt.OccurredAt)
+			if err == nil && t.After(latestTime) {
+				latestTime = t
+			}
+		}
+
+		if !latestTime.IsZero() {
+			p.mu.Lock()
+			if latestTime.After(p.health.BMKG.LastSynced) {
+				p.health.BMKG.LastSynced = latestTime
+			}
+			p.mu.Unlock()
+		}
+
+		if len(events) < defaultBatchPageLimit {
+			break
+		}
+
+		if !latestTime.After(currentSince) {
+			p.logger.Warn().
+				Time("watermark", latestTime).
+				Time("current_since", currentSince).
+				Msg("BMKG watermark did not advance; breaking pagination loop")
+			break
+		}
+
+		currentSince = latestTime
 	}
 
-	p.mu.Lock()
-	p.health.BMKG.Status = "UP"
-	p.health.BMKG.LastSynced = time.Now().UTC()
-	p.mu.Unlock()
-	p.logger.Info().Int("events_upserted", count).Msg("BMKG poll completed")
+	p.logger.Info().Int("events_upserted", totalUpserted).Msg("BMKG poll completed")
 }
 
 func (p *Poller) fetchSeismicEvents(ctx context.Context, corrID string, since string) ([]agency.SeismicEvent, error) {
-	url := fmt.Sprintf("%s/seismic-events?since=%s", p.cfg.BMKGBaseURL, url.QueryEscape(since))
+	url := fmt.Sprintf("%s/seismic-events?since=%s&limit=%d", p.cfg.BMKGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
 	return fetchAgencyEvents[agency.SeismicEvent](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchTsunamiWarnings(ctx context.Context, corrID string, since string) ([]agency.TsunamiWarning, error) {
-	url := fmt.Sprintf("%s/tsunami-warnings?since=%s", p.cfg.BMKGBaseURL, url.QueryEscape(since))
+	url := fmt.Sprintf("%s/tsunami-warnings?since=%s&limit=%d", p.cfg.BMKGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
 	return fetchAgencyEvents[agency.TsunamiWarning](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchVolcanicReports(ctx context.Context, corrID string, since string) ([]agency.VolcanicReport, error) {
-	url := fmt.Sprintf("%s/volcanic-reports?since=%s", p.cfg.PVMBGBaseURL, url.QueryEscape(since))
+	url := fmt.Sprintf("%s/volcanic-reports?since=%s&limit=%d", p.cfg.PVMBGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
 	return fetchAgencyEvents[agency.VolcanicReport](ctx, p.logger, p.pvmbgClient, url, corrID, p.cfg.PVMBGBearerToken, "Authorization")
 }
 

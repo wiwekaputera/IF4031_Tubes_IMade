@@ -114,6 +114,9 @@ func main() {
 	// 6. Initialize normalizer, poller, and query API handlers
 	norm := normalizer.New(logger, volcanoRefs)
 	p := poller.New(cfg, norm, repo, logger)
+	if err := p.HydrateWatermarks(ctx); err != nil {
+		logger.Warn().Err(err).Msg("failed to hydrate poller watermarks on startup")
+	}
 
 	healthFn := func() (string, string, time.Time, time.Time, *time.Time) {
 		hs := p.Health()

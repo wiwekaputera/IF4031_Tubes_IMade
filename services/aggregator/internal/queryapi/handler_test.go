@@ -26,6 +26,9 @@ func (f *fakeQueryRepo) UpsertEvent(context.Context, store.UpsertRequest) (strin
 func (f *fakeQueryRepo) GetVolcanoReferences(context.Context) (map[string]store.VolcanoReference, error) {
 	return nil, nil
 }
+func (f *fakeQueryRepo) GetLatestEventTime(context.Context, string) (time.Time, error) {
+	return time.Time{}, nil
+}
 func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) ([]hazard.HazardEvent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -183,29 +186,30 @@ func TestGetEvents_MetaSources(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.GetEvents(rec, httptest.NewRequest(http.MethodGet, "/internal/events", nil))
 
-	var resp struct {
-		Meta struct {
-			Sources map[string]map[string]interface{} `json:"sources"`
-		} `json:"meta"`
+	var typedResp hazard.EventsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&typedResp); err != nil {
+		t.Fatalf("failed to decode typed response: %v", err)
 	}
-	_ = json.NewDecoder(rec.Body).Decode(&resp)
-	if resp.Meta.Sources["bmkg"]["status"] != "UP" || resp.Meta.Sources["pvmbg"]["status"] != "DOWN" {
-		t.Fatalf("unexpected meta.sources: %+v", resp.Meta.Sources)
+	if typedResp.Meta.Sources == nil {
+		t.Fatal("expected typedResp.Meta.Sources not nil")
 	}
-	if resp.Meta.Sources["pvmbg"]["stale_since"] != staleTime.Format(time.RFC3339) {
-		t.Errorf("expected stale_since %s, got %v", staleTime.Format(time.RFC3339), resp.Meta.Sources["pvmbg"]["stale_since"])
+	if typedResp.Meta.Sources.BMKG.Status != "UP" || typedResp.Meta.Sources.PVMBG.Status != "DOWN" {
+		t.Fatalf("unexpected meta.sources: %+v", typedResp.Meta.Sources)
+	}
+	if typedResp.Meta.Sources.PVMBG.StaleSince == nil || *typedResp.Meta.Sources.PVMBG.StaleSince != staleTime.Format(time.RFC3339) {
+		t.Errorf("expected stale_since %s, got %v", staleTime.Format(time.RFC3339), typedResp.Meta.Sources.PVMBG.StaleSince)
 	}
 
 	// 2. Without healthFn, sources omitted from meta
 	hNil := New(repo, zerolog.Nop(), nil)
 	recNil := httptest.NewRecorder()
 	hNil.GetEvents(recNil, httptest.NewRequest(http.MethodGet, "/internal/events", nil))
-	var respNil struct {
-		Meta map[string]interface{} `json:"meta"`
+	var typedRespNil hazard.EventsResponse
+	if err := json.NewDecoder(recNil.Body).Decode(&typedRespNil); err != nil {
+		t.Fatalf("failed to decode nil response: %v", err)
 	}
-	_ = json.NewDecoder(recNil.Body).Decode(&respNil)
-	if _, ok := respNil.Meta["sources"]; ok {
-		t.Error("expected sources omitted when healthFn is nil")
+	if typedRespNil.Meta.Sources != nil {
+		t.Error("expected sources omitted (nil) when healthFn is nil")
 	}
 }
 

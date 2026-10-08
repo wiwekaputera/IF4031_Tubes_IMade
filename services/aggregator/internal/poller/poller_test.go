@@ -2,11 +2,18 @@ package poller
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/agency"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 )
 
 func TestPoll_BMKGSucceedWhilePVMBGFails(t *testing.T) {
@@ -74,5 +81,135 @@ func TestPoll_CircuitBreakerSkipPath(t *testing.T) {
 	}
 	if !hs.PVMBG.LastSynced.Equal(lastSynced) {
 		t.Errorf("expected LastSynced unchanged, got %v", hs.PVMBG.LastSynced)
+	}
+}
+
+func TestPoller_HydrateWatermarks(t *testing.T) {
+	bmkgTime := time.Date(2026, 10, 8, 1, 0, 0, 0, time.UTC)
+	pvmbgTime := time.Date(2026, 10, 8, 2, 0, 0, 0, time.UTC)
+	repo := &fakeRepo{
+		latestTimes: map[string]time.Time{
+			"BMKG":  bmkgTime,
+			"PVMBG": pvmbgTime,
+		},
+	}
+	cfg := &config.Config{
+		BMKGTimeout:          500 * time.Millisecond,
+		PVMBGTimeout:         500 * time.Millisecond,
+		PollInterval:         1 * time.Second,
+		PVMBGCbThreshold:     5,
+		PVMBGCbProbeInterval: 30 * time.Second,
+	}
+	p := New(cfg, normalizer.New(zerolog.Nop(), nil), repo, zerolog.Nop())
+
+	if err := p.HydrateWatermarks(context.Background()); err != nil {
+		t.Fatalf("unexpected hydrate error: %v", err)
+	}
+
+	hs := p.Health()
+	if !hs.BMKG.LastSynced.Equal(bmkgTime) {
+		t.Errorf("expected BMKG LastSynced %v, got %v", bmkgTime, hs.BMKG.LastSynced)
+	}
+	if !hs.PVMBG.LastSynced.Equal(pvmbgTime) {
+		t.Errorf("expected PVMBG LastSynced %v, got %v", pvmbgTime, hs.PVMBG.LastSynced)
+	}
+}
+
+func TestPoller_WatermarkAdvancesToEventTimestamp(t *testing.T) {
+	eventTime := time.Date(2026, 10, 8, 2, 16, 54, 0, time.UTC)
+	eventTimeStr := eventTime.Format(time.RFC3339)
+
+	pvmbgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]agency.VolcanicReport{{
+			ReportID:   "rpt-1",
+			VolcanoID:  "GNG-001",
+			AlertLevel: agency.AlertNormal,
+			ReportedAt: eventTimeStr,
+		}})
+	}))
+	defer pvmbgSrv.Close()
+
+	bmkgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]agency.SeismicEvent{})
+	}))
+	defer bmkgSrv.Close()
+
+	p := newPollerWithBreaker(bmkgSrv.URL, pvmbgSrv.URL, 5, 30*time.Second)
+	p.Poll(context.Background(), "test-watermark", time.Time{})
+
+	hs := p.Health()
+	if !hs.PVMBG.LastSynced.Equal(eventTime) {
+		t.Errorf("expected PVMBG LastSynced to equal event time %v, got %v", eventTime, hs.PVMBG.LastSynced)
+	}
+}
+
+func TestPoller_BacklogDrainingPagination(t *testing.T) {
+	var pageCalls atomic.Int32
+	t1 := time.Date(2026, 10, 8, 2, 0, 0, 0, time.UTC)
+
+	pvmbgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := pageCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			// First page returns full batch of 250 records
+			reports := make([]agency.VolcanicReport, 250)
+			for i := 0; i < 250; i++ {
+				reports[i] = agency.VolcanicReport{
+					ReportID:   fmt.Sprintf("rpt-%04d", i),
+					VolcanoID:  "GNG-001",
+					AlertLevel: agency.AlertNormal,
+					ReportedAt: t1.Add(time.Duration(i) * time.Second).Format(time.RFC3339),
+				}
+			}
+			json.NewEncoder(w).Encode(reports)
+			return
+		}
+		// Second page returns remaining 50 records
+		reports := make([]agency.VolcanicReport, 50)
+		for i := 0; i < 50; i++ {
+			reports[i] = agency.VolcanicReport{
+				ReportID:   fmt.Sprintf("rpt-p2-%04d", i),
+				VolcanoID:  "GNG-001",
+				AlertLevel: agency.AlertNormal,
+				ReportedAt: t1.Add(250*time.Second + time.Duration(i)*time.Second).Format(time.RFC3339),
+			}
+		}
+		json.NewEncoder(w).Encode(reports)
+	}))
+	defer pvmbgSrv.Close()
+
+	bmkgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]agency.SeismicEvent{})
+	}))
+	defer bmkgSrv.Close()
+
+	repo := &fakeRepo{}
+	cfg := &config.Config{
+		BMKGBaseURL:          bmkgSrv.URL,
+		PVMBGBaseURL:         pvmbgSrv.URL,
+		BMKGTimeout:          500 * time.Millisecond,
+		PVMBGTimeout:         1500 * time.Millisecond,
+		PollInterval:         1 * time.Second,
+		PVMBGCbThreshold:     5,
+		PVMBGCbProbeInterval: 30 * time.Second,
+	}
+	p := New(cfg, normalizer.New(zerolog.Nop(), nil), repo, zerolog.Nop())
+
+	p.Poll(context.Background(), "test-drain", time.Time{})
+
+	if pageCalls.Load() != 2 {
+		t.Fatalf("expected 2 page calls for backlog draining, got %d", pageCalls.Load())
+	}
+	if repo.upserts != 300 {
+		t.Fatalf("expected 300 upserts across two pages, got %d", repo.upserts)
+	}
+
+	expectedLast := t1.Add(299 * time.Second)
+	hs := p.Health()
+	if !hs.PVMBG.LastSynced.Equal(expectedLast) {
+		t.Errorf("expected LastSynced %v, got %v", expectedLast, hs.PVMBG.LastSynced)
 	}
 }
