@@ -13,6 +13,8 @@ type Config struct {
 	JWKSURL           string
 	RPSLimit          float64
 	Burst             int
+	TokenIssuer       string
+	TokenAudience     string
 	LogLevel          string
 }
 
@@ -51,6 +53,16 @@ func Load() (*Config, error) {
 		burst = parsed
 	}
 
+	tokenIssuer := os.Getenv("TOKEN_ISSUER")
+	if tokenIssuer == "" {
+		tokenIssuer = "bnpb-token-service"
+	}
+
+	tokenAudience := os.Getenv("TOKEN_AUDIENCE")
+	if tokenAudience == "" {
+		tokenAudience = "bnpb-client-api"
+	}
+
 	logLevel := os.Getenv("LOG_LEVEL")
 	if logLevel == "" {
 		logLevel = "info"
@@ -62,6 +74,8 @@ func Load() (*Config, error) {
 		JWKSURL:           jwksURL,
 		RPSLimit:          rpsLimit,
 		Burst:             burst,
+		TokenIssuer:       tokenIssuer,
+		TokenAudience:     tokenAudience,
 		LogLevel:          logLevel,
 	}, nil
 }

@@ -11,9 +11,11 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/auth"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/httpapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/jwks"
+	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/ratelimit"
 )
 
 func main() {
@@ -58,12 +60,37 @@ func main() {
 
 	jwksCache.StartPeriodicRefresh(ctx)
 
+	// Rate Limiter per client identity (sub)
+	limiter := ratelimit.New(ratelimit.Options{
+		RPS:         cfg.RPSLimit,
+		Burst:       cfg.Burst,
+		IdleTimeout: 10 * time.Minute,
+		SkipPaths:   []string{"/health"},
+	})
+	limiter.StartCleanupWorker(ctx, 5*time.Minute)
+
+	// Auth Middleware with JWKS cache, ES256 enforcement, issuer & audience validation
+	authMiddleware := auth.Middleware(auth.Config{
+		KeyProvider: jwksCache,
+		Issuer:      cfg.TokenIssuer,
+		Audience:    cfg.TokenAudience,
+		Leeway:      5 * time.Second,
+		SkipPaths:   []string{"/health"},
+		Logger:      logger,
+	})
+
 	// Setup HTTP routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.HealthHandler())
 
-	// Chain middlewares: CorrelationID -> Logging -> Handlers
-	handler := httpapi.CorrelationIDMiddleware(httpapi.LoggingMiddleware(logger, mux))
+	// Chain middlewares: CorrelationID -> Logging -> Auth -> Rate limit -> Handler
+	handler := httpapi.CorrelationIDMiddleware(
+		httpapi.LoggingMiddleware(logger,
+			authMiddleware(
+				limiter.Middleware(mux),
+			),
+		),
+	)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
