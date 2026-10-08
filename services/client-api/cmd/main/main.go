@@ -13,6 +13,7 @@ import (
 
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/httpapi"
+	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/jwks"
 )
 
 func main() {
@@ -39,6 +40,24 @@ func main() {
 		Int("burst", cfg.Burst).
 		Msg("client-api: starting up")
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Initialize JWKS cache and fetch public keys with retry & backoff
+	jwksCache := jwks.New(jwks.Options{
+		JWKSURL: cfg.JWKSURL,
+		Logger:  logger,
+	})
+
+	initCtx, cancelInit := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelInit()
+
+	if err := jwksCache.FetchInitial(initCtx, 10, 500*time.Millisecond); err != nil {
+		logger.Fatal().Err(err).Msg("client-api: failed to fetch initial JWKS from token-service")
+	}
+
+	jwksCache.StartPeriodicRefresh(ctx)
+
 	// Setup HTTP routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.HealthHandler())
@@ -54,9 +73,6 @@ func main() {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	go func() {
 		logger.Info().Str("addr", server.Addr).Msg("client-api: listening")
