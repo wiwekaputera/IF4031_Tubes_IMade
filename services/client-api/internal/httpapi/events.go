@@ -34,10 +34,21 @@ func EventsHandler(aggClient upstream.Client) http.HandlerFunc {
 			w.Header().Set("X-Correlation-ID", corrID)
 		}
 
-		// Validate scope and view parameter
+		// 1. Validate query parameters (type, limit, since, hazard_id, view)
+		queryParams, err := ValidateEventQuery(r.URL.Query())
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(contractsauth.OAuthError{
+				Error:            contractsauth.ErrInvalidRequest,
+				ErrorDescription: err.Error(),
+			})
+			return
+		}
+
+		// 2. Validate scope permissions against requested view
 		scope := auth.ScopeFromContext(r.Context())
-		viewParam := r.URL.Query().Get("view")
-		view, err := projection.ValidateViewScope(scope, viewParam)
+		view, err := projection.ValidateViewScope(scope, queryParams.View)
 		if err != nil {
 			if errors.Is(err, projection.ErrInsufficientScope) {
 				w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope"`)
@@ -59,18 +70,10 @@ func EventsHandler(aggClient upstream.Client) http.HandlerFunc {
 				})
 				return
 			}
-			if errors.Is(err, projection.ErrInvalidView) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				_ = json.NewEncoder(w).Encode(contractsauth.OAuthError{
-					Error:            contractsauth.ErrInvalidRequest,
-					ErrorDescription: err.Error(),
-				})
-				return
-			}
 		}
 
-		resp, err := aggClient.GetEvents(r.Context(), r.URL.RawQuery, corrID)
+		// 3. Call upstream Aggregator with sanitized query
+		resp, err := aggClient.GetEvents(r.Context(), queryParams.ToUpstreamQuery(), corrID)
 		if err != nil {
 			var upErr *upstream.UpstreamError
 			if errors.As(err, &upErr) {

@@ -248,3 +248,42 @@ func TestEventsHandler_UpstreamError(t *testing.T) {
 		t.Fatalf("expected upstream_unavailable, got %v", errResp.Error)
 	}
 }
+
+func TestEventsHandler_InvalidQueryParams_Returns400(t *testing.T) {
+	mockClient := &mockAggregatorClient{}
+	handler := EventsHandler(mockClient)
+
+	badURLs := []string{
+		"/v1/events?type=CYCLONE",
+		"/v1/events?limit=0",
+		"/v1/events?limit=-5",
+		"/v1/events?limit=105",
+		"/v1/events?limit=invalid",
+		"/v1/events?since=2026-09-21",
+		"/v1/events?since=not-a-date",
+		"/v1/events?hazard_id=not-a-uuid",
+		"/v1/events?hazard_id=123-456",
+	}
+
+	for _, u := range badURLs {
+		t.Run(u, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, u, nil)
+			req = withAuthScope(req, contractsauth.ScopeFieldTeam)
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("for URL %q expected 400 Bad Request, got %d", u, rec.Code)
+			}
+
+			var errResp contractsauth.OAuthError
+			if err := json.NewDecoder(rec.Body).Decode(&errResp); err != nil {
+				t.Fatalf("failed to parse json error: %v", err)
+			}
+			if errResp.Error != contractsauth.ErrInvalidRequest {
+				t.Fatalf("expected error invalid_request, got %q", errResp.Error)
+			}
+		})
+	}
+}
