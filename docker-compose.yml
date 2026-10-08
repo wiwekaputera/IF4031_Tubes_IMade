@@ -270,6 +270,8 @@ services:
     volumes:
       - notification_bbolt_data:/data
     depends_on:
+      aggregator:
+        condition: service_healthy
       nats-jetstream:
         condition: service_healthy
       stub-sink:
@@ -294,6 +296,8 @@ services:
     volumes:
       - audit_bbolt_data:/data
     depends_on:
+      aggregator:
+        condition: service_healthy
       nats-jetstream:
         condition: service_healthy
     networks:
