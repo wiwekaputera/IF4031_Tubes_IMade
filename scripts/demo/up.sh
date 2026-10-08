@@ -10,8 +10,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Core services the demo exercises (canonical-store is the DB the
-# aggregator writes to, so it is part of the readiness set).
-SERVICES=(bmkg-mock pvmbg-mock canonical-store aggregator)
+# aggregator writes to; token-db is the DB for token-service).
+SERVICES=(bmkg-mock pvmbg-mock canonical-store aggregator token-db token-service client-api)
 BUILD_TIMEOUT="${UP_BUILD_TIMEOUT:-300}"
 HEALTH_TIMEOUT="${UP_HEALTH_TIMEOUT:-240}"
 POLL_INTERVAL=3
@@ -53,7 +53,7 @@ wait_healthy() {
   return 1
 }
 
-log "Starting ingestion pipeline stack (build may take a while on first run)..."
+log "Starting pipeline & auth gateway stack (build may take a while on first run)..."
 docker compose up -d --build --wait "${SERVICES[@]}" 2>/dev/null || \
   docker compose up -d --build "${SERVICES[@]}"
 
@@ -63,10 +63,13 @@ done
 
 log ""
 log "==================================================="
-log "  Ingestion pipeline is READY (all services healthy)"
+log "  All services are READY (all services healthy)"
 log "  bmkg-mock       http://localhost:8081   (port 8081)"
 log "  pvmbg-mock      http://localhost:8082   (port 8082)"
 log "  aggregator      http://aggregator:8090  (internal_api_net only)"
 log "  canonical-store postgresql store_net    (no host port)"
+log "  token-service   http://localhost:8083   (port 8083)"
+log "  client-api      http://localhost:8080   (port 8080)"
 log "==================================================="
 log "Next: bash scripts/demo/smoke.sh"
+log "      bash scripts/demo/p3.sh"

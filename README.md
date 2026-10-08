@@ -20,55 +20,42 @@ All 11 microservices in the distributed system compile, have container health ch
 | `stub-sink` | *internal* (`8085`) | `bus_net` | 🟢 Operational | Notification target endpoint with idempotency verification (`GET /received`) |
 | `notification-consumer` | *internal* (`8086`) | `bus_net` | 🟢 Operational | Durable JetStream consumer with local bbolt deduplication forwarding to stub sink |
 | `audit-consumer` | *internal* (`8087`) | `bus_net` | 🟢 Operational | Durable JetStream consumer appending disaster event history to local bbolt |
-| `token-db` | *internal* | `token_net` | 🟢 Operational | PostgreSQL 16 for refresh token persistence and rotation audit |
-| `token-service` | `8083` | `edge_net`, `token_net` | 🟢 Operational | OAuth2 client credentials, refresh token rotation, ES256 signing, and JWKS |
-| `client-api` | `8080` | `edge_net`, `internal_api_net` | 🟡 Gateway Active | Edge HTTP gateway with health check; scope projection & rate limiter in progress |
+| `token-db` | *internal* | `token_net` | 🟢 Operational | PostgreSQL store for refresh token families and reuse detection |
+| `token-service` | `8083` | `edge_net`, `token_net` | 🟢 Operational | OAuth 2.0 token service with ECDSA P-256 (ES256) signing & JWKS endpoint (Person B) |
+| `client-api` | `8080` | `edge_net`, `internal_api_net` | 🟢 Operational | Edge REST gateway with scope projection, rate limiting, and aggregator proxy (Person B) |
 
 ---
 
 ## Quick Start
 
+Seluruh layanan upstream pipeline maupun edge authentication gateway (`token-service` dan `client-api`) telah operasional. Gunakan skrip otomatisasi di `scripts/demo/` untuk menjalankan dan memverifikasi sistem:
+
 ### 1. Configure Environment Variables
 Copy the template and verify secrets/keys (the default values work out of the box for local development):
 ```bash
 cp .env.example .env
+# Edit .env to set local passwords and keys (see .env.example for descriptions)
 ```
 
-### 2. Launch the System
-
-#### Option A: Launch Complete Distributed System (All 11 Services)
-To build and spin up the complete cluster including OAuth2 token service and consumers:
-```bash
-docker compose up -d --build
-```
-
-#### Option B: Launch Upstream Ingestion & Aggregator Pipeline
-To focus specifically on upstream ingestion (BMKG, PVMBG, Canonical Store, Aggregator, JetStream), use the automated runner:
+### 2. Launch Operational Services
+Gunakan script startup yang menjalankan dan memantau status kesehatan seluruh service (`bmkg-mock`, `pvmbg-mock`, `canonical-store`, `aggregator`, `token-db`, `token-service`, `client-api`):
 ```bash
 bash scripts/demo/up.sh
 ```
 
-### 3. Verify Operational Readiness
-
-#### Automated Smoke Test Suite
-Run the 12-check automated smoke test suite to validate upstream health, seed data ingestion, outage simulation, and PostgreSQL storage:
-```bash
-bash scripts/demo/smoke.sh
-```
-
-#### Run Unit Tests Locally
-All services can also be tested natively without Docker:
-```bash
-for d in services/*; do
-  if [ -f "$d/go.mod" ]; then
-    echo "Testing $d..."
-    (cd "$d" && go test ./...)
-  fi
-done
-```
+### 3. Verify Operational Pipeline
+Jalankan pengujian otomatis untuk memvalidasi fungsionalitas sistem:
+- **Milestone 1 / Ingestion Pipeline (P1 & P2):**
+  ```bash
+  bash scripts/demo/smoke.sh
+  ```
+- **Problem 3 / Auth Gateway & Projection (P3):**
+  ```bash
+  bash scripts/demo/p3.sh
+  ```
 
 ### 4. Teardown
-To cleanly stop containers, remove networks, and wipe volumes:
+Untuk menghentikan kontainer dan membersihkan volume:
 ```bash
 bash scripts/demo/down.sh
 # or
@@ -143,37 +130,63 @@ Detailed execution walkthroughs and expected outputs are documented in [scripts/
 
 ---
 
-### Problem 3 — Service Authentication, OAuth2 & Scope Projection
+### Problem 3 — Service Authentication & Scope Projection
 
-#### 1. Upstream Credential Isolation
-* Submitting PVMBG Bearer token to BMKG returns `403 Forbidden`:
-  ```bash
-  curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer test-pvmbg-token" http://localhost:8081/seismic-events
-  ```
-* Submitting BMKG API Key to PVMBG returns `403 Forbidden`:
-  ```bash
-  curl -s -o /dev/null -w "%{http_code}\n" -H "X-BMKG-Key: test-bmkg-key" http://localhost:8082/volcanic-reports
-  ```
+1. **Upstream Credential Isolation:**
+   - Submitting PVMBG Bearer token to BMKG returns `403 Forbidden`:
+     ```bash
+     curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer test-pvmbg-token" http://localhost:8081/seismic-events
+     ```
+   - Submitting BMKG API Key to PVMBG returns `403 Forbidden`:
+     ```bash
+     curl -s -o /dev/null -w "%{http_code}\n" -H "X-BMKG-Key: test-bmkg-key" http://localhost:8082/volcanic-reports
+     ```
 
-#### 2. Downstream OAuth2 Token Service (`token-service`)
-* **Obtain Access Token (Client Credentials Grant):**
-  ```bash
-  # Media Client (scope: media)
-  curl -s -X POST http://localhost:8083/oauth/token \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "grant_type=client_credentials&client_id=media-client&client_secret=secret-media" | jq .
+2. **OAuth 2.0 Token Issuance (`token-service` :8083):**
+   - Ambil token untuk client `media` (`client_credentials`):
+     ```bash
+     MEDIA_TOKEN=$(curl -s -X POST http://localhost:8083/oauth/token \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "grant_type=client_credentials&client_id=client-media&client_secret=change-me-media-secret" \
+       | python3 -c 'import sys, json; print(json.load(sys.stdin)["access_token"])')
+     ```
+   - Ambil token untuk client `field_team` (`client_credentials`):
+     ```bash
+     FIELD_RESP=$(curl -s -X POST http://localhost:8083/oauth/token \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "grant_type=client_credentials&client_id=client-field-team&client_secret=change-me-field-team-secret")
+     FIELD_TOKEN=$(echo "$FIELD_RESP" | python3 -c 'import sys, json; print(json.load(sys.stdin)["access_token"])')
+     REFRESH_TOKEN=$(echo "$FIELD_RESP" | python3 -c 'import sys, json; print(json.load(sys.stdin)["refresh_token"])')
+     ```
 
-  # Field Team Client (scope: field_team, includes refresh_token)
-  curl -s -X POST http://localhost:8083/oauth/token \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "grant_type=client_credentials&client_id=field-team-client&client_secret=secret-field-team" | jq .
-  ```
-* **Retrieve Active JWKS Public Keys:**
-  ```bash
-  curl -s http://localhost:8083/.well-known/jwks.json | jq .
-  ```
-* **Refresh Token Rotation & Theft Detection:**
-  Send the issued refresh token to `/oauth/token` with `grant_type=refresh_token`. Reusing an invalidated refresh token immediately triggers theft detection, revoking the token family.
+3. **Scope-Based Field Projection (`client-api` :8080):**
+   - Client `media` hanya menerima field ringkasan (tanpa `latitude`, `longitude`, `attributes`, `source_ref_id`):
+     ```bash
+     curl -s -H "Authorization: Bearer $MEDIA_TOKEN" http://localhost:8080/v1/events
+     ```
+   - Client `media` yang meminta data mentah (`view=full`) ditolak dengan `403 Forbidden`:
+     ```bash
+     curl -s -w "\nHTTP: %{http_code}\n" -H "Authorization: Bearer $MEDIA_TOKEN" "http://localhost:8080/v1/events?view=full"
+     ```
+   - Client `field_team` dengan `view=full` berhasil mendapatkan seluruh atribut lengkap:
+     ```bash
+     curl -s -H "Authorization: Bearer $FIELD_TOKEN" "http://localhost:8080/v1/events?view=full"
+     ```
+
+4. **Token Expiration, Refresh Token Rotation, & Reuse Detection:**
+   - Refresh token dapat ditukarkan dengan access token baru dan refresh token terotasi baru:
+     ```bash
+     curl -s -X POST http://localhost:8083/oauth/token \
+       -H "Content-Type: application/x-www-form-urlencoded" \
+       -d "grant_type=refresh_token&client_id=client-field-team&client_secret=change-me-field-team-secret&refresh_token=$REFRESH_TOKEN"
+     ```
+   - Memakai ulang refresh token yang lama akan memicu deteksi pencurian token (*theft/reuse detection*), menghasilkan `400 Bad Request` (`invalid_grant`), dan mencabut seluruh *family* token terkait.
+
+5. **Automated End-to-End Suite:**
+   Jalankan seluruh 12 skenario pengujian Problem 3 (termasuk verifikasi ECDSA ES256, deteksi tampered signature, burst rate limiting 429 + `Retry-After`, dan propagasi `X-Correlation-ID`):
+   ```bash
+   bash scripts/demo/p3.sh
+   ```
 
 ---
 
