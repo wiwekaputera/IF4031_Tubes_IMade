@@ -25,9 +25,10 @@ compose project defined in `docker-compose.yml` (`name: if4031-tubes-imade`).
 
 | Script      | What it does                                                                 |
 |-------------|------------------------------------------------------------------------------|
-| `up.sh`     | `docker compose up -d --build bmkg-mock pvmbg-mock canonical-store aggregator` (nats-jetstream comes up as an aggregator dependency). Polls `docker compose ps --format Health` until all four are `healthy`, then prints a readiness banner. |
-| `smoke.sh`  | Hits every health endpoint and key data endpoint, asserts status + body, and prints a PASS/FAIL summary with a final exit code. Waits for the aggregator poller's first cycle to ingest the seeded events. |
-| `down.sh`   | `docker compose down -v --rmi local` — stops everything, removes named/anonymous volumes and locally-built images so the next `up.sh` starts from a clean DB. |
+| `up.sh`     | `docker compose up -d --build` for the pipeline and auth gateway services (`bmkg-mock`, `pvmbg-mock`, `canonical-store`, `aggregator`, `token-db`, `token-service`, `client-api`). Polls Docker health status until all are `healthy`. |
+| `smoke.sh`  | Hits every health endpoint and key data endpoint for Milestone 1 (P1/P2 ingestion pipeline), asserts status + body, and prints PASS/FAIL summary. |
+| `p3.sh`     | End-to-end integration demo for Problem 3 (P3): exercises OAuth 2.0 token issuance (`client_credentials` & `refresh_token`), JWT ES256 validation, per-client rate limiting, scope-based field projection, upstream credential isolation, and correlation ID propagation. |
+| `down.sh`   | `docker compose down -v --rmi local` — stops everything, removes named/anonymous volumes and locally-built images so the next `up.sh` starts from a clean state. |
 
 ## Aggregator access (no host port, distroless image)
 
@@ -275,6 +276,32 @@ Confirm that `canonical-store` publishes **zero host ports** and is accessible s
 docker inspect $(docker compose ps -q canonical-store) --format '{{json .NetworkSettings.Ports}}'
 ```
 **Expected Output:** `{"5432/tcp":null}` (port 5432 is not bound to host interface). External consumers and client-facing APIs obtain data exclusively through Aggregator's API (`http://aggregator:8090/internal/events`).
+
+---
+
+## Problem 3 Demo (`p3.sh`)
+
+`scripts/demo/p3.sh` verifies the complete token lifecycle, API gateway security, projection rules, and upstream protections against a running stack:
+
+| # | Scenario | Expected Behavior |
+|---|----------|-------------------|
+| 1 | OAuth 2.0 `client_credentials` issuance | HTTP 200; only `client-field-team` receives a `refresh_token`, while `media` and `internal_ops` receive access tokens only. |
+| 2 | Unauthenticated request (`GET /v1/events`) | HTTP 401 Unauthorized with header `WWW-Authenticate: Bearer error="invalid_token"`. |
+| 3 | Tampered token signature | HTTP 401 Unauthorized (signature verification failure). |
+| 4 | Media access (`GET /v1/events`) | HTTP 200 OK; response body is projected to summary fields only (`hazard_id`, `source`, `hazard_type`, `severity`, `area_name`, `occurred_at`, `ingested_at`), stripping coordinates (`latitude`, `longitude`) and attributes. |
+| 5 | Media requesting full projection (`GET /v1/events?view=full`) | HTTP 403 Forbidden with `{"error": "insufficient_scope"}`. |
+| 6 | Field team requesting full projection (`GET /v1/events?view=full`) | HTTP 200 OK with full fields included. |
+| 7 | Expired access token | HTTP 401 Unauthorized after token TTL expires. |
+| 8 | Token refresh (`grant_type=refresh_token`) | HTTP 200 OK; issues a new access token and a **rotated** refresh token. |
+| 9 | Refresh token reuse detection | HTTP 400 Bad Request with `{"error": "invalid_grant"}` when attempting to reuse the previous refresh token. |
+| 10 | Burst rate limiting | Exceeding `BURST` threshold yields HTTP 429 Too Many Requests with an integer `Retry-After` header. |
+| 11 | Upstream credential isolation | Cross-credential presentations (PVMBG Bearer to BMKG, BMKG key to PVMBG) are both rejected with HTTP 403 Forbidden. |
+| 12 | Correlation ID propagation | `X-Correlation-ID` sent by the client is forwarded to Aggregator and logged by both `client-api` and `aggregator`. |
+
+Run the P3 demo:
+```bash
+bash scripts/demo/p3.sh
+```
 
 ---
 
