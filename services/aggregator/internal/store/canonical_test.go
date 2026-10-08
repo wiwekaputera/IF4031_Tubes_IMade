@@ -291,3 +291,54 @@ func TestOutboxPendingRowsAreOnlyClearedAfterMarkPublished(t *testing.T) {
 		t.Fatalf("pending rows after marking = %d, want 0", len(rows))
 	}
 }
+
+func TestGetLatestEventTime(t *testing.T) {
+	truncateTables(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. When empty, should return zero time and no error
+	latest, err := testRepo.GetLatestEventTime(ctx, "PVMBG")
+	if err != nil {
+		t.Fatalf("expected no error for empty table, got %v", err)
+	}
+	if !latest.IsZero() {
+		t.Fatalf("expected zero time for empty table, got %v", latest)
+	}
+
+	// 2. Insert records with different occurred_at timestamps
+	t1 := time.Date(2026, 10, 8, 2, 10, 0, 0, time.UTC)
+	t2 := time.Date(2026, 10, 8, 2, 20, 0, 0, time.UTC)
+	t3 := time.Date(2026, 10, 8, 2, 15, 0, 0, time.UTC)
+
+	events := []UpsertRequest{
+		{HazardID: uuid.NewString(), Source: "PVMBG", SourceRefID: "pvmbg-1", HazardType: hazard.HazardTypeVolcanic, Severity: hazard.SeverityNormal, AreaName: "Area1", OccurredAt: t1},
+		{HazardID: uuid.NewString(), Source: "PVMBG", SourceRefID: "pvmbg-2", HazardType: hazard.HazardTypeVolcanic, Severity: hazard.SeveritySiaga, AreaName: "Area2", OccurredAt: t2},
+		{HazardID: uuid.NewString(), Source: "PVMBG", SourceRefID: "pvmbg-3", HazardType: hazard.HazardTypeVolcanic, Severity: hazard.SeverityWaspada, AreaName: "Area3", OccurredAt: t3},
+		{HazardID: uuid.NewString(), Source: "BMKG", SourceRefID: "bmkg-1", HazardType: hazard.HazardTypeSeismic, Severity: hazard.SeverityNormal, AreaName: "Area4", OccurredAt: t1},
+	}
+	for _, e := range events {
+		if _, err := testRepo.UpsertEvent(ctx, e); err != nil {
+			t.Fatalf("failed to insert event: %v", err)
+		}
+	}
+
+	// 3. Query PVMBG max time
+	latestPVMBG, err := testRepo.GetLatestEventTime(ctx, "PVMBG")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !latestPVMBG.Equal(t2) {
+		t.Errorf("expected latest PVMBG time %v, got %v", t2, latestPVMBG)
+	}
+
+	// 4. Query BMKG max time
+	latestBMKG, err := testRepo.GetLatestEventTime(ctx, "BMKG")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !latestBMKG.Equal(t1) {
+		t.Errorf("expected latest BMKG time %v, got %v", t1, latestBMKG)
+	}
+}
+

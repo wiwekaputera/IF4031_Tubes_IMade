@@ -19,8 +19,9 @@ import (
 )
 
 type fakeRepo struct {
-	mu      sync.Mutex
-	upserts int
+	mu          sync.Mutex
+	upserts     int
+	latestTimes map[string]time.Time
 }
 
 func (f *fakeRepo) HealthCheck(context.Context) error { return nil }
@@ -35,6 +36,14 @@ func (f *fakeRepo) GetEvents(context.Context, store.EventFilter) ([]hazard.Hazar
 }
 func (f *fakeRepo) GetVolcanoReferences(context.Context) (map[string]store.VolcanoReference, error) {
 	return nil, nil
+}
+func (f *fakeRepo) GetLatestEventTime(_ context.Context, source string) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.latestTimes != nil {
+		return f.latestTimes[source], nil
+	}
+	return time.Time{}, nil
 }
 
 func fastBMKGServer(t *testing.T, called *atomic.Int32) *httptest.Server {
