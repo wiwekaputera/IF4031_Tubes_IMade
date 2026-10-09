@@ -1,114 +1,137 @@
 // k6 load test script — Problem 2 (Concurrency & Graceful Degradation)
-// Run with:
-//   k6 run tests/load/k6_p2.js
 //
-// Prerequisites:
-//   1. Stack running (bash scripts/demo/up.sh)
-//   2. client-api reachable at BASE_URL (default: http://localhost:8080)
-//   3. token-service reachable at TOKEN_URL (default: http://localhost:8083/oauth/token)
+// Recommended: bash scripts/demo/p2-load.sh
+//   (sets PVMBG delay to 3 s, runs this script, restores the delay)
 //
-// Tips for high concurrency / sustained load testing:
-//   - If running sustained test >60s, run with ACCESS_TOKEN_TTL=300 on token-service
-//     to prevent token expiration midway.
-//   - To test full 500 RPS without rate-limit throttling, set CLIENT_API_RPS_LIMIT=1000
-//     and CLIENT_API_BURST=100 on client-api.
+// Manual run:
+//   set -a; source .env; set +a
+//   k6 run -e CLIENT_ID=$CLIENT_FIELD_TEAM_ID -e CLIENT_SECRET=$CLIENT_FIELD_TEAM_SECRET tests/load/k6_p2.js
+//
+// What it does (P2 criteria #1 and #2):
+//   - Two scenarios run AT THE SAME TIME against client-api (:8080):
+//       seismic_only : GET /v1/events?type=SEISMIC  (needs BMKG data only)
+//       volcanic     : GET /v1/events?type=VOLCANIC (needs PVMBG data)
+//     Default 25 + 25 = 50 parallel VUs, sustained for 60 s.
+//   - bmkg_only_latency (SEISMIC, HTTP 200 only) must have p95 < 300 ms even
+//     while PVMBG is configured with a 3 s delay.
+//   - HTTP 429 is a controlled rejection: it is NOT counted as a failure, but
+//     its total is reported (rate_limited_total).
+//   - Each VU fetches its own access token and refreshes it before expiry, so
+//     the default 60 s ACCESS_TOKEN_TTL never produces 401s mid-test.
+//   - Summary prints p50/p95/p99 for every trend.
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { Trend, Rate } from 'k6/metrics';
+import { Trend, Rate, Counter } from 'k6/metrics';
 
 // ─────────────────────────────────────────────────────────────
 // Custom metrics
 // ─────────────────────────────────────────────────────────────
-const bmkgLatency   = new Trend('bmkg_only_latency', true);
-const errorRate     = new Rate('error_rate');
-const rateLimitRate = new Rate('rate_limit_rate');
+const bmkgLatency    = new Trend('bmkg_only_latency', true);   // SEISMIC, 200 only
+const volcanicLatency = new Trend('volcanic_latency', true);    // VOLCANIC, 200 only
+const errorRate      = new Rate('error_rate');                 // non-200/429 responses
+const rateLimited    = new Counter('rate_limited_total');      // number of 429s
+const tokenFetches   = new Counter('token_fetches_total');
 
 http.setResponseCallback(http.expectedStatuses(200, 429));
 
 // ─────────────────────────────────────────────────────────────
 // Test configuration
 // ─────────────────────────────────────────────────────────────
+const TOTAL_VUS = parseInt(__ENV.VUS || '50', 10);
+const DURATION  = __ENV.DURATION || '60s';
+const SEISMIC_VUS = Math.ceil(TOTAL_VUS / 2);
+const VOLCANIC_VUS = Math.max(TOTAL_VUS - SEISMIC_VUS, 1);
+
 export const options = {
   scenarios: {
-    // Scenario 1: 50 VUs sustained for 60s (mixed BMKG + PVMBG)
-    sustained_load: {
+    seismic_only: {
       executor: 'constant-vus',
-      vus: 50,
-      duration: '60s',
-      tags: { scenario: 'mixed' },
+      vus: SEISMIC_VUS,
+      duration: DURATION,
+      exec: 'seismicOnly',
+      tags: { scenario: 'seismic_only' },
+    },
+    volcanic: {
+      executor: 'constant-vus',
+      vus: VOLCANIC_VUS,
+      duration: DURATION,
+      exec: 'volcanic',
+      tags: { scenario: 'volcanic' },
     },
   },
+  summaryTrendStats: ['avg', 'min', 'med', 'p(95)', 'p(99)', 'max'],
   thresholds: {
-    // P2 success criteria
-    bmkg_only_latency: ['p(95)<300'],    // BMKG-only p95 < 300ms (only successful 200 responses)
-    error_rate:        ['rate<0.01'],    // error rate < 1% (excl. 429)
-    http_req_failed:   ['rate<0.01'],    // 429 is treated as expected, not failure
+    bmkg_only_latency: ['p(95)<300'],   // P2 #1: BMKG-only p95 < 300 ms
+    error_rate:        ['rate<0.01'],   // P2 #2: errors (excluding 429) < 1%
+    http_req_failed:   ['rate<0.01'],   // 429 is an expected status, not a failure
   },
 };
 
-const BASE_URL     = __ENV.BASE_URL     || 'http://localhost:8080';
-const TOKEN_URL    = __ENV.TOKEN_URL    || 'http://localhost:8083/oauth/token';
-const CLIENT_ID    = __ENV.CLIENT_ID    || 'client-field-team';
+const BASE_URL      = __ENV.BASE_URL      || 'http://localhost:8080';
+const TOKEN_URL     = __ENV.TOKEN_URL     || 'http://localhost:8083/oauth/token';
+const CLIENT_ID     = __ENV.CLIENT_ID     || 'client-field-team';
 const CLIENT_SECRET = __ENV.CLIENT_SECRET || 'change-me-field-team-secret';
+const SLEEP_S       = parseFloat(__ENV.SLEEP_S || '0.1');
 
 // ─────────────────────────────────────────────────────────────
-// Setup: Fetch fresh access token before VU execution
+// Per-VU token cache (refreshed 10 s before expiry)
 // ─────────────────────────────────────────────────────────────
-export function setup() {
-  if (__ENV.TOKEN) {
-    return { token: __ENV.TOKEN };
+let token = __ENV.TOKEN || '';
+let tokenExpiresAt = __ENV.TOKEN ? Number.MAX_SAFE_INTEGER : 0;
+
+function getToken() {
+  if (token && Date.now() < tokenExpiresAt - 10000) {
+    return token;
   }
+  const res = http.post(
+    TOKEN_URL,
+    { grant_type: 'client_credentials', client_id: CLIENT_ID, client_secret: CLIENT_SECRET },
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, tags: { name: 'token' } },
+  );
+  tokenFetches.add(1);
+  if (res.status !== 200) {
+    console.warn(`[k6] token request failed: HTTP ${res.status}`);
+    return token;
+  }
+  const body = res.json();
+  token = body.access_token;
+  tokenExpiresAt = Date.now() + (body.expires_in || 60) * 1000;
+  return token;
+}
 
-  const payload = {
-    grant_type: 'client_credentials',
-    client_id: CLIENT_ID,
-    client_secret: CLIENT_SECRET,
+function queryEvents(type, latencyTrend) {
+  const headers = {
+    Authorization: `Bearer ${getToken()}`,
+    'X-Correlation-ID': `k6-${type.toLowerCase()}-vu${__VU}-iter${__ITER}`,
   };
-
-  const res = http.post(TOKEN_URL, payload, {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  const res = http.get(`${BASE_URL}/v1/events?type=${type}&limit=20`, {
+    headers,
+    tags: { name: `events_${type}` },
   });
 
   if (res.status === 200) {
-    const body = res.json();
-    return { token: body.access_token };
-  }
-
-  console.warn(`[k6 setup] Failed to fetch token from ${TOKEN_URL} (status ${res.status}). Using fallback env.`);
-  return { token: __ENV.TOKEN || 'placeholder-token' };
-}
-
-// ─────────────────────────────────────────────────────────────
-// Main test function
-// ─────────────────────────────────────────────────────────────
-export default function (data) {
-  const token = (data && data.token) || __ENV.TOKEN;
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'X-Correlation-ID': `k6-vu${__VU}-iter${__ITER}`,
-  };
-
-  const start = Date.now();
-  const res = http.get(`${BASE_URL}/v1/events?type=SEISMIC&limit=20`, { headers });
-  const latency = Date.now() - start;
-
-  if (res.status === 200) {
-    bmkgLatency.add(latency);
-    rateLimitRate.add(0);
+    latencyTrend.add(res.timings.duration);
     errorRate.add(0);
   } else if (res.status === 429) {
-    rateLimitRate.add(1);
+    rateLimited.add(1);
     errorRate.add(0);
   } else {
-    rateLimitRate.add(0);
     errorRate.add(1);
   }
 
   check(res, {
     'status is 200 or 429': (r) => r.status === 200 || r.status === 429,
-    'not 500':              (r) => r.status !== 500,
+    'not 5xx':              (r) => r.status < 500,
   });
 
-  sleep(0.1);
+  sleep(SLEEP_S);
+}
+
+export function seismicOnly() {
+  queryEvents('SEISMIC', bmkgLatency);
+}
+
+export function volcanic() {
+  queryEvents('VOLCANIC', volcanicLatency);
 }
