@@ -184,6 +184,8 @@ services:
     environment:
       TOKEN_DB_DSN: ${TOKEN_DB_DSN}
       ES256_PRIVATE_KEY_B64: ${ES256_PRIVATE_KEY_B64}
+      TOKEN_ISSUER: ${TOKEN_ISSUER:-bnpb-token-service}
+      TOKEN_AUDIENCE: ${TOKEN_AUDIENCE:-bnpb-client-api}
       ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-60}
       REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-7}
       CLIENT_MEDIA_ID: ${CLIENT_MEDIA_ID}
@@ -218,6 +220,8 @@ services:
     environment:
       AGGREGATOR_BASE_URL: ${CLIENT_API_AGGREGATOR_BASE_URL:-http://aggregator:8090}
       JWKS_URL: ${CLIENT_API_JWKS_URL:-http://token-service:8083/.well-known/jwks.json}
+      TOKEN_ISSUER: ${TOKEN_ISSUER:-bnpb-token-service}
+      TOKEN_AUDIENCE: ${TOKEN_AUDIENCE:-bnpb-client-api}
       RPS_LIMIT: ${CLIENT_API_RPS_LIMIT:-100}
       BURST: ${CLIENT_API_BURST:-20}
       PORT: ${CLIENT_API_PORT:-8080}

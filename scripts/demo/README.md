@@ -7,13 +7,20 @@ compose project defined in `docker-compose.yml` (`name: if4031-tubes-imade`).
 ## Prerequisites
 
 1. **Docker + Docker Compose** (Compose v2).
-2. **`.env` file** at the repo root. Copy from `.env.example`:
+2. **`.env` file** at the repo root. `up.sh` creates it from `.env.example` on
+   the first run and generates the ES256 signing key. Manually:
    ```bash
    cp .env.example .env
+   bash scripts/keys/gen-es256.sh   # paste the ES256_PRIVATE_KEY_B64=... line into .env
    ```
-   The demo reads `BMKG_API_KEY`, `PVMBG_BEARER_TOKEN`, and `AGGREGATOR_DB_DSN` from it.
-3. **`python3`** on the host — used by `smoke.sh` as a built-in JSON parser for
-   response assertions (avoids requiring external tools like `jq`).
+   The scripts source `.env` themselves. For the manual `curl` commands below,
+   load it into your shell first:
+   ```bash
+   set -a; source .env; set +a
+   ```
+3. **Python 3** on the host (`python3`, or `python` on Windows Git Bash; both
+   are detected) — used by the scripts as a built-in JSON parser for response
+   assertions (avoids requiring external tools like `jq`).
 4. **Network access** on first run so Docker can pull `postgres:16-alpine`,
    `nats:2.10-alpine`, and `curlimages/curl:8.11.0` (cached after first use).
 5. No host port is published for the **aggregator** (it is on
@@ -25,9 +32,11 @@ compose project defined in `docker-compose.yml` (`name: if4031-tubes-imade`).
 
 | Script      | What it does                                                                 |
 |-------------|------------------------------------------------------------------------------|
-| `up.sh`     | `docker compose up -d --build` for the pipeline and auth gateway services (`bmkg-mock`, `pvmbg-mock`, `canonical-store`, `aggregator`, `token-db`, `token-service`, `client-api`). Polls Docker health status until all are `healthy`. |
+| `up.sh`     | Prepares `.env` on first run (copy from `.env.example`, generate ES256 key), then `docker compose up -d --build` for **all 11 services** and polls Docker health status until all are `healthy`. |
 | `smoke.sh`  | Hits every health endpoint and key data endpoint for Milestone 1 (P1/P2 ingestion pipeline), asserts status + body, and prints PASS/FAIL summary. |
 | `p3.sh`     | End-to-end integration demo for Problem 3 (P3): exercises OAuth 2.0 token issuance (`client_credentials` & `refresh_token`), JWT ES256 validation, per-client rate limiting, scope-based field projection, upstream credential isolation, and correlation ID propagation. |
+| `p2-load.sh`| Problem 2 criteria #1–#2: recreates only `pvmbg-mock` with a 3 s delay, runs `tests/load/k6_p2.js` (SEISMIC-only + VOLCANIC in parallel, 50 VUs × 60 s) against `client-api`, then restores the delay. |
+| `p5.sh`     | Problem 5: verifies the two durable consumers, stops/restarts `notification-consumer` and checks catch-up, then adds a **new** consumer on the existing stream with nats-box (no producer change). |
 | `down.sh`   | `docker compose down -v --rmi local` — stops everything, removes named/anonymous volumes and locally-built images so the next `up.sh` starts from a clean state. |
 
 ## Aggregator access (no host port, distroless image)
@@ -128,7 +137,7 @@ This section provides exact, copy-paste runnable commands to demonstrate complia
 #### 1. Baseline: Initial Schema Mapping (Both Sources)
 Ensure the stack is running via `bash scripts/demo/up.sh`. Query the initial schema on PVMBG:
 ```bash
-curl -s -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/volcanic-reports?limit=1"
+curl -s -H "Authorization: Bearer $PVMBG_BEARER_TOKEN" "http://localhost:8082/volcanic-reports?limit=1"
 ```
 **Expected Output:** Reports contain standard fields without `confidence_level`:
 ```json
@@ -149,7 +158,7 @@ docker compose exec -T canonical-store psql -U aggregator -d canonical \
 #### 2. Trigger Schema Evolution at Runtime (No Restart / No Redeploy)
 Trigger the schema change on the live PVMBG mock container:
 ```bash
-curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/admin/schema-version"
+curl -s -X POST -H "Authorization: Bearer $PVMBG_BEARER_TOKEN" "http://localhost:8082/admin/schema-version"
 ```
 **Expected Output:**
 ```json
@@ -158,7 +167,7 @@ curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:80
 
 Confirm PVMBG now emits `confidence_level`:
 ```bash
-curl -s -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/volcanic-reports?limit=1"
+curl -s -H "Authorization: Bearer $PVMBG_BEARER_TOKEN" "http://localhost:8082/volcanic-reports?limit=1"
 ```
 
 #### 3. Verify Aggregator Adapts Dynamically (No Crash, No Manual Intervention)
@@ -193,35 +202,35 @@ Verify via the dedicated concurrent poller unit test:
 ```bash
 (cd services/aggregator && go test -v -run TestPollConcurrent_BMKGNotBlockedBySlowPVMBG ./internal/poller)
 ```
-**Live Demonstration with 3-second PVMBG Delay:**
-1. Configure delay in `.env` or set `PVMBG_DELAY_MIN_MS=3000` and `PVMBG_DELAY_MAX_MS=3000`.
-2. Reload PVMBG mock: `docker compose up -d pvmbg-mock`.
-3. Query BMKG while PVMBG is responding slowly:
-   ```bash
-   curl -o /dev/null -s -w 'BMKG latency: %{time_total}s\n' -H "X-BMKG-Key: test-bmkg-key" "http://localhost:8081/seismic-events?limit=5"
-   ```
-   **Expected Result**: BMKG request finishes in < 150 ms (well below 300 ms p95 requirement) completely unaffected by PVMBG's 3-second delay.
+**Live Demonstration with 3-second PVMBG Delay (through the gateway):**
+```bash
+bash scripts/demo/p2-load.sh
+```
+The script recreates only `pvmbg-mock` with `PVMBG_DELAY_MIN_MS=PVMBG_DELAY_MAX_MS=3000`,
+then sends `GET /v1/events?type=SEISMIC` (BMKG-only) **and** `GET /v1/events?type=VOLCANIC`
+to `client-api` at the same time, and restores the delay afterwards.
+**Expected Result**: `bmkg_only_latency` p(95) < 300 ms. Reads are served from the
+Canonical Store, so PVMBG's 3-second delay only affects ingestion, never the read path.
 
 #### 2. Sustained Load Testing (≥50 VUs for ≥60s)
-Execute the sustained load test scenario using k6:
-```bash
-# Requires k6 installed on host or run via docker
-k6 run tests/load/k6_p2.js
-```
-The test applies 50 concurrent virtual users for 60 seconds sustained load. It asserts:
-- `bmkg_only_latency`: p(95) < 300 ms
-- `error_rate`: < 1% (excluding deliberate HTTP 429 rate limiting)
-- System stability with zero unhandled crashes.
+The same `p2-load.sh` run is the sustained test: 50 concurrent VUs (25 SEISMIC + 25
+VOLCANIC) for 60 s. By default k6 runs from the `grafana/k6` image on `edge_net`
+(`K6_MODE=local` uses a host k6 against `localhost:8080`). It reports and asserts:
+- throughput (`http_reqs`), p50 (`med`) / p95 / p99 for every trend;
+- `bmkg_only_latency`: p(95) < 300 ms;
+- `error_rate`: < 1% (excluding deliberate HTTP 429 rate limiting);
+- `rate_limited_total`: number of controlled 429 rejections;
+- system stability with zero 5xx.
 
 #### 3. Outage Simulation & Graceful Degradation
 Simulate a full PVMBG outage at runtime:
 ```bash
-curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/admin/outage"
+curl -s -X POST -H "Authorization: Bearer $PVMBG_BEARER_TOKEN" "http://localhost:8082/admin/outage"
 ```
 **Verify Behavior During Outage:**
 1. BMKG seismic events continue to ingest and serve without interruption.
 2. PVMBG endpoint returns HTTP 503, tripping Aggregator's circuit breaker (`services/aggregator/internal/circuitbreaker/breaker.go`).
-3. Aggregator Query API (`/internal/events`) continues to return HTTP 200, serving cached historical data from Canonical Store alongside explicit freshness indicators (`stale_since` and `status: "DOWN"` or `"DEGRADED"`), rather than HTTP 500 or client connection timeouts:
+3. Aggregator Query API (`/internal/events`) continues to return HTTP 200, serving cached historical data from Canonical Store alongside explicit freshness indicators (`stale_since` and `status: "OUTAGE"`), rather than HTTP 500 or client connection timeouts:
    ```bash
    docker run --rm --net if4031-tubes-imade_internal_api_net curlimages/curl:8.11.0 -s "http://aggregator:8090/internal/events?limit=1" | python3 -m json.tool
    ```
@@ -229,7 +238,7 @@ curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:80
 **Outage Recovery:**
 Restore PVMBG to operational status:
 ```bash
-curl -s -X POST -H "Authorization: Bearer test-pvmbg-token" "http://localhost:8082/admin/outage"
+curl -s -X POST -H "Authorization: Bearer $PVMBG_BEARER_TOKEN" "http://localhost:8082/admin/outage"
 ```
 Aggregator probes upstream, automatically resets the circuit breaker to closed state, and resumes live updates with `status: "UP"` without any service restart.
 
@@ -252,7 +261,7 @@ docker compose up -d --no-deps --build aggregator
 ```
 Verify other services (`bmkg-mock`, `canonical-store`) remain healthy and continue serving requests uninterrupted throughout the restart:
 ```bash
-curl -s -o /dev/null -w 'BMKG HTTP: %{http_code}\n' -H "X-BMKG-Key: test-bmkg-key" "http://localhost:8081/health"
+curl -s -o /dev/null -w 'BMKG HTTP: %{http_code}\n' -H "X-BMKG-Key: $BMKG_API_KEY" "http://localhost:8081/health"
 ```
 
 #### 2. Flexible Storage without Schema Migration
@@ -292,9 +301,9 @@ docker inspect $(docker compose ps -q canonical-store) --format '{{json .Network
 | 5 | Media requesting full projection (`GET /v1/events?view=full`) | HTTP 403 Forbidden with `{"error": "insufficient_scope"}`. |
 | 6 | Field team requesting full projection (`GET /v1/events?view=full`) | HTTP 200 OK with full fields included. |
 | 7 | Expired access token | HTTP 401 Unauthorized after token TTL expires. |
-| 8 | Token refresh (`grant_type=refresh_token`) | HTTP 200 OK; issues a new access token and a **rotated** refresh token. |
+| 8 | Token refresh (`grant_type=refresh_token`) | HTTP 200 OK; issues a new access token and a **rotated** refresh token. The new access token works immediately (no manual re-login). |
 | 9 | Refresh token reuse detection | HTTP 400 Bad Request with `{"error": "invalid_grant"}` when attempting to reuse the previous refresh token. |
-| 10 | Burst rate limiting | Exceeding `BURST` threshold yields HTTP 429 Too Many Requests with an integer `Retry-After` header. |
+| 10 | Burst rate limiting | A parallel burst (5 × `BURST` requests, sent from a curl container on `edge_net`) yields HTTP 429 Too Many Requests with an integer `Retry-After` header. |
 | 11 | Upstream credential isolation | Cross-credential presentations (PVMBG Bearer to BMKG, BMKG key to PVMBG) are both rejected with HTTP 403 Forbidden. |
 | 12 | Correlation ID propagation | `X-Correlation-ID` sent by the client is forwarded to Aggregator and logged by both `client-api` and `aggregator`. |
 
@@ -305,13 +314,34 @@ bash scripts/demo/p3.sh
 
 ---
 
+## Problem 5 Demo (`p5.sh`)
+
+`scripts/demo/p5.sh` uses a `natsio/nats-box` helper container on `bus_net` (the broker publishes no host port):
+
+| # | Scenario | Expected Behavior |
+|---|----------|-------------------|
+| 1 | Stream & consumers | `BNPB_EVENTS` has the durable consumers `notification-consumer` and `audit-consumer`; the stream's `last_seq` grows as the aggregator publishes. |
+| 2 | Stop `notification-consumer` (`P5_STOP_SECONDS`, default 25 s) | Producer keeps publishing, `audit-consumer` keeps receiving, and messages for the stopped consumer wait in JetStream (`num_pending > 0`). |
+| 3 | Start it again | `num_pending` drops back to 0: every missed event is caught up (durable consumer, 24 h retention). |
+| 4 | New consumer without producer changes | `nats consumer add BNPB_EVENTS p5-demo-dashboard --filter 'bnpb.events.>'` creates a third consumer that immediately receives HazardEvents. It is removed afterwards unless `P5_KEEP_CONSUMER=1`. |
+
+Run the P5 demo:
+```bash
+bash scripts/demo/p5.sh
+```
+
+---
+
 ## Re-run
 
 ```bash
 cd /path/to/IF4031_Tubes_IMade
-bash scripts/demo/up.sh     # build + start + wait for healthy
-bash scripts/demo/smoke.sh  # exercise endpoints, assert, summarize
-bash scripts/demo/down.sh   # tear down + remove volumes (clean slate)
+bash scripts/demo/up.sh       # prepare .env, build + start all services, wait for healthy
+bash scripts/demo/smoke.sh    # P1/P2 ingest pipeline
+bash scripts/demo/p3.sh       # P3 auth & projection
+bash scripts/demo/p2-load.sh  # P2 load test (3 s PVMBG delay, 50 VUs x 60 s)
+bash scripts/demo/p5.sh       # P5 fan-out + new consumer
+bash scripts/demo/down.sh     # tear down + remove volumes (clean slate)
 ```
 
 Re-run `up.sh` after `down.sh` to verify a fresh DB comes back to ≥22 events.

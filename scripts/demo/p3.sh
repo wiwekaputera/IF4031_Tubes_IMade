@@ -9,9 +9,10 @@
 #   5. Media GET /v1/events?view=full -> 403 Forbidden (insufficient_scope)
 #   6. Field team GET /v1/events?view=full -> 200 OK, full fields
 #   7. Wait for access token expiry -> 401 Unauthorized
-#   8. Refresh token for field team -> 200 OK, new access & rotated refresh token
+#   8. Refresh token for field team -> 200 OK, new access & rotated refresh token;
+#      the new access token works immediately (no manual re-login)
 #   9. Reuse detection: presenting OLD refresh token -> 400 invalid_grant
-#  10. Burst request > BURST -> 429 Too Many Requests + Retry-After header
+#  10. Parallel burst > BURST -> 429 Too Many Requests + Retry-After header
 #  11. Upstream credential isolation (cross-credentials) -> 403 on both BMKG & PVMBG
 #  12. Correlation ID propagation: X-Correlation-ID matches in client-api & aggregator logs
 set -euo pipefail
@@ -49,6 +50,25 @@ CLIENT_API_BURST="${CLIENT_API_BURST:-20}"
 
 TOKEN_URL="http://localhost:${TOKEN_SERVICE_PORT}/oauth/token"
 CLIENT_API_URL="http://localhost:${CLIENT_API_PORT}"
+
+# ---- python interpreter (python3 on Linux/macOS, python on Windows Git Bash)
+PY=""
+for cand in python3 python; do
+  if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import json' >/dev/null 2>&1; then
+    PY="$cand"
+    break
+  fi
+done
+if [[ -z "$PY" ]]; then
+  echo "ERROR: Python 3 is required (python3 or python not found on PATH)." >&2
+  exit 1
+fi
+
+# Compose project name -> docker network names (used by the burst test)
+COMPOSE_NAME="$(docker compose config --format json 2>/dev/null \
+  | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("name",""))' 2>/dev/null || true)"
+COMPOSE_NAME="${COMPOSE_NAME:-if4031-tubes-imade}"
+CURL_IMG="${CURL_IMG:-curlimages/curl:8.11.0}"
 
 # ---- counters / output helpers -------------------------------------------
 PASS=0
@@ -108,7 +128,7 @@ hdr_get(){
 
 # py_check 'assertions using d=json.load(open(sys.argv[1]))' -> exit 0/1
 py_check(){
-  python3 - "$RESP_FILE" <<PYEOF
+  "$PY" - "$RESP_FILE" <<PYEOF
 import sys, json
 try:
     with open(sys.argv[1]) as f:
@@ -121,7 +141,7 @@ PYEOF
 
 # py_val key -> prints value or empty string
 py_val(){
-  python3 - "$RESP_FILE" "$1" <<'PYEOF'
+  "$PY" - "$RESP_FILE" "$1" <<'PYEOF'
 import sys, json
 try:
     with open(sys.argv[1]) as f:
@@ -131,6 +151,19 @@ try:
 except Exception:
     print("")
 PYEOF
+}
+
+# fresh_token CLIENT_ID CLIENT_SECRET -> prints a NEW access token (or empty)
+# Used by scenarios that run after the 60s expiry wait in scenario 7, where
+# the tokens issued in scenario 1 are already expired.
+fresh_token(){
+  host_post_form "$TOKEN_URL" \
+    -d "grant_type=client_credentials" \
+    -d "client_id=$1" \
+    -d "client_secret=$2"
+  if [[ "$HTTP_CODE" == "200" ]]; then
+    py_val access_token
+  fi
 }
 
 # =========================================================================
@@ -221,7 +254,7 @@ echo
 echo "=== Skenario 3: Token dengan signature diubah ==="
 ACTIVE_TOKEN="${MEDIA_TOKEN:-${FIELD_TOKEN}}"
 if [[ -n "$ACTIVE_TOKEN" ]]; then
-  TAMPERED_TOKEN="$(python3 -c "
+  TAMPERED_TOKEN="$("$PY" -c "
 import sys
 parts = sys.argv[1].split('.')
 if len(parts) == 3:
@@ -363,6 +396,14 @@ assert new_ref != old_ref, 'refresh_token was not rotated'
     NEW_FIELD_TOKEN="$(py_val access_token)"
     NEW_FIELD_REFRESH_TOKEN="$(py_val refresh_token)"
     ok "Refresh token field team -> 200, access token & refresh token baru (rotasi single-use)"
+
+    # Token baru hasil refresh langsung bisa dipakai, tanpa login ulang
+    host_get "${CLIENT_API_URL}/v1/events?view=full" -H "Authorization: Bearer ${NEW_FIELD_TOKEN}"
+    if [[ "$HTTP_CODE" == "200" ]]; then
+      ok "Access token hasil refresh -> GET /v1/events?view=full 200 (tanpa login ulang)"
+    else
+      bad "Access token hasil refresh -> HTTP ${HTTP_CODE:-000} (expected 200)"
+    fi
   else
     bad "Refresh token field team -> HTTP ${HTTP_CODE:-000} (expected 200 with rotated tokens)"
   fi
@@ -398,34 +439,46 @@ fi
 # =========================================================================
 echo
 echo "=== Skenario 10: Burst request > BURST ==="
-BURST_TOKEN="${OPS_TOKEN:-${NEW_FIELD_TOKEN}}"
-if [[ -z "$BURST_TOKEN" ]]; then
-  # Fallback ambil token baru jika sebelumnya kosong
-  host_post_form "$TOKEN_URL" \
-    -d "grant_type=client_credentials" \
-    -d "client_id=${CLIENT_INTERNAL_OPS_ID}" \
-    -d "client_secret=${CLIENT_INTERNAL_OPS_SECRET}"
-  BURST_TOKEN="$(py_val access_token)"
-fi
+# Token dari skenario 1 sudah kedaluwarsa (skenario 7 menunggu > TTL),
+# jadi ambil token internal_ops yang baru.
+BURST_TOKEN="$(fresh_token "$CLIENT_INTERNAL_OPS_ID" "$CLIENT_INTERNAL_OPS_SECRET")"
 
-BURST_NUM=$((CLIENT_API_BURST + 15))
-GOT_429=0
+# Request dikirim PARALEL dari dalam jaringan Docker (edge_net) memakai satu
+# proses curl --parallel. Dari host, request berurutan (atau lewat port
+# forwarding Docker Desktop di Windows/macOS) tiba lebih lambat dari laju isi
+# ulang bucket (RPS_LIMIT=100/s), sehingga 429 tidak pernah muncul.
+BURST_NUM="${P3_BURST_REQUESTS:-$((CLIENT_API_BURST * 5))}"
+if [[ "$BURST_NUM" -gt 300 ]]; then BURST_NUM=300; fi
+EDGE_NET="${COMPOSE_NAME}_edge_net"
+N429=0
+N200=0
 RETRY_AFTER_VAL=""
 
-log "Mengirim $BURST_NUM request berturut-turut untuk menguji burst rate limiter..."
-for _ in $(seq 1 "$BURST_NUM"); do
-  host_get "${CLIENT_API_URL}/v1/events" -H "Authorization: Bearer ${BURST_TOKEN}"
-  if [[ "$HTTP_CODE" == "429" ]]; then
-    GOT_429=1
-    RETRY_AFTER_VAL="$(hdr_get "Retry-After")"
-    break
-  fi
-done
-
-if [[ "$GOT_429" -eq 1 && -n "$RETRY_AFTER_VAL" ]]; then
-  ok "Burst request terlampaui -> 429 Too Many Requests + Retry-After: ${RETRY_AFTER_VAL}s"
+if [[ -z "$BURST_TOKEN" ]]; then
+  bad "Lewati skenario 10: gagal mengambil token internal_ops baru"
 else
-  bad "Burst request -> expected 429 with Retry-After (got 429=$GOT_429, Retry-After=\"$RETRY_AFTER_VAL\")"
+  log "Mengirim $BURST_NUM request paralel dari ${EDGE_NET} untuk menguji burst rate limiter (BURST=${CLIENT_API_BURST})..."
+  # Output per request: "<status> <Retry-After>"
+  BURST_OUT="$(MSYS_NO_PATHCONV=1 docker run --rm --network "$EDGE_NET" \
+    -e TOKEN="$BURST_TOKEN" -e N="$BURST_NUM" "$CURL_IMG" sh -c '
+      set --; i=0
+      while [ "$i" -lt "$N" ]; do
+        i=$((i+1))
+        [ "$i" -gt 1 ] && set -- "$@" --next
+        set -- "$@" -s -m 30 -o /dev/null -w "%{http_code} %header{retry-after}\n" \
+          -H "Authorization: Bearer $TOKEN" "http://client-api:8080/v1/events?limit=1"
+      done
+      curl --parallel --parallel-immediate --parallel-max "$N" "$@"' 2>/dev/null || true)"
+
+  N200="$(printf '%s\n' "$BURST_OUT" | grep -c '^200' || true)"
+  N429="$(printf '%s\n' "$BURST_OUT" | grep -c '^429' || true)"
+  RETRY_AFTER_VAL="$(printf '%s\n' "$BURST_OUT" | grep '^429' | head -n1 | awk '{print $2}' | tr -d '[:space:]' || true)"
+
+  if [[ "$N429" -gt 0 && -n "$RETRY_AFTER_VAL" ]]; then
+    ok "Burst $BURST_NUM request paralel -> ${N200}x 200, ${N429}x 429 Too Many Requests + Retry-After: ${RETRY_AFTER_VAL}s"
+  else
+    bad "Burst $BURST_NUM request paralel -> expected 429 with Retry-After (got 200=$N200, 429=$N429, Retry-After=\"$RETRY_AFTER_VAL\")"
+  fi
 fi
 
 # =========================================================================
@@ -458,10 +511,10 @@ fi
 echo
 echo "=== Skenario 12: Propagasi X-Correlation-ID di log client-api & aggregator ==="
 DEMO_CORR_ID="demo-p3-corr-$(date +%s)-$RANDOM"
-TRACE_TOKEN="${OPS_TOKEN:-${NEW_FIELD_TOKEN}}"
-if [[ -z "$TRACE_TOKEN" ]]; then
-  TRACE_TOKEN="${MEDIA_TOKEN}"
-fi
+# Token baru: token skenario 1 sudah kedaluwarsa, dan bucket internal_ops
+# baru saja dikuras di skenario 10, jadi pakai client media.
+sleep 1
+TRACE_TOKEN="$(fresh_token "$CLIENT_MEDIA_ID" "$CLIENT_MEDIA_SECRET")"
 
 host_get "${CLIENT_API_URL}/v1/events" \
   -H "Authorization: Bearer ${TRACE_TOKEN}" \
