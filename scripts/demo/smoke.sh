@@ -19,8 +19,21 @@ if [[ -f .env ]]; then
   source .env
   set +a
 fi
-BMKG_API_KEY="${BMKG_API_KEY:-test-bmkg-key}"
-PVMBG_BEARER_TOKEN="${PVMBG_BEARER_TOKEN:-test-pvmbg-token}"
+BMKG_API_KEY="${BMKG_API_KEY:-change-me-bmkg-api-key}"
+PVMBG_BEARER_TOKEN="${PVMBG_BEARER_TOKEN:-change-me-pvmbg-bearer-token}"
+
+# ---- python interpreter (python3 on Linux/macOS, python on Windows Git Bash)
+PY=""
+for cand in python3 python; do
+  if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import json' >/dev/null 2>&1; then
+    PY="$cand"
+    break
+  fi
+done
+if [[ -z "$PY" ]]; then
+  echo "ERROR: Python 3 is required (python3 or python not found on PATH)." >&2
+  exit 1
+fi
 
 # ---- counters / output helpers -------------------------------------------
 PASS=0
@@ -39,7 +52,7 @@ fi
 # publishes no host port, so we reach http://aggregator:8090 from a container
 # on the same bridge network (internal_api_net).
 COMPOSE_NAME="$(docker compose config --format json 2>/dev/null \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("name",""))' 2>/dev/null || true)"
+  | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("name",""))' 2>/dev/null || true)"
 COMPOSE_NAME="${COMPOSE_NAME:-if4031-tubes-imade}"
 NET="${COMPOSE_NAME}_internal_api_net"
 
@@ -91,7 +104,7 @@ host_post(){
 
 # py_check 'python using d=json.load(open(sys.argv[1]))'  -> exit 0/1
 py_check(){
-  python3 - "$RESP_FILE" <<PYEOF
+  "$PY" - "$RESP_FILE" <<PYEOF
 import sys,json
 try:
     f=open(sys.argv[1])
@@ -104,7 +117,7 @@ PYEOF
 
 # numeric body count (for arrays) via python
 body_len(){
-  python3 - "$RESP_FILE" <<'PYEOF'
+  "$PY" - "$RESP_FILE" <<'PYEOF'
 import sys,json
 try:
     d=json.load(open(sys.argv[1]))
@@ -229,7 +242,7 @@ EVENT_COUNT=0
 for _ in {1..90}; do
   agg_get "http://aggregator:8090/internal/events?limit=100"
   if [[ "$HTTP_CODE" == "200" ]]; then
-    EVENT_COUNT="$(python3 - "$RESP_FILE" <<'PYEOF'
+    EVENT_COUNT="$("$PY" - "$RESP_FILE" <<'PYEOF'
 import sys,json
 try:
     d=json.load(open(sys.argv[1]))
