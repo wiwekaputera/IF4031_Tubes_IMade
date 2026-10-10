@@ -20,19 +20,22 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
-
 	zerolog.TimeFieldFormat = time.RFC3339Nano
+	logger := zerolog.New(os.Stdout).With().
+		Timestamp().
+		Str("service", "pvmbg-mock").
+		Logger()
+
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("pvmbg-mock: failed to load configuration")
+	}
+
 	logLevel, err := zerolog.ParseLevel(strings.ToLower(cfg.LogLevel))
 	if err != nil {
 		logLevel = zerolog.InfoLevel
 	}
 	zerolog.SetGlobalLevel(logLevel)
-
-	logger := zerolog.New(os.Stdout).With().
-		Timestamp().
-		Str("service", "pvmbg-mock").
-		Logger()
 
 	logger.Info().
 		Str("port", cfg.Port).

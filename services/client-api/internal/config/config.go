@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+
+	contractsauth "github.com/wiwekaputera/if4031-tubes-imade/contracts/auth"
 )
 
 // Config holds all configuration parameters for client-api.
@@ -55,12 +57,12 @@ func Load() (*Config, error) {
 
 	tokenIssuer := os.Getenv("TOKEN_ISSUER")
 	if tokenIssuer == "" {
-		tokenIssuer = "bnpb-token-service"
+		tokenIssuer = contractsauth.DefaultIssuer
 	}
 
 	tokenAudience := os.Getenv("TOKEN_AUDIENCE")
 	if tokenAudience == "" {
-		tokenAudience = "bnpb-client-api"
+		tokenAudience = contractsauth.DefaultAudience
 	}
 
 	logLevel := os.Getenv("LOG_LEVEL")
