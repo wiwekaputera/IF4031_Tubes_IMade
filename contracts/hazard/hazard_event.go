@@ -36,8 +36,8 @@ type HazardEvent struct {
 	HazardType HazardType `json:"hazard_type"`
 	Severity   Severity   `json:"severity"`
 	AreaName   string     `json:"area_name"`
-	OccurredAt string     `json:"occurred_at"` // ISO 8601
-	IngestedAt string     `json:"ingested_at"` // ISO 8601
+	OccurredAt string     `json:"occurred_at"`
+	IngestedAt string     `json:"ingested_at"`
 
 	// Mentah fields (omitted for media scope)
 	SourceRefID string                 `json:"source_ref_id,omitempty"`

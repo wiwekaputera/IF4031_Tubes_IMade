@@ -1,12 +1,11 @@
 package auth
 
+// Scope defines the access scope of a token, which determines the level of access granted to the client.
 type Scope string
 
 const (
 	ScopeMedia Scope = "media"
-
 	ScopeFieldTeam Scope = "field_team"
-
 	ScopeInternalOps Scope = "internal_ops"
 )
 
@@ -21,6 +20,7 @@ const (
 	SigningAlgES256 = "ES256"
 )
 
+// TokenResponse represents the response from the token service when requesting an access token.
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
@@ -29,6 +29,7 @@ type TokenResponse struct {
 	Scope        Scope  `json:"scope"`
 }
 
+// TokenClaims represents the claims contained in a JWT access token.
 type OAuthError struct {
 	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description,omitempty"`

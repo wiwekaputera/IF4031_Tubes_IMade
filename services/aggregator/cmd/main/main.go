@@ -24,21 +24,24 @@ import (
 )
 
 func main() {
-	// 1. Load runtime configuration
-	cfg := config.Load()
-
-	// 2. Initialize structured logging
+	// 1. Initialize structured logging
 	zerolog.TimeFieldFormat = time.RFC3339Nano
+	logger := zerolog.New(os.Stdout).With().
+		Timestamp().
+		Str("service", "aggregator").
+		Logger()
+
+	// 2. Load runtime configuration with fail-fast validation
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("aggregator: failed to load configuration")
+	}
+
 	logLevel, err := zerolog.ParseLevel(strings.ToLower(cfg.LogLevel))
 	if err != nil {
 		logLevel = zerolog.InfoLevel
 	}
 	zerolog.SetGlobalLevel(logLevel)
-
-	logger := zerolog.New(os.Stdout).With().
-		Timestamp().
-		Str("service", "aggregator").
-		Logger()
 
 	logger.Info().
 		Str("port", cfg.Port).

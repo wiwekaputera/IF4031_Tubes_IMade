@@ -2,7 +2,6 @@
 
 > **Course:** IF4031 — Arsitektur Aplikasi Terdistribusi  
 > **Milestone:** 1 — Distributed Systems Foundation  
-> **Architecture & Contracts:** [ARCHITECTURE.md](ARCHITECTURE.md)  
 
 ---
 
@@ -296,6 +295,11 @@ The default Docker mode measures the gateway itself. With `K6_MODE=local` on Win
 ## Configuration Variables
 
 All variables live in [.env.example](.env.example). `docker-compose.yml` maps the prefixed names in `.env` to the short names each service reads (e.g. `CLIENT_API_RPS_LIMIT` → `RPS_LIMIT`).
+
+Every service validates its configuration at startup (fail-fast):
+- **Credentials, signing keys and DSNs have no default and are required.** If one is empty, the service logs `failed to load configuration` and exits. This applies to the mock keys, the aggregator's upstream credentials and `DB_DSN`, `TOKEN_DB_DSN`, `ES256_PRIVATE_KEY_B64`, and the three client secrets.
+- **Numeric values must be valid integers in range** (e.g. intervals, timeouts and limits > 0, delay max ≥ min). An invalid value stops the service instead of being silently replaced.
+- Everything else (ports, URLs, client IDs, issuer/audience, log level) falls back to the default shown below.
 
 | Variable | Default | Service | Description |
 | :--- | :---: | :--- | :--- |

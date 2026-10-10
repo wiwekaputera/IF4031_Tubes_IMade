@@ -2,6 +2,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 )
@@ -33,41 +34,52 @@ type Config struct {
 	LogLevel         string
 }
 
-// Load loads configuration from environment variables with sensible defaults.
-func Load() *Config {
+// Load reads configuration from environment variables with fail-fast
+// validation: the credential is required and numeric settings must be valid
+// integers within range. Everything else has a sensible default.
+func Load() (*Config, error) {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8082"
 	}
 
 	bearerToken := os.Getenv("PVMBG_BEARER_TOKEN")
+	if bearerToken == "" {
+		return nil, fmt.Errorf("PVMBG_BEARER_TOKEN environment variable is required")
+	}
 
-	delayMinMs := getEnvAsInt("PVMBG_DELAY_MIN_MS", 500)
-	delayMaxMs := getEnvAsInt("PVMBG_DELAY_MAX_MS", 3000)
+	delayMinMs, err := intEnv("PVMBG_DELAY_MIN_MS", 500, 0)
+	if err != nil {
+		return nil, err
+	}
+	delayMaxMs, err := intEnv("PVMBG_DELAY_MAX_MS", 3000, 0)
+	if err != nil {
+		return nil, err
+	}
 	if delayMaxMs < delayMinMs {
-		delayMaxMs = delayMinMs
+		return nil, fmt.Errorf("invalid PVMBG_DELAY_MAX_MS %d: must be >= PVMBG_DELAY_MIN_MS %d", delayMaxMs, delayMinMs)
 	}
 
-	eventIntervalS := getEnvAsInt("PVMBG_EVENT_INTERVAL_S", 10)
-	if eventIntervalS <= 0 {
-		eventIntervalS = 10
+	eventIntervalS, err := intEnv("PVMBG_EVENT_INTERVAL_S", 10, 1)
+	if err != nil {
+		return nil, err
 	}
 
-	defaultLimit := getEnvAsInt("PVMBG_DEFAULT_PAGE_LIMIT", DefaultPageLimit)
-	if defaultLimit < 1 {
-		defaultLimit = DefaultPageLimit
+	defaultLimit, err := intEnv("PVMBG_DEFAULT_PAGE_LIMIT", DefaultPageLimit, 1)
+	if err != nil {
+		return nil, err
 	}
-	maxLimit := getEnvAsInt("PVMBG_MAX_PAGE_LIMIT", MaxPageLimit)
-	if maxLimit < 1 {
-		maxLimit = MaxPageLimit
+	maxLimit, err := intEnv("PVMBG_MAX_PAGE_LIMIT", MaxPageLimit, 1)
+	if err != nil {
+		return nil, err
 	}
 	if defaultLimit > maxLimit {
-		defaultLimit = maxLimit
+		return nil, fmt.Errorf("invalid PVMBG_DEFAULT_PAGE_LIMIT %d: must be <= PVMBG_MAX_PAGE_LIMIT %d", defaultLimit, maxLimit)
 	}
 
-	storeMaxCapacity := getEnvAsInt("STORE_MAX_CAPACITY", MaxStoreCapacity)
-	if storeMaxCapacity < MinStoreCapacity {
-		storeMaxCapacity = MaxStoreCapacity
+	storeMaxCapacity, err := intEnv("STORE_MAX_CAPACITY", MaxStoreCapacity, MinStoreCapacity)
+	if err != nil {
+		return nil, err
 	}
 
 	logLevel := os.Getenv("LOG_LEVEL")
@@ -85,17 +97,19 @@ func Load() *Config {
 		DefaultPageLimit: defaultLimit,
 		MaxPageLimit:     maxLimit,
 		LogLevel:         logLevel,
-	}
+	}, nil
 }
 
-func getEnvAsInt(name string, defaultVal int) int {
+// intEnv returns defaultVal when the variable is unset, otherwise the parsed
+// integer, which must be >= minVal.
+func intEnv(name string, defaultVal, minVal int) (int, error) {
 	valStr := os.Getenv(name)
 	if valStr == "" {
-		return defaultVal
+		return defaultVal, nil
 	}
 	val, err := strconv.Atoi(valStr)
-	if err != nil {
-		return defaultVal
+	if err != nil || val < minVal {
+		return 0, fmt.Errorf("invalid %s %q: must be integer >= %d", name, valStr, minVal)
 	}
-	return val
+	return val, nil
 }

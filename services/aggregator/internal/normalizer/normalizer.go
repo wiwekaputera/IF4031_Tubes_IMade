@@ -100,7 +100,6 @@ func (n *Normalizer) NormalizeVolcanic(report agency.VolcanicReport) store.Upser
 		"ash_column_height_m": report.AshColumnHeightM,
 	}
 
-	// Preserve any unrecognized extra fields into attributes.
 	for k, raw := range report.Extra {
 		var v interface{}
 		if err := json.Unmarshal(raw, &v); err == nil {
