@@ -149,3 +149,5 @@ func TestHealthConcurrentSafe(t *testing.T) {
 	stop.Store(true)
 	wg.Wait()
 }
+
+func (f *fakeRepo) InsertDeadLetter(context.Context, store.DeadLetter) error { return nil }
