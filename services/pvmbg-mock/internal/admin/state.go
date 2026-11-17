@@ -31,7 +31,8 @@ func (s *OutageState) IsActive() bool {
 // SchemaVersionState holds the atomic flag controlling whether
 // confidence_level appears in volcanic report responses.
 type SchemaVersionState struct {
-	enabled atomic.Bool
+	enabled      atomic.Bool
+	incompatible atomic.Bool
 }
 
 // NewSchemaVersionState creates a new SchemaVersionState with the toggle OFF.
@@ -52,4 +53,20 @@ func (s *SchemaVersionState) Toggle() bool {
 // IsEnabled returns whether the schema version toggle is currently enabled.
 func (s *SchemaVersionState) IsEnabled() bool {
 	return s.enabled.Load()
+}
+
+// ToggleIncompatible flips the incompatible schema mode (renamed, retyped and
+// missing fields) and returns the new value.
+func (s *SchemaVersionState) ToggleIncompatible() bool {
+	for {
+		cur := s.incompatible.Load()
+		if s.incompatible.CompareAndSwap(cur, !cur) {
+			return !cur
+		}
+	}
+}
+
+// IsIncompatible returns whether the incompatible schema mode is active.
+func (s *SchemaVersionState) IsIncompatible() bool {
+	return s.incompatible.Load()
 }

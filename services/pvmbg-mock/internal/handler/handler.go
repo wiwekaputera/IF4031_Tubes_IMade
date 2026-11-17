@@ -133,6 +133,10 @@ func (h *Handler) GetVolcanicReports(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if h.schemaVersion.IsIncompatible() {
+		h.writeJSON(w, http.StatusOK, model.IncompatibleView(reports))
+		return
+	}
 	h.writeJSON(w, http.StatusOK, reports)
 }
 
@@ -154,6 +158,14 @@ func (h *Handler) ToggleOutage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ToggleSchemaVersion(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Query().Get("mode") == "incompatible" {
+		state := h.schemaVersion.ToggleIncompatible()
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"message":      "incompatible schema toggled",
+			"incompatible": state,
+		})
 		return
 	}
 	state := h.schemaVersion.Toggle()
