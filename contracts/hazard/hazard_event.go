@@ -4,9 +4,21 @@ package hazard
 type Source string
 
 const (
-	SourceBMKG  Source = "BMKG"
-	SourcePVMBG Source = "PVMBG"
+	SourceBMKG         Source = "BMKG"
+	SourcePVMBG        Source = "PVMBG"
+	SourceSatelit      Source = "SATELIT"
+	SourceSensorPantai Source = "SENSOR_PANTAI"
 )
+
+// Valid reports whether s is a known upstream source.
+func (s Source) Valid() bool {
+	switch s {
+	case SourceBMKG, SourcePVMBG, SourceSatelit, SourceSensorPantai:
+		return true
+	default:
+		return false
+	}
+}
 
 // HazardType classifies the kind of disaster.
 type HazardType string
@@ -14,7 +26,19 @@ type HazardType string
 const (
 	HazardTypeSeismic  HazardType = "SEISMIC"
 	HazardTypeVolcanic HazardType = "VOLCANIC"
+	HazardTypeWildfire HazardType = "WILDFIRE"
+	HazardTypeCoastal  HazardType = "COASTAL"
 )
+
+// Valid reports whether t is a known hazard type.
+func (t HazardType) Valid() bool {
+	switch t {
+	case HazardTypeSeismic, HazardTypeVolcanic, HazardTypeWildfire, HazardTypeCoastal:
+		return true
+	default:
+		return false
+	}
+}
 
 // Severity is the unified threat level used across the canonical format.
 type Severity string
@@ -25,6 +49,16 @@ const (
 	SeveritySiaga   Severity = "SIAGA"
 	SeverityAwas    Severity = "AWAS"
 )
+
+// Valid reports whether s is a known severity level.
+func (s Severity) Valid() bool {
+	switch s {
+	case SeverityNormal, SeverityWaspada, SeveritySiaga, SeverityAwas:
+		return true
+	default:
+		return false
+	}
+}
 
 // HazardEvent is the canonical representation of a disaster event stored by BNPB.
 // Fields classified as "Ringkasan" are visible to all client scopes.
