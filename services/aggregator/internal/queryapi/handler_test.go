@@ -237,3 +237,5 @@ func TestHealthAndRepoError(t *testing.T) {
 		t.Errorf("expected 500 on repo error, got %d", wErr.Code)
 	}
 }
+
+func (f *fakeQueryRepo) InsertDeadLetter(context.Context, store.DeadLetter) error { return nil }

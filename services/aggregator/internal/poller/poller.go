@@ -241,9 +241,9 @@ func (p *Poller) fetchTsunamiWarnings(ctx context.Context, corrID string, since 
 	return fetchAgencyEvents[agency.TsunamiWarning](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
-func (p *Poller) fetchVolcanicReports(ctx context.Context, corrID string, since string) ([]agency.VolcanicReport, error) {
+func (p *Poller) fetchVolcanicReports(ctx context.Context, corrID string, since string) ([]json.RawMessage, error) {
 	url := fmt.Sprintf("%s/volcanic-reports?since=%s&limit=%d", p.cfg.PVMBGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
-	return fetchAgencyEvents[agency.VolcanicReport](ctx, p.logger, p.pvmbgClient, url, corrID, p.cfg.PVMBGBearerToken, "Authorization")
+	return fetchAgencyEvents[json.RawMessage](ctx, p.logger, p.pvmbgClient, url, corrID, p.cfg.PVMBGBearerToken, "Authorization")
 }
 
 func fetchAgencyEvents[T any](ctx context.Context, logger zerolog.Logger, client *http.Client, url, corrID, token, authHeader string) ([]T, error) {

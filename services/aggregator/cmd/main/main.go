@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/dlq"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/outboxrelay"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/poller"
@@ -133,13 +134,20 @@ func main() {
 
 	h := queryapi.New(repo, logger, healthFn)
 
+	retryHandler := p.PVMBGRetryHandler()
+	dlqHandler, err := dlq.NewHTTPHandler(repo, retryHandler, cfg.InternalOpsToken)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to build DLQ routes")
+	}
+
 	// 7. Start background polling loop and transactional outbox relay.
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	wg.Add(2)
+	wg.Add(3)
 	go poller.StartPolling(ctx, &wg, p, cfg, logger)
+	go poller.RunDLQWorker(ctx, &wg, repo, retryHandler, 5*time.Second, logger)
 	go func() {
 		defer wg.Done()
 		relay.Run(ctx)
@@ -150,7 +158,11 @@ func main() {
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
 	}
-	httpServer := queryapi.Server(queryapi.Routes(h), addr)
+	mux := http.NewServeMux()
+	mux.Handle("/internal/dlq", dlqHandler)
+	mux.Handle("/internal/dlq/", dlqHandler)
+	mux.Handle("/", queryapi.Routes(h))
+	httpServer := queryapi.Server(mux, addr)
 
 	serverErrChan := make(chan error, 1)
 	go func() {

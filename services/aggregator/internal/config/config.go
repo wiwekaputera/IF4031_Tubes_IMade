@@ -17,6 +17,7 @@ type Config struct {
 	BMKGTimeout          time.Duration
 	PVMBGBaseURL         string
 	PVMBGBearerToken     string
+	InternalOpsToken     string
 	PVMBGTimeout         time.Duration
 	PVMBGCbThreshold     int
 	PVMBGCbProbeInterval time.Duration
@@ -37,6 +38,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	pvmbgBearerToken, err := requireEnv("PVMBG_BEARER_TOKEN")
+	if err != nil {
+		return nil, err
+	}
+	internalOpsToken, err := requireEnv("INTERNAL_OPS_TOKEN")
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +86,7 @@ func Load() (*Config, error) {
 		BMKGTimeout:          time.Duration(bmkgTimeoutMs) * time.Millisecond,
 		PVMBGBaseURL:         getEnv("PVMBG_BASE_URL", "http://pvmbg-mock:8082"),
 		PVMBGBearerToken:     pvmbgBearerToken,
+		InternalOpsToken:     internalOpsToken,
 		PVMBGTimeout:         time.Duration(pvmbgTimeoutMs) * time.Millisecond,
 		PVMBGCbThreshold:     cbThreshold,
 		PVMBGCbProbeInterval: time.Duration(cbProbeIntervalS) * time.Second,

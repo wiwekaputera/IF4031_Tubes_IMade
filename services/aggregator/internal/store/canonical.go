@@ -26,6 +26,7 @@ type CanonicalRepo interface {
 	GetEvents(ctx context.Context, filter EventFilter) ([]hazard.HazardEvent, error)
 	GetVolcanoReferences(ctx context.Context) (map[string]VolcanoReference, error)
 	GetLatestEventTime(ctx context.Context, source string) (time.Time, error)
+	InsertDeadLetter(ctx context.Context, dl DeadLetter) error
 }
 
 type UpsertRequest struct {

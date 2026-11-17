@@ -62,3 +62,26 @@ CREATE TABLE IF NOT EXISTS outbox (
 
 CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
   ON outbox (id) WHERE published_at IS NULL;
+
+-- ============================================================
+-- Dead-letter queue (M2 T3.3)
+-- Holds the raw message exactly as received. status = 'retrying' (transient
+-- error, retried with backoff) or 'parked' (permanent schema/format error,
+-- only replay after the normalizer is updated).
+-- ============================================================
+CREATE TABLE IF NOT EXISTS dead_letters (
+  id              BIGSERIAL PRIMARY KEY,
+  source          TEXT NOT NULL,              -- 'BMKG' | 'PVMBG' | 'SATELIT' | 'SENSOR_PANTAI'
+  source_ref_id   TEXT,                       -- report_id if it could be read, else NULL
+  raw_payload     BYTEA NOT NULL,             -- exact bytes received
+  reason          TEXT NOT NULL,              -- e.g. 'missing_required:volcano_id'
+  retryable       BOOLEAN NOT NULL,
+  attempts        INT NOT NULL DEFAULT 0,
+  status          TEXT NOT NULL CHECK (status IN ('retrying', 'parked', 'resolved')),
+  received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  next_attempt_at TIMESTAMPTZ,
+  last_error      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letters_status
+  ON dead_letters (status, next_attempt_at);
