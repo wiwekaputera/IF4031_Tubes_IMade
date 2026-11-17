@@ -15,8 +15,11 @@ type SourcesMeta struct {
 
 // EventsMeta contains query count and optional upstream agency health/staleness metadata.
 type EventsMeta struct {
-	Count   int          `json:"count"`
-	Sources *SourcesMeta `json:"sources,omitempty"`
+	Count            int          `json:"count"`
+	Sources          *SourcesMeta `json:"sources,omitempty"`
+	Partial          bool         `json:"partial"`
+	UnavailableUnits []string     `json:"unavailable_units,omitempty"`
+	NextCursor       *string      `json:"next_cursor,omitempty"`
 }
 
 // EventsResponse is the formal HTTP response contract for query endpoints (GET /internal/events, GET /v1/events).
