@@ -16,12 +16,14 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/ingest"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/lease"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/outboxrelay"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/poller"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/queryapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
 )
 
 func main() {
@@ -100,6 +102,16 @@ func main() {
 	}
 	logger.Info().Str("stream", "BNPB_EVENTS").Msg("JetStream event stream ready")
 
+	if err := ingest.EnsureIngestStream(js); err != nil {
+		logger.Fatal().Err(err).Msg("failed to ensure JetStream ingest stream")
+	}
+	logger.Info().Str("stream", event.IngestStreamName).Msg("JetStream ingest stream ready")
+
+	ingestConsumer := ingest.New(js, repo, logger)
+	if err := ingestConsumer.Subscribe(); err != nil {
+		logger.Fatal().Err(err).Msg("failed to subscribe to JetStream ingest consumer")
+	}
+
 	relay := outboxrelay.New(
 		repo,
 		outboxrelay.NewJetStreamPublisher(js),
@@ -134,12 +146,12 @@ func main() {
 	h := queryapi.New(repo, logger, healthFn).WithInstanceID(cfg.InstanceID)
 	h.SetReady(true)
 
-	// 7. Start leader election, background polling loop, and transactional outbox relay.
+	// 7. Start leader election, background polling loop, transactional outbox relay, and ingest consumer.
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		elector.Run(ctx)
@@ -148,6 +160,10 @@ func main() {
 	go func() {
 		defer wg.Done()
 		relay.Run(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		ingestConsumer.Run(ctx)
 	}()
 
 	// 8. Initialize HTTP server for internal query API

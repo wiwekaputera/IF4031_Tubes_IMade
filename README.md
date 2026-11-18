@@ -349,3 +349,63 @@ Every service validates its configuration at startup (fail-fast):
 | `AUDIT_CONSUMER_BBOLT_PATH` | `/data/audit.db` | `audit-consumer` | Local audit history store |
 | `STUB_SINK_PORT` | `8085` | `stub-sink` | Internal port |
 | `LOG_LEVEL` | `info` | all | Zerolog level |
+
+---
+
+## JetStream Ingest Contract (`hazard.ingest.<SOURCE>`)
+
+Non-aggregator sources (`SATELIT` for wildfire, `SENSOR_PANTAI` for coastal) do not connect to the canonical database directly. Instead, they publish `event.IngestMessage` payloads to NATS JetStream and the aggregator applies them idempotently.
+
+### Stream & Subject
+
+- **Stream:** `HAZARD_INGEST` (subjects `hazard.ingest.>`, file storage, 2 min deduplication window, 24 h max age)
+- **Subject:** `hazard.ingest.<SOURCE>` — use `event.IngestSubject(source)` (e.g. `hazard.ingest.SATELIT`, `hazard.ingest.SENSOR_PANTAI`)
+- **Consumer:** shared durable pull consumer `aggregator-ingest` (`AckExplicit`, `AckWait=30s`, `MaxDeliver=10`)
+- **Deduplication:** set the `Nats-Msg-Id` NATS header to `message_id` (unique per event version) so JetStream deduplicates retries within the 2-minute window
+- **Payload limit:** max `256 KiB`; oversized, undecodable, or invalid messages are logged and terminated (`Term`) without redelivery
+
+### `source_version` & Semantics
+
+- **Who sets `source_version`:** the publishing source poller/ingestor. It must be `> 0` and monotonically increasing per `source_ref_id` (e.g. a per-event revision counter or epoch timestamp).
+- **Deterministic ID:** the aggregator computes `hazard_id = hazard.ID(source, source_ref_id)`.
+- **`op: "upsert"` (full replace):** replaces `hazard_type`, `severity`, `area_name`, `latitude`, `longitude`, `occurred_at`, `sources`, and `attributes` (not merged), clears `deleted_at`, and keeps `ingested_at`. Applied **only** when `source_version > stored source_version`; older or equal versions are ignored as no-ops.
+- **`op: "delete"` (soft delete):** requires only `op`, `source`, `source_ref_id`, and `source_version`. Sets `deleted_at = now()` when `source_version > stored source_version` (inserting a tombstone row if the event does not exist yet so a late older upsert cannot resurrect it).
+- **Downstream outbox (`BNPB_EVENTS`):** every applied upsert or delete writes an `event.Envelope` (`hazard_id:version`) to the outbox. For deletes, `data.attributes.deleted` is set to `true`.
+
+### Payload Examples
+
+Upsert (`hazard.ingest.SATELIT`):
+
+```json
+{
+  "message_id": "sat-wf-001-v2",
+  "op": "upsert",
+  "source": "SATELIT",
+  "source_ref_id": "wf-001",
+  "source_version": 2,
+  "hazard_type": "WILDFIRE",
+  "severity": "SIAGA",
+  "area_name": "Riau",
+  "latitude": 0.5071,
+  "longitude": 101.4478,
+  "occurred_at": "2026-11-18T10:05:00Z",
+  "attributes": {
+    "detections": 4,
+    "confidence": 0.92
+  },
+  "trace_id": "corr-sat-123"
+}
+```
+
+Delete (`hazard.ingest.SATELIT`):
+
+```json
+{
+  "message_id": "sat-wf-001-v3",
+  "op": "delete",
+  "source": "SATELIT",
+  "source_ref_id": "wf-001",
+  "source_version": 3,
+  "trace_id": "corr-sat-124"
+}
+```
