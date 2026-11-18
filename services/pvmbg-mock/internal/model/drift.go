@@ -3,7 +3,7 @@ package model
 import "fmt"
 
 // IncompatibleView renders reports in the incompatible schema version used to test
-// M2 P3 (T3.1): volcano_id is renamed to volcano_code, ash_column_height_m becomes a
+// Incompatible schema mode: volcano_id is renamed to volcano_code, ash_column_height_m becomes a
 // string, and reported_at is removed. The aggregator must reject these messages.
 func IncompatibleView(reports []VolcanicReport) []map[string]any {
 	out := make([]map[string]any, 0, len(reports))

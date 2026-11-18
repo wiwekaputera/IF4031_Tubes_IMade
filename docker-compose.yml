@@ -20,6 +20,9 @@ networks:
     internal: true
   edge_net:
     driver: bridge
+  satellite_net:
+    driver: bridge
+    internal: true
 
 # ─────────────────────────────────────────────────────────────
 # Volumes
@@ -30,6 +33,7 @@ volumes:
   nats_data:
   notification_bbolt_data:
   audit_bbolt_data:
+  satellite_store_data:
 
 # ─────────────────────────────────────────────────────────────
 # Services
@@ -307,6 +311,52 @@ services:
         condition: service_healthy
     networks:
       - bus_net
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Satellite fire feed ──────────────────────────────────────
+
+  satellite-store:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${SATELLITE_STORE_POSTGRES_USER:-satellite}
+      POSTGRES_PASSWORD: ${SATELLITE_STORE_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${SATELLITE_STORE_POSTGRES_DB:-satellite}
+    volumes:
+      - satellite_store_data:/var/lib/postgresql/data
+    networks:
+      - satellite_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SATELLITE_STORE_POSTGRES_USER:-satellite} -d ${SATELLITE_STORE_POSTGRES_DB:-satellite}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  satellite-ingestor:
+    build:
+      context: .
+      dockerfile: services/satellite-ingestor/Dockerfile
+    environment:
+      DATABASE_URL: postgres://${SATELLITE_STORE_POSTGRES_USER:-satellite}:${SATELLITE_STORE_POSTGRES_PASSWORD}@satellite-store:5432/${SATELLITE_STORE_POSTGRES_DB:-satellite}?sslmode=disable
+      SATELLITE_FEED_URL: ${SATELLITE_FEED_URL:-https://satellite.naufarrel.dev}
+      SATELLITE_FEED_TOKEN: ${SATELLITE_FEED_TOKEN}
+      NATS_URL: ${NATS_URL:-nats://nats-jetstream:4222}
+      METRICS_ADDR: ":9090"
+      HEALTHCHECK_URL: http://localhost:9090/healthz
+    ports:
+      - "${SATELLITE_METRICS_PORT:-9091}:9090"
+    depends_on:
+      satellite-store:
+        condition: service_healthy
+      nats-jetstream:
+        condition: service_healthy
+    networks:
+      - agency_net      # outbound HTTPS to the satellite feed
+      - satellite_net   # its own store
+      - bus_net         # publishes to JetStream
     healthcheck:
       test: ["CMD", "/healthcheck"]
       interval: 10s
