@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,8 +33,8 @@ func (s *Satellite) State(ctx context.Context) (ingest.State, error) {
 		wm *time.Time
 	)
 	err := s.pool.QueryRow(ctx,
-		`SELECT next_offset, watermark, invalid, low_conf, late, unknown FROM satellite_state WHERE id = 1`,
-	).Scan(&st.NextOffset, &wm, &st.Invalid, &st.LowConf, &st.Late, &st.Unknown)
+		`SELECT next_offset, watermark, invalid, low_conf, late, unknown, duplicate FROM satellite_state WHERE id = 1`,
+	).Scan(&st.NextOffset, &wm, &st.Invalid, &st.LowConf, &st.Late, &st.Unknown, &st.Duplicate)
 	if err != nil {
 		return ingest.State{}, fmt.Errorf("read satellite_state: %w", err)
 	}
@@ -44,7 +45,7 @@ func (s *Satellite) State(ctx context.Context) (ingest.State, error) {
 }
 
 // scanDetection reads one satellite_detections row in the column order used
-// by Get and Window. The raw text is kept so the rebuilt key matches the stored one.
+// by Get, Near and Detections. The raw text is kept so the rebuilt key matches the stored one.
 func scanDetection(row pgx.Row) (fire.Detection, error) {
 	var (
 		d                 fire.Detection
@@ -64,7 +65,7 @@ const detectionColumns = `satellite, acq_date::text, acq_time, latitude_text, lo
 // Get returns one stored detection by its key.
 func (s *Satellite) Get(ctx context.Context, key string) (fire.Detection, bool, error) {
 	d, err := scanDetection(s.pool.QueryRow(ctx,
-		`SELECT `+detectionColumns+` FROM satellite_detections WHERE det_key = $1`, key))
+		`SELECT `+detectionColumns+` FROM satellite_detections WHERE det_key = $1 AND NOT retracted`, key))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fire.Detection{}, false, nil
 	}
@@ -74,18 +75,59 @@ func (s *Satellite) Get(ctx context.Context, key string) (fire.Detection, bool, 
 	return d, true, nil
 }
 
-// Window returns stored detections acquired at or after since, excluding low
-// confidence. Those are kept in the table but do not count toward fires.
-func (s *Satellite) Window(ctx context.Context, since time.Time) ([]fire.Detection, error) {
+// Seen reports whether the key was ever stored, retracted or not.
+func (s *Satellite) Seen(ctx context.Context, key string) (bool, error) {
+	var seen bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM satellite_detections WHERE det_key = $1)`, key).Scan(&seen)
+	if err != nil {
+		return false, fmt.Errorf("seen query: %w", err)
+	}
+	return seen, nil
+}
+
+// Near returns detections that are not low confidence and lie within a box
+// around d slightly larger than the link distance, and within the link time
+// window. The processor applies the exact distance rule afterwards.
+func (s *Satellite) Near(ctx context.Context, d fire.Detection) ([]fire.Detection, error) {
+	t, err := d.Time()
+	if err != nil {
+		return nil, err
+	}
+	lat, err := d.Lat()
+	if err != nil {
+		return nil, err
+	}
+	lon, err := d.Lon()
+	if err != nil {
+		return nil, err
+	}
+	const kmPerDegree = 111.0
+	dLat := fire.LinkDistanceKm / kmPerDegree * 1.05
+	dLon := dLat / math.Max(math.Cos(lat*math.Pi/180), 0.01)
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+detectionColumns+` FROM satellite_detections
-		 WHERE acquired_at >= $1 AND lower(confidence) NOT IN ('l', 'low')
-		 ORDER BY det_key`, since)
+		 WHERE acquired_at BETWEEN $1 AND $2
+		   AND lat BETWEEN $3 AND $4 AND lon BETWEEN $5 AND $6
+		   AND lower(confidence) NOT IN ('l', 'low') AND NOT retracted`,
+		t.Add(-fire.LinkWindow), t.Add(fire.LinkWindow), lat-dLat, lat+dLat, lon-dLon, lon+dLon)
 	if err != nil {
-		return nil, fmt.Errorf("window query: %w", err)
+		return nil, fmt.Errorf("near query: %w", err)
 	}
-	defer rows.Close()
+	return collectDetections(rows)
+}
 
+// Detections returns the stored detections with the given keys.
+func (s *Satellite) Detections(ctx context.Context, keys []string) ([]fire.Detection, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+detectionColumns+` FROM satellite_detections WHERE det_key = ANY($1::text[]) AND NOT retracted`, keys)
+	if err != nil {
+		return nil, fmt.Errorf("detections query: %w", err)
+	}
+	return collectDetections(rows)
+}
+
+func collectDetections(rows pgx.Rows) ([]fire.Detection, error) {
+	defer rows.Close()
 	var out []fire.Detection
 	for rows.Next() {
 		d, err := scanDetection(rows)
@@ -97,14 +139,15 @@ func (s *Satellite) Window(ctx context.Context, since time.Time) ([]fire.Detecti
 	return out, rows.Err()
 }
 
-// Fires returns stored fires whose latest detection is at or after since.
-func (s *Satellite) Fires(ctx context.Context, since time.Time) ([]fire.Fire, error) {
+// FiresContaining returns stored fires that include any of the keys.
+func (s *Satellite) FiresContaining(ctx context.Context, keys []string) ([]fire.Fire, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT source_ref_id, center_lat, center_lon, occurred_at, last_seen_at, detection_count,
 		       satellites, max_confidence, total_frp_mw, detection_keys, severity
 		FROM satellite_fires
-		WHERE last_seen_at >= $1
-		ORDER BY source_ref_id`, since)
+		WHERE source_ref_id IN (
+			SELECT source_ref_id FROM satellite_fire_members WHERE det_key = ANY($1::text[]))
+		ORDER BY source_ref_id`, keys)
 	if err != nil {
 		return nil, fmt.Errorf("fires query: %w", err)
 	}
@@ -166,6 +209,13 @@ func (s *Satellite) MarkPublished(ctx context.Context, id int64) error {
 	return err
 }
 
+// DeadLetterCount counts parked feed events, for monitoring.
+func (s *Satellite) DeadLetterCount(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM satellite_dead_letters WHERE status = 'parked'`).Scan(&n)
+	return n, err
+}
+
 // OutboxBacklog counts unpublished messages, for monitoring.
 func (s *Satellite) OutboxBacklog(ctx context.Context) (int64, error) {
 	var n int64
@@ -181,18 +231,41 @@ func (s *Satellite) Commit(ctx context.Context, c ingest.Commit) error {
 	}
 	defer tx.Rollback(ctx) // no-op once committed
 
+	if dl := c.DeadLetter; dl != nil {
+		raw := dl.Raw
+		if raw == nil {
+			raw = []byte{}
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO satellite_dead_letters (feed_offset, event_type, raw_payload, reason)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (feed_offset) DO NOTHING`,
+			dl.Offset, dl.Type, raw, dl.Reason,
+		); err != nil {
+			return fmt.Errorf("insert dead letter: %w", err)
+		}
+	}
+
 	if d := c.Accepted; d != nil {
 		t, err := d.Time()
 		if err != nil {
 			return err
 		}
+		lat, err := d.Lat()
+		if err != nil {
+			return err
+		}
+		lon, err := d.Lon()
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO satellite_detections
-				(det_key, satellite, acq_date, acq_time, latitude_text, longitude_text, confidence, frp, acquired_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				(det_key, satellite, acq_date, acq_time, latitude_text, longitude_text, lat, lon, confidence, frp, acquired_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (det_key) DO NOTHING`,
 			d.Key(), d.Satellite, d.AcqDate, d.AcqTime.String(), d.Latitude.String(), d.Longitude.String(),
-			d.Confidence, d.FRP, t,
+			lat, lon, d.Confidence, d.FRP, t,
 		); err != nil {
 			return fmt.Errorf("insert detection: %w", err)
 		}
@@ -200,7 +273,8 @@ func (s *Satellite) Commit(ctx context.Context, c ingest.Commit) error {
 
 	for _, e := range c.Edits {
 		if e.Retract {
-			if _, err := tx.Exec(ctx, `DELETE FROM satellite_detections WHERE det_key = $1`, e.Key); err != nil {
+			// Kept as a marked row, so a re-sent copy is recognised as a duplicate.
+			if _, err := tx.Exec(ctx, `UPDATE satellite_detections SET retracted = true WHERE det_key = $1`, e.Key); err != nil {
 				return fmt.Errorf("retract detection: %w", err)
 			}
 			continue
@@ -213,6 +287,14 @@ func (s *Satellite) Commit(ctx context.Context, c ingest.Commit) error {
 			e.Key, e.FRP, e.Confidence,
 		); err != nil {
 			return fmt.Errorf("update detection: %w", err)
+		}
+	}
+
+	// Deletes go first so a merged fire releases its detections before the
+	// surviving fire claims them. Member rows go with the fire (ON DELETE CASCADE).
+	if len(c.Deletes) > 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM satellite_fires WHERE source_ref_id = ANY($1::text[])`, c.Deletes); err != nil {
+			return fmt.Errorf("delete fires: %w", err)
 		}
 	}
 
@@ -239,11 +321,18 @@ func (s *Satellite) Commit(ctx context.Context, c ingest.Commit) error {
 		); err != nil {
 			return fmt.Errorf("upsert fire %s: %w", f.SourceRefID, err)
 		}
-	}
-
-	if len(c.Deletes) > 0 {
-		if _, err := tx.Exec(ctx, `DELETE FROM satellite_fires WHERE source_ref_id = ANY($1::text[])`, c.Deletes); err != nil {
-			return fmt.Errorf("delete fires: %w", err)
+		// Refresh which detections this fire holds. A detection that moved here
+		// from another fire in the same commit is taken over by the upsert.
+		if _, err := tx.Exec(ctx, `DELETE FROM satellite_fire_members WHERE source_ref_id = $1`, f.SourceRefID); err != nil {
+			return fmt.Errorf("clear members of %s: %w", f.SourceRefID, err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO satellite_fire_members (det_key, source_ref_id)
+			SELECT unnest($1::text[]), $2
+			ON CONFLICT (det_key) DO UPDATE SET source_ref_id = EXCLUDED.source_ref_id`,
+			f.DetectionKeys, f.SourceRefID,
+		); err != nil {
+			return fmt.Errorf("set members of %s: %w", f.SourceRefID, err)
 		}
 	}
 
@@ -269,9 +358,9 @@ func (s *Satellite) Commit(ctx context.Context, c ingest.Commit) error {
 		UPDATE satellite_state
 		SET next_offset = $1, watermark = $2,
 		    invalid = invalid + $3, low_conf = low_conf + $4, late = late + $5, unknown = unknown + $6,
-		    updated_at = now()
+		    duplicate = duplicate + $7, updated_at = now()
 		WHERE id = 1`,
-		c.NextOffset, wm, c.Counts.Invalid, c.Counts.LowConf, c.Counts.Late, c.Counts.Unknown,
+		c.NextOffset, wm, c.Counts.Invalid, c.Counts.LowConf, c.Counts.Late, c.Counts.Unknown, c.Counts.Duplicate,
 	); err != nil {
 		return fmt.Errorf("update satellite_state: %w", err)
 	}

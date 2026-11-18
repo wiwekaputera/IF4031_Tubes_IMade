@@ -51,8 +51,7 @@ CREATE TABLE IF NOT EXISTS satellite_fires (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Latest detection time of each fire. The processor reclusters every fire
--- still active in its window, so it looks fires up by this column.
+-- Latest detection time of each fire, for queries and dashboards.
 ALTER TABLE satellite_fires ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 UPDATE satellite_fires SET last_seen_at = occurred_at WHERE last_seen_at IS NULL;
 ALTER TABLE satellite_fires ALTER COLUMN last_seen_at SET NOT NULL;
@@ -74,3 +73,47 @@ CREATE TABLE IF NOT EXISTS satellite_outbox (
 
 CREATE INDEX IF NOT EXISTS idx_satellite_outbox_unpublished
   ON satellite_outbox (id) WHERE published_at IS NULL;
+
+-- Feed events that could not be processed: malformed or oversized payloads,
+-- detections that fail validation, and messages that crashed the processor.
+-- The raw bytes are kept exactly as received. The feed moves past them, so
+-- one poison event cannot stall ingestion.
+CREATE TABLE IF NOT EXISTS satellite_dead_letters (
+  id          BIGSERIAL PRIMARY KEY,
+  feed_offset BIGINT UNIQUE NOT NULL,
+  event_type  TEXT NOT NULL,
+  raw_payload BYTEA NOT NULL,
+  reason      TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'parked' CHECK (status IN ('parked', 'resolved')),
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Numeric coordinates for the neighbour search. The text columns stay the
+-- source of the dedup key; these are only for the box query.
+ALTER TABLE satellite_detections ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;
+ALTER TABLE satellite_detections ADD COLUMN IF NOT EXISTS lon DOUBLE PRECISION;
+UPDATE satellite_detections SET lat = latitude_text::double precision, lon = longitude_text::double precision
+  WHERE lat IS NULL OR lon IS NULL;
+ALTER TABLE satellite_detections ALTER COLUMN lat SET NOT NULL;
+ALTER TABLE satellite_detections ALTER COLUMN lon SET NOT NULL;
+
+-- Which fire holds each detection, so the processor can find the fires a
+-- change touches by primary key instead of searching the key arrays.
+CREATE TABLE IF NOT EXISTS satellite_fire_members (
+  det_key       TEXT PRIMARY KEY,
+  source_ref_id TEXT NOT NULL REFERENCES satellite_fires (source_ref_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_satellite_fire_members_fire
+  ON satellite_fire_members (source_ref_id);
+
+INSERT INTO satellite_fire_members (det_key, source_ref_id)
+SELECT unnest(detection_keys), source_ref_id FROM satellite_fires
+ON CONFLICT (det_key) DO NOTHING;
+
+-- Retracted detections stay as marked rows, so a copy the feed re-sends later
+-- is recognised as a duplicate instead of bringing a false positive back.
+ALTER TABLE satellite_detections ADD COLUMN IF NOT EXISTS retracted BOOLEAN NOT NULL DEFAULT false;
+
+-- Detections re-sent by the feed with a key that was already stored.
+ALTER TABLE satellite_state ADD COLUMN IF NOT EXISTS duplicate BIGINT NOT NULL DEFAULT 0;

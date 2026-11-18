@@ -17,10 +17,15 @@ import (
 // Message is one event delivered by the stream. Offset comes from the data
 // payload; Detection is the raw detection object for processing.
 type Message struct {
-	Type      string
-	Offset    int64
-	Detection json.RawMessage // the "detection" object, for detection events
-	Data      json.RawMessage // the whole data object, for update and retract events
+	Type       string
+	Offset     int64
+	Detection  json.RawMessage // the "detection" object, for detection events
+	Data       json.RawMessage // the whole data object, for update and retract events
+	ReceivedAt time.Time       // when the event was read off the stream
+	// Bad is set when the event could not be decoded. The offset then comes
+	// from the SSE id, Data holds the raw text, and the handler is expected to
+	// dead-letter it so one poison event cannot stall the stream.
+	Bad string
 }
 
 // StatusError is returned when the feed answers with a non-200 status.
@@ -105,6 +110,39 @@ func (c *Client) Run(ctx context.Context, next func(context.Context) (int64, err
 		}
 		backoff = minDuration(backoff*2, c.MaxBackoff)
 	}
+}
+
+// Session is the feed's view of this group, from GET /v1/session.
+type Session struct {
+	Profile      string    `json:"profile"`
+	Speed        float64   `json:"speed"`
+	LatestOffset int64     `json:"latest_offset"`
+	VirtualNow   time.Time `json:"virtual_now"`
+}
+
+// Session fetches the newest offset and the feed's virtual clock.
+func (c *Client) Session(ctx context.Context) (Session, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/session", nil)
+	if err != nil {
+		return Session{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return Session{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return Session{}, &StatusError{Code: resp.StatusCode, Body: string(body)}
+	}
+	var s Session
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&s); err != nil {
+		return Session{}, fmt.Errorf("decode session: %w", err)
+	}
+	return s, nil
 }
 
 func (c *Client) logger() *slog.Logger {
@@ -201,12 +239,31 @@ type envelope struct {
 	Detection json.RawMessage `json:"detection"`
 }
 
+// decodeMessage turns an SSE event into a Message. An event whose payload
+// cannot be read is still returned, marked Bad, as long as its SSE id gives
+// the offset. Only an event with neither a readable payload nor an id is an
+// error, because it cannot be placed in the sequence.
 func decodeMessage(ev Event) (Message, error) {
+	now := time.Now()
+	idOffset, idErr := strconv.ParseInt(strings.TrimSpace(ev.ID), 10, 64)
+	bad := func(reason string) (Message, error) {
+		if idErr != nil {
+			return Message{}, fmt.Errorf("%s event without a usable id: %s", ev.Event, reason)
+		}
+		return Message{Type: ev.Event, Offset: idOffset, Data: json.RawMessage(ev.Data), ReceivedAt: now, Bad: reason}, nil
+	}
+
+	if ev.Oversized {
+		return bad(fmt.Sprintf("oversized: a line exceeded %d bytes", MaxLineBytes))
+	}
 	var env envelope
 	if err := json.Unmarshal([]byte(ev.Data), &env); err != nil {
-		return Message{}, fmt.Errorf("bad %s payload: %w", ev.Event, err)
+		return bad("malformed_json: " + err.Error())
 	}
-	return Message{Type: ev.Event, Offset: env.Offset, Detection: env.Detection, Data: json.RawMessage(ev.Data)}, nil
+	if idErr == nil && env.Offset != idOffset {
+		return bad(fmt.Sprintf("offset_mismatch: id %d, payload %d", idOffset, env.Offset))
+	}
+	return Message{Type: ev.Event, Offset: env.Offset, Detection: env.Detection, Data: json.RawMessage(ev.Data), ReceivedAt: now}, nil
 }
 
 type watchedReader struct {

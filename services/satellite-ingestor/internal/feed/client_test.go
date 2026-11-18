@@ -243,3 +243,55 @@ func TestHeartbeatTakesOffsetSlot(t *testing.T) {
 		t.Fatalf("seen=%v connections=%d, want [1 2] on one connection", seen, len(f.froms))
 	}
 }
+
+// A malformed payload and an oversized line must each reach the handler once,
+// marked Bad, and the stream must carry on to the next event.
+func TestPoisonEventsAreDeliveredNotLooped(t *testing.T) {
+	huge := strings.Repeat("x", MaxLineBytes+10)
+	f := &fakeFeed{scripts: []func(http.ResponseWriter){
+		func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "id: 0\nevent: detection\ndata: {\"offset\":0,\"detection\":{\n\n")
+			fmt.Fprintf(w, "id: 1\nevent: detection\ndata: %s\n\n", huge)
+			sse(w, 2)
+		},
+	}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+
+	var got []string
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_ = fastClient(srv.URL).Run(ctx,
+		func(context.Context) (int64, error) { return 0, nil },
+		func(_ context.Context, m Message) error {
+			got = append(got, fmt.Sprintf("%d:%t", m.Offset, m.Bad != ""))
+			if m.Offset == 2 {
+				cancel()
+			}
+			return nil
+		})
+	if fmt.Sprint(got) != "[0:true 1:true 2:false]" || len(f.froms) != 1 {
+		t.Fatalf("got %v over %d connections, want [0:true 1:true 2:false] on one", got, len(f.froms))
+	}
+}
+
+func TestSessionParsesFeedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/session" || r.Header.Get("Authorization") != "Bearer secret-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"profile":"practice","speed":60,"group":"imade","latest_offset":22344,"virtual_now":"2026-11-24T20:44:09Z"}`)
+	}))
+	defer srv.Close()
+
+	s, err := fastClient(srv.URL).Session(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.LatestOffset != 22344 || s.Speed != 60 || s.VirtualNow.Format(time.RFC3339) != "2026-11-24T20:44:09Z" {
+		t.Fatalf("session = %+v", s)
+	}
+}

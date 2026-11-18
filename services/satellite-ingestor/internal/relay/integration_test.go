@@ -43,7 +43,7 @@ func TestRelayPublishesOnceThroughJetStream(t *testing.T) {
 	if _, err := pool.Exec(ctx, migrations.Init); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE satellite_fires, satellite_detections, satellite_outbox;
+	if _, err := pool.Exec(ctx, `TRUNCATE satellite_fire_members, satellite_fires, satellite_detections, satellite_outbox, satellite_dead_letters;
 		UPDATE satellite_state SET next_offset = 0, watermark = NULL, invalid = 0, low_conf = 0, late = 0, unknown = 0 WHERE id = 1`); err != nil {
 		t.Fatal(err)
 	}

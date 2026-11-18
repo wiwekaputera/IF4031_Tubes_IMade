@@ -3,8 +3,8 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/feed"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/fire"
@@ -16,10 +16,12 @@ type memStore struct {
 	dets   map[string]fire.Detection
 	fires  map[string]fire.Fire
 	outbox []Outgoing
+	dead   []DeadLetter
+	gone   map[string]bool // retracted keys
 }
 
 func newMemStore() *memStore {
-	return &memStore{dets: map[string]fire.Detection{}, fires: map[string]fire.Fire{}}
+	return &memStore{dets: map[string]fire.Detection{}, fires: map[string]fire.Fire{}, gone: map[string]bool{}}
 }
 
 func (m *memStore) State(context.Context) (State, error) { return m.st, nil }
@@ -29,25 +31,55 @@ func (m *memStore) Get(_ context.Context, key string) (fire.Detection, bool, err
 	return d, ok, nil
 }
 
-func (m *memStore) Window(_ context.Context, since time.Time) ([]fire.Detection, error) {
+func (m *memStore) Seen(_ context.Context, key string) (bool, error) {
+	_, ok := m.dets[key]
+	return ok || m.gone[key], nil
+}
+
+func (m *memStore) Near(_ context.Context, d fire.Detection) ([]fire.Detection, error) {
+	t, err := d.Time()
+	if err != nil {
+		return nil, err
+	}
 	var out []fire.Detection
-	for _, d := range m.dets {
-		t, err := d.Time()
+	for _, x := range m.dets {
+		xt, err := x.Time()
 		if err != nil {
 			return nil, err
 		}
-		if !t.Before(since) && !d.IsLowConfidence() {
-			out = append(out, d)
+		dt := xt.Sub(t)
+		if dt < 0 {
+			dt = -dt
+		}
+		if dt <= fire.LinkWindow && !x.IsLowConfidence() {
+			out = append(out, x)
 		}
 	}
 	return out, nil
 }
 
-func (m *memStore) Fires(_ context.Context, since time.Time) ([]fire.Fire, error) {
+func (m *memStore) FiresContaining(_ context.Context, keys []string) ([]fire.Fire, error) {
+	want := map[string]bool{}
+	for _, k := range keys {
+		want[k] = true
+	}
 	var out []fire.Fire
 	for _, f := range m.fires {
-		if !f.LastSeenAt.Before(since) {
-			out = append(out, f)
+		for _, k := range f.DetectionKeys {
+			if want[k] {
+				out = append(out, f)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) Detections(_ context.Context, keys []string) ([]fire.Detection, error) {
+	var out []fire.Detection
+	for _, k := range keys {
+		if d, ok := m.dets[k]; ok {
+			out = append(out, d)
 		}
 	}
 	return out, nil
@@ -61,6 +93,7 @@ func (m *memStore) Commit(_ context.Context, c Commit) error {
 		}
 		if e.Retract {
 			delete(m.dets, e.Key)
+			m.gone[e.Key] = true
 			continue
 		}
 		if e.FRP != nil {
@@ -82,6 +115,9 @@ func (m *memStore) Commit(_ context.Context, c Commit) error {
 		m.fires[f.SourceRefID] = f
 	}
 	m.outbox = append(m.outbox, c.Outbox...)
+	if c.DeadLetter != nil {
+		m.dead = append(m.dead, *c.DeadLetter)
+	}
 
 	m.st.NextOffset = c.NextOffset
 	m.st.Watermark = c.Watermark
@@ -89,6 +125,7 @@ func (m *memStore) Commit(_ context.Context, c Commit) error {
 	m.st.LowConf += c.Counts.LowConf
 	m.st.Late += c.Counts.Late
 	m.st.Unknown += c.Counts.Unknown
+	m.st.Duplicate += c.Counts.Duplicate
 	return nil
 }
 
@@ -297,5 +334,80 @@ func TestStateSurvivesRestart(t *testing.T) {
 	next, _ := p2.NextOffset(ctx)
 	if next != 1 {
 		t.Fatalf("resume offset = %d, want 1", next)
+	}
+}
+
+func TestBadMessageIsDeadLettered(t *testing.T) {
+	p, s := newProc(t)
+	bad := feed.Message{Type: "detection", Offset: 4, Data: json.RawMessage(`{"offset":4,"detection":{`), Bad: "malformed_json: unexpected end"}
+	if err := p.Handle(context.Background(), bad); err != nil {
+		t.Fatalf("poison message stalled the feed: %v", err)
+	}
+	if len(s.dead) != 1 || s.dead[0].Offset != 4 || string(s.dead[0].Raw) != `{"offset":4,"detection":{` {
+		t.Fatalf("dead letters = %+v", s.dead)
+	}
+	if s.st.NextOffset != 5 || s.st.Invalid != 1 {
+		t.Fatalf("next=%d invalid=%d", s.st.NextOffset, s.st.Invalid)
+	}
+}
+
+func TestInvalidDetectionKeepsRawPayload(t *testing.T) {
+	p, s := newProc(t)
+	m := msg(0, "N21", "2026-13-40", 2310, "-1.98", "112.64", "n")
+	m.Data = json.RawMessage(`{"offset":0,"detection":{"acq_date":"2026-13-40"}}`)
+	if err := p.Handle(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.dead) != 1 || !strings.HasPrefix(s.dead[0].Reason, "invalid_detection") {
+		t.Fatalf("dead letters = %+v", s.dead)
+	}
+}
+
+// panicStore panics on Near, standing in for a bug triggered by one message.
+type panicStore struct{ *memStore }
+
+func (panicStore) Near(context.Context, fire.Detection) ([]fire.Detection, error) {
+	panic("boom")
+}
+
+func TestPanicIsDeadLetteredNotFatal(t *testing.T) {
+	ms := newMemStore()
+	p, err := New(context.Background(), panicStore{ms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Handle(context.Background(), msg(0, "N21", "2026-11-22", 2310, "-1.98", "112.64", "n")); err != nil {
+		t.Fatalf("panic surfaced as error: %v", err)
+	}
+	if len(ms.dead) != 1 || ms.dead[0].Reason != "panic: boom" || ms.st.NextOffset != 1 {
+		t.Fatalf("dead=%+v next=%d", ms.dead, ms.st.NextOffset)
+	}
+}
+
+// The feed re-sends detections. A re-sent copy must not undo a later update
+// or bring back a retracted detection.
+func TestResentDetectionDoesNotUndoEdits(t *testing.T) {
+	p, s := newProc(t)
+	twoNearbyFires(t, p)
+	a := msg(0, "N21", "2026-11-22", 2310, "-1.98905", "112.64071", "n")
+
+	feedAll(t, p, editMsg(2, "update", keyA, map[string]any{"confidence": "l"}))
+	if len(s.fires) != 0 {
+		t.Fatalf("fires = %d after A dropped to low confidence, want 0", len(s.fires))
+	}
+	a.Offset = 3
+	feedAll(t, p, a) // the original copy of A arrives again
+	if len(s.fires) != 0 || s.dets[keyA].Confidence != "l" {
+		t.Fatalf("re-sent copy undid the update: fires=%d confidence=%q", len(s.fires), s.dets[keyA].Confidence)
+	}
+
+	feedAll(t, p, editMsg(4, "retract", keyB, nil))
+	b := msg(5, "N20", "2026-11-22", 2320, "-1.98273", "112.63871", "h")
+	feedAll(t, p, b) // the retracted B arrives again
+	if _, ok := s.dets[keyB]; ok {
+		t.Fatal("re-sent copy brought a retracted detection back")
+	}
+	if s.st.Duplicate != 2 {
+		t.Fatalf("duplicates = %d, want 2", s.st.Duplicate)
 	}
 }

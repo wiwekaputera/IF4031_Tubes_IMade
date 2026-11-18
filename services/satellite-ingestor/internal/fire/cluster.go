@@ -145,3 +145,18 @@ func earliest(ds []Detection) Detection {
 	}
 	return best
 }
+
+// Linked reports whether two detections are directly linked by the fire rule:
+// within LinkDistanceKm and LinkWindow of each other. Invalid detections never link.
+func Linked(a, b Detection) bool {
+	ta, err1 := a.Time()
+	tb, err2 := b.Time()
+	la, err3 := a.Lat()
+	oa, err4 := a.Lon()
+	lb, err5 := b.Lat()
+	ob, err6 := b.Lon()
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
+		return false
+	}
+	return withinLink(la, oa, ta, lb, ob, tb)
+}
