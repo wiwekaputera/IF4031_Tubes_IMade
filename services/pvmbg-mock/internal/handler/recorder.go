@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"net/http"
 	"sort"
 	"strconv"
@@ -202,9 +201,7 @@ func RecordMiddleware(rr *RequestRecorder) Middleware {
 // GetAdminRequests handles GET /admin/requests.
 func (h *Handler) GetAdminRequests(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = w.Write([]byte(`{"error":"Method not allowed"}`))
+		h.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
 		return
 	}
 
@@ -212,31 +209,23 @@ func (h *Handler) GetAdminRequests(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("window_s"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed <= 0 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"Invalid window_s parameter: must be a positive integer"}`))
+			h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid window_s parameter: must be a positive integer"})
 			return
 		}
 		windowS = parsed
 	}
 
 	resp := h.recorder.Snapshot(time.Duration(windowS) * time.Second)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	h.writeJSON(w, http.StatusOK, resp)
 }
 
 // ResetAdminRequests handles POST /admin/requests/reset.
 func (h *Handler) ResetAdminRequests(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = w.Write([]byte(`{"error":"Method not allowed"}`))
+		h.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
 		return
 	}
 
 	h.recorder.Reset()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	h.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

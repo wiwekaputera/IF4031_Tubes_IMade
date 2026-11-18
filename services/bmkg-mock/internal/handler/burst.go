@@ -31,42 +31,30 @@ type BurstRequest struct {
 // PostAdminBurst handles POST /admin/burst to generate a regional burst of seismic events.
 func (h *Handler) PostAdminBurst(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = w.Write([]byte(`{"error":"Method not allowed"}`))
+		h.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
 		return
 	}
 
 	var req BurstRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"Invalid JSON body"}`))
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON body"})
 		return
 	}
 
 	if req.RegionName == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"region_name is required"}`))
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "region_name is required"})
 		return
 	}
 	if req.Count <= 0 || req.Count > maxBurstCount {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"count must be between 1 and 100000"}`))
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count must be between 1 and 100000"})
 		return
 	}
 	if req.DurationS < 0 || req.DurationS > maxBurstDurationS {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"duration_s must be between 0 and 3600"}`))
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "duration_s must be between 0 and 3600"})
 		return
 	}
 	if req.Lat < -90 || req.Lat > 90 || req.Lon < -180 || req.Lon > 180 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"lat must be [-90,90] and lon must be [-180,180]"}`))
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "lat must be [-90,90] and lon must be [-180,180]"})
 		return
 	}
 
@@ -76,9 +64,7 @@ func (h *Handler) PostAdminBurst(w http.ResponseWriter, r *http.Request) {
 		go h.runBurst(req)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	h.writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":      "accepted",
 		"region_name": req.RegionName,
 		"count":       req.Count,
