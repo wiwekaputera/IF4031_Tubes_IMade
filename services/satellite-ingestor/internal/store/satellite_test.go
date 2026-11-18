@@ -33,7 +33,7 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	if _, err := pool.Exec(ctx, string(schema)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE satellite_fires, satellite_detections; UPDATE satellite_state SET next_offset = 0, watermark = NULL, invalid = 0, low_conf = 0, late = 0 WHERE id = 1`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE satellite_fires, satellite_detections, satellite_outbox; UPDATE satellite_state SET next_offset = 0, watermark = NULL, invalid = 0, low_conf = 0, late = 0 WHERE id = 1`); err != nil {
 		t.Fatal(err)
 	}
 	return pool
@@ -89,5 +89,64 @@ func TestRestartResumesAndKeepsFire(t *testing.T) {
 	}
 	if fires != 1 || dets != 2 {
 		t.Fatalf("fires=%d dets=%d, want 1 and 2", fires, dets)
+	}
+}
+
+func outboxCount(t *testing.T, pool *pgxpool.Pool) (total, pending int) {
+	t.Helper()
+	err := pool.QueryRow(context.Background(),
+		`SELECT count(*), count(*) FILTER (WHERE published_at IS NULL) FROM satellite_outbox`).Scan(&total, &pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return total, pending
+}
+
+// TestOutboxAndRestartDoNotRepublish checks that the fire change is queued in
+// the outbox with the commit, that the relay methods drain it, and that a
+// processor restarted from the database sees the stored fire as unchanged.
+func TestOutboxAndRestartDoNotRepublish(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	s := NewSatellite(pool)
+
+	p, err := ingest.New(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []feed.Message{
+		feedMsg(0, "N21", "2026-11-22", 2310, "-1.98905", "112.64071", "n"),
+		feedMsg(1, "N20", "2026-11-22", 2320, "-1.98273", "112.63871", "h"),
+	} {
+		if err := p.Handle(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if total, pending := outboxCount(t, pool); total != 1 || pending != 1 {
+		t.Fatalf("outbox total=%d pending=%d, want 1 and 1", total, pending)
+	}
+
+	rows, err := s.PendingOutbox(ctx, 10)
+	if err != nil || len(rows) != 1 || rows[0].Subject != "hazard.ingest.SATELIT" {
+		t.Fatalf("pending = %+v err=%v", rows, err)
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(rows[0].Payload, &msg); err != nil || msg["hazard_type"] != "WILDFIRE" {
+		t.Fatalf("payload = %s err=%v", rows[0].Payload, err)
+	}
+	if err := s.MarkPublished(ctx, rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// After a restart, a detection far away must not republish the stored fire.
+	p2, err := ingest.New(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p2.Handle(ctx, feedMsg(2, "N21", "2026-11-22", 2330, "-5.0", "120.0", "n")); err != nil {
+		t.Fatal(err)
+	}
+	if total, pending := outboxCount(t, pool); total != 1 || pending != 0 {
+		t.Fatalf("outbox total=%d pending=%d after restart, want 1 and 0 (fire republished)", total, pending)
 	}
 }

@@ -126,3 +126,16 @@ func TestDetectionDecodesFeedNumericTime(t *testing.T) {
 		t.Fatalf("time = %s, want %s", got.Format(time.RFC3339), want)
 	}
 }
+
+// The same detections in a different order must give a bit-identical fire,
+// or a restart would publish spurious changes.
+func TestSummarizeIgnoresInputOrder(t *testing.T) {
+	a := det("N21", "2026-11-22", "2310", "-1.98905", "112.64071", "n", 1.36)
+	b := det("N20", "2026-11-22", "2320", "-1.98273", "112.63871", "h", 0.99)
+	c := det("N", "2026-11-22", "2330", "-1.98759", "112.64307", "h", 6.78)
+	x := Summarize(Component{Detections: []Detection{a, b, c}})
+	y := Summarize(Component{Detections: []Detection{c, a, b}})
+	if x.CenterLat != y.CenterLat || x.CenterLon != y.CenterLon || x.TotalFRPMW != y.TotalFRPMW || x.SourceRefID != y.SourceRefID {
+		t.Fatalf("order changed the result:\n%+v\n%+v", x, y)
+	}
+}

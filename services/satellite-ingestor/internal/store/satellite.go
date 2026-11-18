@@ -79,7 +79,8 @@ func (s *Satellite) Get(ctx context.Context, key string) (fire.Detection, bool, 
 func (s *Satellite) Window(ctx context.Context, since time.Time) ([]fire.Detection, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+detectionColumns+` FROM satellite_detections
-		 WHERE acquired_at >= $1 AND lower(confidence) NOT IN ('l', 'low')`, since)
+		 WHERE acquired_at >= $1 AND lower(confidence) NOT IN ('l', 'low')
+		 ORDER BY det_key`, since)
 	if err != nil {
 		return nil, fmt.Errorf("window query: %w", err)
 	}
@@ -94,6 +95,82 @@ func (s *Satellite) Window(ctx context.Context, since time.Time) ([]fire.Detecti
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// Fires returns stored fires whose latest detection is at or after since.
+func (s *Satellite) Fires(ctx context.Context, since time.Time) ([]fire.Fire, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT source_ref_id, center_lat, center_lon, occurred_at, last_seen_at, detection_count,
+		       satellites, max_confidence, total_frp_mw, detection_keys, severity
+		FROM satellite_fires
+		WHERE last_seen_at >= $1
+		ORDER BY source_ref_id`, since)
+	if err != nil {
+		return nil, fmt.Errorf("fires query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []fire.Fire
+	for rows.Next() {
+		var f fire.Fire
+		if err := rows.Scan(&f.SourceRefID, &f.CenterLat, &f.CenterLon, &f.OccurredAt, &f.LastSeenAt,
+			&f.DetectionCount, &f.Satellites, &f.MaxConfidence, &f.TotalFRPMW, &f.DetectionKeys, &f.Severity); err != nil {
+			return nil, fmt.Errorf("scan fire: %w", err)
+		}
+		f.OccurredAt = f.OccurredAt.UTC()
+		f.LastSeenAt = f.LastSeenAt.UTC()
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// OutboxRow is one hazard message waiting to be published.
+type OutboxRow struct {
+	ID        int64
+	MessageID string
+	Subject   string
+	Payload   []byte
+}
+
+// PendingOutbox returns unpublished messages in the order they were written.
+func (s *Satellite) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, message_id, subject, payload::text
+		FROM satellite_outbox
+		WHERE published_at IS NULL
+		ORDER BY id
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("outbox query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []OutboxRow
+	for rows.Next() {
+		var (
+			r       OutboxRow
+			payload string
+		)
+		if err := rows.Scan(&r.ID, &r.MessageID, &r.Subject, &payload); err != nil {
+			return nil, fmt.Errorf("scan outbox: %w", err)
+		}
+		r.Payload = []byte(payload)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// MarkPublished records that JetStream acknowledged the message.
+func (s *Satellite) MarkPublished(ctx context.Context, id int64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE satellite_outbox SET published_at = now() WHERE id = $1`, id)
+	return err
+}
+
+// OutboxBacklog counts unpublished messages, for monitoring.
+func (s *Satellite) OutboxBacklog(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM satellite_outbox WHERE published_at IS NULL`).Scan(&n)
+	return n, err
 }
 
 // Commit writes one message's changes in a single transaction.
@@ -139,16 +216,17 @@ func (s *Satellite) Commit(ctx context.Context, c ingest.Commit) error {
 		}
 	}
 
-	for _, f := range c.Fires {
+	for _, f := range c.Upserts {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO satellite_fires
-				(source_ref_id, center_lat, center_lon, occurred_at, detection_count, satellites,
+				(source_ref_id, center_lat, center_lon, occurred_at, last_seen_at, detection_count, satellites,
 				 max_confidence, total_frp_mw, detection_keys, severity, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
 			ON CONFLICT (source_ref_id) DO UPDATE SET
 				center_lat = EXCLUDED.center_lat,
 				center_lon = EXCLUDED.center_lon,
 				occurred_at = EXCLUDED.occurred_at,
+				last_seen_at = EXCLUDED.last_seen_at,
 				detection_count = EXCLUDED.detection_count,
 				satellites = EXCLUDED.satellites,
 				max_confidence = EXCLUDED.max_confidence,
@@ -156,26 +234,29 @@ func (s *Satellite) Commit(ctx context.Context, c ingest.Commit) error {
 				detection_keys = EXCLUDED.detection_keys,
 				severity = EXCLUDED.severity,
 				updated_at = now()`,
-			f.SourceRefID, f.CenterLat, f.CenterLon, f.OccurredAt, f.DetectionCount, f.Satellites,
+			f.SourceRefID, f.CenterLat, f.CenterLon, f.OccurredAt, f.LastSeenAt, f.DetectionCount, f.Satellites,
 			f.MaxConfidence, f.TotalFRPMW, f.DetectionKeys, f.Severity,
 		); err != nil {
 			return fmt.Errorf("upsert fire %s: %w", f.SourceRefID, err)
 		}
 	}
 
-	if c.PruneSince != nil {
-		// Built with make, not a nil slice: a NULL array would make the NOT
-		// test NULL and delete nothing.
-		keep := make([]string, 0, len(c.Fires))
-		for _, f := range c.Fires {
-			keep = append(keep, f.SourceRefID)
+	if len(c.Deletes) > 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM satellite_fires WHERE source_ref_id = ANY($1::text[])`, c.Deletes); err != nil {
+			return fmt.Errorf("delete fires: %w", err)
 		}
+	}
+
+	// A message_id repeats only if this exact commit is replayed, which the
+	// offset check prevents; DO NOTHING keeps it harmless anyway.
+	for _, o := range c.Outbox {
 		if _, err := tx.Exec(ctx, `
-			DELETE FROM satellite_fires
-			WHERE occurred_at >= $1 AND NOT (source_ref_id = ANY($2::text[]))`,
-			*c.PruneSince, keep,
+			INSERT INTO satellite_outbox (message_id, subject, payload)
+			VALUES ($1, $2, $3::jsonb)
+			ON CONFLICT (message_id) DO NOTHING`,
+			o.MessageID, o.Subject, string(o.Payload),
 		); err != nil {
-			return fmt.Errorf("prune fires: %w", err)
+			return fmt.Errorf("insert outbox %s: %w", o.MessageID, err)
 		}
 	}
 

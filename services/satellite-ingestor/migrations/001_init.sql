@@ -1,4 +1,4 @@
--- Satellite ingestor schema (M2 P4). Owned by satellite-ingestor only.
+-- Satellite ingestor schema. Owned by satellite-ingestor only.
 -- Applied by the store test and by the service at startup.
 
 -- One row: the durable processing state. next_offset is the resume point
@@ -50,3 +50,27 @@ CREATE TABLE IF NOT EXISTS satellite_fires (
   severity        TEXT NOT NULL CHECK (severity IN ('WASPADA', 'SIAGA', 'AWAS')),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Latest detection time of each fire. The processor reclusters every fire
+-- still active in its window, so it looks fires up by this column.
+ALTER TABLE satellite_fires ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+UPDATE satellite_fires SET last_seen_at = occurred_at WHERE last_seen_at IS NULL;
+ALTER TABLE satellite_fires ALTER COLUMN last_seen_at SET NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_satellite_fires_last_seen
+  ON satellite_fires (last_seen_at);
+
+-- Hazard messages for the aggregator, written in the same transaction as the
+-- fire change and published to JetStream by the relay. message_id is also the
+-- JetStream Nats-Msg-Id, so a publish repeated after a crash is dropped.
+CREATE TABLE IF NOT EXISTS satellite_outbox (
+  id           BIGSERIAL PRIMARY KEY,
+  message_id   TEXT UNIQUE NOT NULL,
+  subject      TEXT NOT NULL,
+  payload      JSONB NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_satellite_outbox_unpublished
+  ON satellite_outbox (id) WHERE published_at IS NULL;

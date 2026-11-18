@@ -16,10 +16,11 @@ const (
 
 // Fire is the summary of one cluster, ready to map to a WILDFIRE HazardEvent.
 type Fire struct {
-	SourceRefID    string    // stable identifier: hash of the earliest detection key
+	SourceRefID    string    // hash of the earliest detection key; the processor keeps it stable as the fire changes
 	CenterLat      float64   // mean latitude of the detections
 	CenterLon      float64   // mean longitude of the detections
 	OccurredAt     time.Time // earliest detection time
+	LastSeenAt     time.Time // latest detection time
 	DetectionCount int
 	Satellites     []string // distinct satellites, sorted
 	MaxConfidence  string   // h > n > l
@@ -30,11 +31,17 @@ type Fire struct {
 
 // Summarize builds the Fire summary for one cluster.
 func Summarize(c Component) Fire {
-	ds := c.Detections
+	// Sum in key order so the floating-point totals do not depend on the
+	// order detections arrived in. A restarted processor must produce the
+	// exact same fire.
+	ds := make([]Detection, len(c.Detections))
+	copy(ds, c.Detections)
+	sort.Slice(ds, func(i, j int) bool { return ds[i].Key() < ds[j].Key() })
 	first := earliest(ds)
 	firstTime, _ := first.Time()
 
 	var sumLat, sumLon, frp float64
+	last := firstTime
 	sats := map[string]bool{}
 	keys := make([]string, 0, len(ds))
 	maxConf := ""
@@ -44,6 +51,9 @@ func Summarize(c Component) Fire {
 		sumLat += lat
 		sumLon += lon
 		frp += d.FRP
+		if t, _ := d.Time(); t.After(last) {
+			last = t
+		}
 		sats[d.Satellite] = true
 		keys = append(keys, d.Key())
 		if rank(d.Confidence) > rank(maxConf) {
@@ -63,6 +73,7 @@ func Summarize(c Component) Fire {
 		CenterLat:      sumLat / float64(len(ds)),
 		CenterLon:      sumLon / float64(len(ds)),
 		OccurredAt:     firstTime,
+		LastSeenAt:     last,
 		DetectionCount: len(ds),
 		Satellites:     satList,
 		MaxConfidence:  maxConf,
@@ -72,7 +83,7 @@ func Summarize(c Component) Fire {
 	}
 }
 
-// SeverityFor applies the M2 rule: AWAS at ≥ 20 detections or ≥ 100 MW total FRP;
+// SeverityFor applies the severity rule: AWAS at ≥ 20 detections or ≥ 100 MW total FRP;
 // SIAGA at ≥ 6 detections or ≥ 30 MW; otherwise WASPADA.
 func SeverityFor(detections int, totalFRPMW float64) string {
 	switch {

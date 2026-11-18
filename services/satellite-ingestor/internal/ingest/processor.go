@@ -1,12 +1,15 @@
 // Package ingest turns satellite feed messages into fire events. Each message
-// is handled in one commit: the detection changes, the recomputed fires, and
-// the next offset are written together, so a restart resumes exactly where
-// the last commit ended.
+// is handled in one commit: the detection changes, the changed fires, the
+// outgoing hazard messages, and the next offset are written together, so a
+// restart resumes exactly where the last commit ended and never loses or
+// repeats a fire change.
 package ingest
 
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"sort"
 	"time"
 
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/feed"
@@ -18,8 +21,9 @@ const (
 	// arrive and still be clustered. Older ones are counted as late.
 	LateWindow = 2 * time.Hour
 
-	// ContextWindow is how far back clustering reads stored detections. Fires
-	// that span more than this are split (a known limit).
+	// ContextWindow is how far back from a detection the processor looks for
+	// neighbours. A stored fire still active inside this window is always
+	// reclustered whole, even if it started earlier.
 	ContextWindow = 24 * time.Hour
 )
 
@@ -52,11 +56,9 @@ type Commit struct {
 	Watermark  time.Time
 	Accepted   *fire.Detection // stored once by key; nil if none
 	Edits      []Edit
-	Fires      []fire.Fire // upserted by SourceRefID
-	// PruneSince deletes stored fires that occur at or after this time and are
-	// not in Fires. Without this, a fire that split or merged would leave a
-	// stale row behind.
-	PruneSince *time.Time
+	Upserts    []fire.Fire // fires that are new or changed
+	Deletes    []string    // source_ref_id of fires that no longer exist
+	Outbox     []Outgoing  // hazard messages describing Upserts and Deletes
 	Counts     Counts
 }
 
@@ -67,6 +69,8 @@ type Store interface {
 	Get(ctx context.Context, key string) (fire.Detection, bool, error)
 	// Window returns stored detections at or after since, excluding low confidence.
 	Window(ctx context.Context, since time.Time) ([]fire.Detection, error)
+	// Fires returns stored fires whose latest detection is at or after since.
+	Fires(ctx context.Context, since time.Time) ([]fire.Fire, error)
 	// Commit applies c atomically.
 	Commit(ctx context.Context, c Commit) error
 }
@@ -95,8 +99,7 @@ func (p *Processor) NextOffset(context.Context) (int64, error) {
 }
 
 // Handle processes one feed message and commits it. Bad rows are counted and
-// skipped, so one bad row cannot stall the feed. Raw rows are not kept yet
-// (DLQ integration is still to do).
+// skipped, so one bad row cannot stall the feed.
 func (p *Processor) Handle(ctx context.Context, msg feed.Message) error {
 	next := msg.Offset + 1
 	switch msg.Type {
@@ -131,23 +134,19 @@ func (p *Processor) handleDetection(ctx context.Context, next int64, raw json.Ra
 		return p.commit(ctx, p.skip(next, Counts{Late: 1}))
 	}
 
-	since := t.Add(-ContextWindow)
-	window, err := p.store.Window(ctx, since)
-	if err != nil {
-		return err // transient: the offset is not advanced, Run retries
-	}
-	wm := p.st.Watermark
-	if t.After(wm) {
-		wm = t
+	c := Commit{NextOffset: next, Watermark: p.st.Watermark}
+	if t.After(c.Watermark) {
+		c.Watermark = t
 	}
 	accepted := d
-	return p.commit(ctx, Commit{
-		NextOffset: next,
-		Watermark:  wm,
-		Accepted:   &accepted,
-		Fires:      clusterFires(append(window, d)), // duplicates are removed by Cluster
-		PruneSince: &since,
-	})
+	c.Accepted = &accepted
+	withNew := func(window []fire.Detection) []fire.Detection {
+		return append(window, d) // Cluster drops the duplicate on a replay
+	}
+	if err := p.reconcile(ctx, &c, t.Add(-ContextWindow), withNew); err != nil {
+		return err // transient: the offset is not advanced, Run retries
+	}
+	return p.commit(ctx, c)
 }
 
 // editPayload is the part of an update event we use. A retract carries only
@@ -190,30 +189,96 @@ func (p *Processor) handleEdit(ctx context.Context, msg feed.Message, next int64
 	if err != nil {
 		return p.commit(ctx, p.skip(next, Counts{Invalid: 1}))
 	}
-	since := t.Add(-ContextWindow)
+	// Recluster with the edited detection in its new state.
+	withEdit := func(window []fire.Detection) []fire.Detection {
+		out := make([]fire.Detection, 0, len(window)+1)
+		for _, w := range window {
+			if w.Key() != e.Key {
+				out = append(out, w)
+			}
+		}
+		if !edit.Retract && !d.IsLowConfidence() {
+			out = append(out, d)
+		}
+		return out
+	}
+	c := Commit{NextOffset: next, Watermark: p.st.Watermark, Edits: []Edit{edit}}
+	if err := p.reconcile(ctx, &c, t.Add(-ContextWindow), withEdit); err != nil {
+		return err
+	}
+	return p.commit(ctx, c)
+}
+
+// reconcile reclusters the detections around one change, keeps fire IDs
+// stable against the stored fires, and fills c with only what changed: fires
+// to upsert, fires to delete, and one hazard message for each. The message
+// version is the feed position, which only grows, so later states always win
+// at the aggregator.
+//
+// The window starts at since, then widens back to the start of every stored
+// fire still active in it, so no fire is ever reclustered from a partial set
+// of its detections. change applies the message's detection change to the
+// window before clustering.
+func (p *Processor) reconcile(ctx context.Context, c *Commit, since time.Time, change func([]fire.Detection) []fire.Detection) error {
+	var stored []fire.Fire
+	for {
+		fs, err := p.store.Fires(ctx, since)
+		if err != nil {
+			return err
+		}
+		stored = fs
+		earliest := since
+		for _, f := range fs {
+			if f.OccurredAt.Before(earliest) {
+				earliest = f.OccurredAt
+			}
+		}
+		if !earliest.Before(since) {
+			break
+		}
+		since = earliest // a widened window can reach more active fires; look again
+	}
 	window, err := p.store.Window(ctx, since)
 	if err != nil {
 		return err
 	}
+	next := assignIDs(clusterFires(change(window)), stored)
+	version := c.NextOffset
 
-	// Recluster the window with the edited detection in its new state.
-	others := make([]fire.Detection, 0, len(window)+1)
-	for _, w := range window {
-		if w.Key() != e.Key {
-			others = append(others, w)
+	old := make(map[string]fire.Fire, len(stored))
+	for _, f := range stored {
+		old[f.SourceRefID] = f
+	}
+	alive := make(map[string]bool, len(next))
+	for _, f := range next {
+		alive[f.SourceRefID] = true
+		if prev, ok := old[f.SourceRefID]; ok && sameFire(prev, f) {
+			continue
+		}
+		out, err := upsertMessage(f, version)
+		if err != nil {
+			return err
+		}
+		c.Upserts = append(c.Upserts, f)
+		c.Outbox = append(c.Outbox, out)
+	}
+
+	var gone []string
+	for id := range old {
+		if !alive[id] {
+			gone = append(gone, id)
 		}
 	}
-	if !edit.Retract && !d.IsLowConfidence() {
-		others = append(others, d)
+	sort.Strings(gone)
+	for _, id := range gone {
+		out, err := deleteMessage(id, version)
+		if err != nil {
+			return err
+		}
+		c.Deletes = append(c.Deletes, id)
+		c.Outbox = append(c.Outbox, out)
 	}
-
-	return p.commit(ctx, Commit{
-		NextOffset: next,
-		Watermark:  p.st.Watermark,
-		Edits:      []Edit{edit},
-		Fires:      clusterFires(others),
-		PruneSince: &since,
-	})
+	return nil
 }
 
 // clusterFires runs the fire rule and summarizes each resulting fire.
@@ -224,6 +289,19 @@ func clusterFires(ds []fire.Detection) []fire.Fire {
 		out = append(out, fire.Summarize(c))
 	}
 	return out
+}
+
+// sameFire reports whether two summaries describe the same fire state.
+func sameFire(a, b fire.Fire) bool {
+	return a.SourceRefID == b.SourceRefID &&
+		a.CenterLat == b.CenterLat && a.CenterLon == b.CenterLon &&
+		a.OccurredAt.Equal(b.OccurredAt) && a.LastSeenAt.Equal(b.LastSeenAt) &&
+		a.DetectionCount == b.DetectionCount &&
+		a.MaxConfidence == b.MaxConfidence &&
+		a.TotalFRPMW == b.TotalFRPMW &&
+		a.Severity == b.Severity &&
+		slices.Equal(a.Satellites, b.Satellites) &&
+		slices.Equal(a.DetectionKeys, b.DetectionKeys)
 }
 
 func (p *Processor) commit(ctx context.Context, c Commit) error {

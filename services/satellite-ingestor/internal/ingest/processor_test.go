@@ -12,9 +12,10 @@ import (
 
 // memStore is an in-memory Store. Commit applies every part of a Commit at once.
 type memStore struct {
-	st    State
-	dets  map[string]fire.Detection
-	fires map[string]fire.Fire
+	st     State
+	dets   map[string]fire.Detection
+	fires  map[string]fire.Fire
+	outbox []Outgoing
 }
 
 func newMemStore() *memStore {
@@ -42,6 +43,16 @@ func (m *memStore) Window(_ context.Context, since time.Time) ([]fire.Detection,
 	return out, nil
 }
 
+func (m *memStore) Fires(_ context.Context, since time.Time) ([]fire.Fire, error) {
+	var out []fire.Fire
+	for _, f := range m.fires {
+		if !f.LastSeenAt.Before(since) {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
 func (m *memStore) Commit(_ context.Context, c Commit) error {
 	for _, e := range c.Edits {
 		d, ok := m.dets[e.Key]
@@ -64,18 +75,13 @@ func (m *memStore) Commit(_ context.Context, c Commit) error {
 		m.dets[c.Accepted.Key()] = *c.Accepted
 	}
 
-	keep := map[string]bool{}
-	for _, f := range c.Fires {
+	for _, id := range c.Deletes {
+		delete(m.fires, id)
+	}
+	for _, f := range c.Upserts {
 		m.fires[f.SourceRefID] = f
-		keep[f.SourceRefID] = true
 	}
-	if c.PruneSince != nil {
-		for id, f := range m.fires {
-			if !f.OccurredAt.Before(*c.PruneSince) && !keep[id] {
-				delete(m.fires, id)
-			}
-		}
-	}
+	m.outbox = append(m.outbox, c.Outbox...)
 
 	m.st.NextOffset = c.NextOffset
 	m.st.Watermark = c.Watermark
