@@ -35,6 +35,7 @@ type CanonicalRepo interface {
 	ComputeChecksum(ctx context.Context, source string) (audit.Checksum, error)
 	LocateEvent(ctx context.Context, hazardID string) (audit.LocationResponse, error)
 	GetDistribution(ctx context.Context) (DistributionReport, error)
+	GetAnalyticsSummary(ctx context.Context, filter AnalyticsFilter) (AnalyticsSummary, error)
 	GetVolcanoReferences(ctx context.Context) (map[string]VolcanoReference, error)
 	GetLatestEventTime(ctx context.Context, source string) (time.Time, error)
 	GetPollerWatermark(ctx context.Context, source string) (time.Time, error)

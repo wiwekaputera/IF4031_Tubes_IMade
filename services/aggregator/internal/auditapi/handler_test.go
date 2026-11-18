@@ -77,6 +77,10 @@ func (f *fakeAuditRepo) GetDistribution(_ context.Context) (store.DistributionRe
 	return store.DistributionReport{}, nil
 }
 
+func (f *fakeAuditRepo) GetAnalyticsSummary(_ context.Context, _ store.AnalyticsFilter) (store.AnalyticsSummary, error) {
+	return store.AnalyticsSummary{}, nil
+}
+
 func (f *fakeAuditRepo) ListUnprocessed(_ context.Context, filter store.UnprocessedFilter) (audit.UnprocessedPage, error) {
 	f.lastUnprocessedFilter = filter
 	return f.unprocessedPage, f.unprocessedErr

@@ -100,6 +100,9 @@ func (f *fakeRepo) LocateEvent(context.Context, string) (audit.LocationResponse,
 func (f *fakeRepo) GetDistribution(context.Context) (store.DistributionReport, error) {
 	return store.DistributionReport{}, nil
 }
+func (f *fakeRepo) GetAnalyticsSummary(context.Context, store.AnalyticsFilter) (store.AnalyticsSummary, error) {
+	return store.AnalyticsSummary{}, nil
+}
 
 func fastBMKGServer(t *testing.T, called *atomic.Int32) *httptest.Server {
 	mux := http.NewServeMux()

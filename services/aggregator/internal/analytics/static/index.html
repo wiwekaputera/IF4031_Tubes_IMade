@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Analytics Dashboard | BNPB Disaster Coordination</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./chart.umd.min.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a href="#main-content" class="skip-link visually-hidden">Lewati ke konten utama</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <div>
+        <h1>BNPB Hazard Analytics</h1>
+        <p class="subtitle">Agregasi seluruh HazardEvent lintas shard penyimpanan</p>
+      </div>
+      <div class="meta-status" aria-live="polite">
+        <span id="window-badge" class="badge">Rentang: —</span>
+        <span id="generated-badge" class="badge">Diperbarui: —</span>
+      </div>
+    </div>
+  </header>
+
+  <main id="main-content" class="container">
+    <section aria-label="Filter dan kontrol">
+      <form id="filter-form" class="toolbar" onsubmit="return false;">
+        <div class="control-group" role="group" aria-label="Preset rentang waktu">
+          <button type="button" class="preset-btn" data-range="24h" aria-pressed="false">24j</button>
+          <button type="button" class="preset-btn is-active" data-range="7d" aria-pressed="true">7h</button>
+          <button type="button" class="preset-btn" data-range="30d" aria-pressed="false">30h</button>
+          <button type="button" class="preset-btn" data-range="all" aria-pressed="false">Semua</button>
+        </div>
+
+        <div class="control-group">
+          <label for="from-input">Dari</label>
+          <input id="from-input" type="datetime-local">
+        </div>
+
+        <div class="control-group">
+          <label for="to-input">Sampai</label>
+          <input id="to-input" type="datetime-local">
+        </div>
+
+        <div class="control-group">
+          <label for="bucket-select">Interval</label>
+          <select id="bucket-select">
+            <option value="auto" selected>Otomatis</option>
+            <option value="hour">Per Jam (hour)</option>
+            <option value="day">Per Hari (day)</option>
+          </select>
+        </div>
+
+        <div class="control-group actions">
+          <button type="button" id="apply-btn" class="primary-btn">Terapkan</button>
+          <button type="button" id="refresh-btn">Muat ulang</button>
+          <label class="toggle-label" for="auto-refresh">
+            <input id="auto-refresh" type="checkbox">
+            Auto-refresh (10 dtk)
+          </label>
+        </div>
+      </form>
+    </section>
+
+    <div id="partial-banner" class="partial-banner" role="alert" hidden>
+      <strong>Peringatan Data Parsial:</strong>
+      <span id="partial-message">Data belum lengkap — unit tidak terjangkau: </span>
+    </div>
+
+    <div id="error-banner" class="error-banner" role="alert" hidden>
+      <span id="error-message">Gagal memuat data analitik.</span>
+    </div>
+
+    <section aria-labelledby="kpi-heading" class="kpi-section">
+      <h2 id="kpi-heading" class="visually-hidden">Ringkasan Total</h2>
+      <div class="kpi-grid">
+        <article class="kpi-card kpi-total" id="card-total">
+          <span class="kpi-label">Total Kejadian</span>
+          <strong class="kpi-value" id="val-total">—</strong>
+        </article>
+        <article class="kpi-card" id="card-SEISMIC">
+          <span class="kpi-label">SEISMIC</span>
+          <strong class="kpi-value" id="val-SEISMIC">—</strong>
+        </article>
+        <article class="kpi-card" id="card-TSUNAMI">
+          <span class="kpi-label">TSUNAMI</span>
+          <strong class="kpi-value" id="val-TSUNAMI">—</strong>
+        </article>
+        <article class="kpi-card" id="card-VOLCANIC">
+          <span class="kpi-label">VOLCANIC</span>
+          <strong class="kpi-value" id="val-VOLCANIC">—</strong>
+        </article>
+        <article class="kpi-card" id="card-WILDFIRE">
+          <span class="kpi-label">WILDFIRE</span>
+          <strong class="kpi-value" id="val-WILDFIRE">—</strong>
+        </article>
+        <article class="kpi-card" id="card-COASTAL">
+          <span class="kpi-label">COASTAL</span>
+          <strong class="kpi-value" id="val-COASTAL">—</strong>
+        </article>
+      </div>
+    </section>
+
+    <section class="charts-grid" aria-label="Visualisasi data">
+      <article class="panel panel-wide">
+        <div class="panel-header">
+          <h2>Tren Kejadian per Kategori Bencana</h2>
+          <span id="bucket-badge" class="badge">Bucket: —</span>
+        </div>
+        <div class="chart-box">
+          <canvas id="series-chart" aria-label="Grafik garis jumlah kejadian per kategori bencana dari waktu ke waktu"></canvas>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-header">
+          <h2>Distribusi Tingkat Keparahan (Severity)</h2>
+        </div>
+        <div class="chart-box">
+          <canvas id="severity-chart" aria-label="Grafik jumlah kejadian per tingkat keparahan"></canvas>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-header">
+          <h2>Wilayah Terdampak Teratas</h2>
+        </div>
+        <div tabindex="0" role="region" aria-labelledby="areas-caption" class="table-wrapper">
+          <table>
+            <caption id="areas-caption" class="visually-hidden">Daftar wilayah dengan jumlah kejadian terbanyak</caption>
+            <thead>
+              <tr>
+                <th scope="col">#</th>
+                <th scope="col">Wilayah (area_name)</th>
+                <th scope="col" class="num-col">Jumlah</th>
+              </tr>
+            </thead>
+            <tbody id="areas-tbody">
+              <tr><td colspan="3">Memuat data…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>
+      <strong>Catatan kategorisasi:</strong>
+      Kejadian <code>SEISMIC</code> yang memiliki atribut <code>tsunami_warning</code> dihitung sebagai kategori
+      <code>TSUNAMI</code> dan tidak dihitung ulang di <code>SEISMIC</code>, sehingga jumlah kelima kategori sama dengan
+      <code>total</code> dan konsisten dengan Audit API.
+    </p>
+  </footer>
+</body>
+</html>

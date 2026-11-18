@@ -23,8 +23,11 @@ type fakeQueryRepo struct {
 	partial          bool
 	unavailableUnits []string
 	nextCursor       *string
-	leaseInfo        store.LeaseInfo
-	leaseErr         error
+	leaseInfo           store.LeaseInfo
+	leaseErr            error
+	lastAnalyticsFilter store.AnalyticsFilter
+	analyticsResp       store.AnalyticsSummary
+	analyticsErr        error
 }
 
 func (f *fakeQueryRepo) HealthCheck(context.Context) error                                     { return nil }
@@ -60,6 +63,12 @@ func (f *fakeQueryRepo) LocateEvent(context.Context, string) (audit.LocationResp
 }
 func (f *fakeQueryRepo) GetDistribution(context.Context) (store.DistributionReport, error) {
 	return store.DistributionReport{}, nil
+}
+func (f *fakeQueryRepo) GetAnalyticsSummary(_ context.Context, filter store.AnalyticsFilter) (store.AnalyticsSummary, error) {
+	f.mu.Lock()
+	f.lastAnalyticsFilter = filter
+	f.mu.Unlock()
+	return f.analyticsResp, f.analyticsErr
 }
 func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) ([]hazard.HazardEvent, error) {
 	res, err := f.ListEvents(context.Background(), store.ListFilter{

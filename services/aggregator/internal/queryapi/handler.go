@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/analytics"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/auditapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
@@ -222,6 +223,8 @@ func Routes(h *Handler, auditHandlers ...*auditapi.Handler) http.Handler {
 	mux.HandleFunc("/internal/ready", h.Ready)
 	mux.HandleFunc("/internal/leader", h.Leader)
 	mux.HandleFunc("/internal/events", h.GetEvents)
+	mux.HandleFunc("/internal/analytics/summary", h.GetAnalyticsSummary)
+	analytics.New().RegisterRoutes(mux)
 	for _, ah := range auditHandlers {
 		if ah != nil {
 			ah.RegisterRoutes(mux)

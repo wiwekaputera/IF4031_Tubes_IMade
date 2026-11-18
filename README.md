@@ -504,4 +504,27 @@ The aggregator image ships a `/loader` binary (`services/aggregator/cmd/loader`)
    bash scripts/p1/distribution.sh
    ```
 
+---
+
+## Analytics Dashboard
+
+The aggregator embeds a standalone analytics dashboard (Chart.js vendored locally, no external CDN requests) and exposes a scatter-gather summary endpoint:
+
+- **Dashboard UI**: `GET /analytics/` (`/analytics` redirects to `/analytics/`)
+  - Docker Compose / local: `http://localhost:8090/analytics/` (when port `8090` is exposed or port-forwarded)
+  - Kubernetes:
+    ```bash
+    kubectl port-forward -n sistem-informasi-kebencanaan-bnpb svc/aggregator 8090:8090
+    # Open http://localhost:8090/analytics/
+    ```
+- **Summary API**: `GET /internal/analytics/summary`
+  - Query params: `from`, `to` (ISO 8601, filter on `occurred_at`; defaults to last 7 days), `range` (`24h`, `7d`, `30d`, `all`), `bucket` (`hour` | `day`, auto-selected from range), `top_areas` (default `20`, max `100`).
+  - **Category mapping**: `SEISMIC` events with a non-null `attributes.tsunami_warning` are counted under `TSUNAMI` (and not double-counted in `SEISMIC`), so the sum across `SEISMIC`, `TSUNAMI`, `VOLCANIC`, `WILDFIRE`, and `COASTAL` equals `total` and matches the Audit API row count.
+  - **Partial availability**: If any shard times out or is unreachable, the API still returns HTTP `200` with `partial: true` and `unavailable_units`, and the dashboard displays a warning banner (`Data belum lengkap — unit tidak terjangkau: ...`) and prefixes counts with `≥`.
+- **Consistency check** (compares `/internal/analytics/summary` totals against `/internal/audit/events` for the same window):
+  ```bash
+  bash scripts/p1/dashboard-vs-audit.sh
+  ```
+
+
 
