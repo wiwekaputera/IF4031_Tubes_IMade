@@ -323,6 +323,7 @@ Every service validates its configuration at startup (fail-fast):
 | `AGGREGATOR_DB_DSN` | `postgres://aggregator:…@canonical-store:5432/canonical` | `aggregator` | Canonical store connection string |
 | `AGGREGATOR_NATS_URL` | `nats://nats-jetstream:4222` | `aggregator` | Broker URL for the outbox relay |
 | `AGGREGATOR_PORT` | `8090` | `aggregator` | Internal query API port |
+| `AGGREGATOR_AUDIT_TOKEN` | `change-me-audit-token` | `aggregator` | Bearer token required by `/internal/audit/*` endpoints |
 | `INSTANCE_ID` | *(hostname)* | `aggregator` | Instance identifier sent in `X-Instance-ID` to upstream agencies |
 | `AGGREGATOR_LEASE_TTL_S` | `15` | `aggregator` | Leader lease TTL in seconds (must be > 2× renew interval) |
 | `AGGREGATOR_LEASE_RENEW_INTERVAL_S` | `5` | `aggregator` | Leader lease renewal interval in seconds |
@@ -409,3 +410,38 @@ Delete (`hazard.ingest.SATELIT`):
   "trace_id": "corr-sat-124"
 }
 ```
+
+---
+
+## Audit API
+
+The aggregator exposes internal audit endpoints under `/internal/audit/*` for data completeness, checksum verification, and replica placement inspection.
+
+Every request requires `Authorization: Bearer <AUDIT_TOKEN>` (configured via `AGGREGATOR_AUDIT_TOKEN`). Missing or invalid tokens return HTTP `401` with `{"error":{"code":"unauthorized","message":"token tidak valid"}}`.
+
+### Endpoints
+
+1. **`GET /internal/audit/events`** — Paginated list of non-deleted `HazardEvent` records ordered by `(ingested_at ASC, hazard_id ASC)`:
+   - Query params: `source` (optional: `BMKG`, `PVMBG`, `SATELIT`, `SENSOR_PANTAI`), `since` (optional ISO 8601 UTC, filters `ingested_at >= since`), `limit` (optional, default `100`, max `1000`), `cursor` (optional opaque keyset cursor from `next_cursor`).
+   ```bash
+   curl -s -H "Authorization: Bearer $AGGREGATOR_AUDIT_TOKEN" \
+     "http://localhost:8090/internal/audit/events?source=BMKG&limit=5" | jq
+   ```
+
+2. **`GET /internal/audit/checksum`** — SHA-256 digest of all non-deleted `source_ref_id` values sorted in byte order and joined with `\n` (no trailing newline):
+   - Query param: `source` (optional). When `source` is provided, only that source is included; when `source` is omitted, all sources are included and `"source"` in the response is `null`.
+   ```bash
+   curl -s -H "Authorization: Bearer $AGGREGATOR_AUDIT_TOKEN" \
+     "http://localhost:8090/internal/audit/checksum?source=BMKG" | jq
+
+   # Independent verification against CockroachDB:
+   AUDIT_TOKEN="$AGGREGATOR_AUDIT_TOKEN" bash scripts/audit/checksum-check.sh BMKG
+   ```
+
+3. **`GET /internal/audit/location`** — CockroachDB range leaseholder (`role: "primary"`, `unit: "shard-N"`) and replica (`role: "replica"`, `unit: "shard-N-r1"`, …) placement by Kubernetes/container node locality:
+   - Query param: `hazard_id` (required). Returns `404` (`not_found`) if the event does not exist or is soft-deleted.
+   ```bash
+   curl -s -H "Authorization: Bearer $AGGREGATOR_AUDIT_TOKEN" \
+     "http://localhost:8090/internal/audit/location?hazard_id=hz-7f3a91" | jq
+   ```
+

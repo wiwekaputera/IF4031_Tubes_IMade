@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/auditapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
@@ -215,12 +216,17 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, resp)
 }
 
-func Routes(h *Handler) http.Handler {
+func Routes(h *Handler, auditHandlers ...*auditapi.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/internal/health", h.Health)
 	mux.HandleFunc("/internal/ready", h.Ready)
 	mux.HandleFunc("/internal/leader", h.Leader)
 	mux.HandleFunc("/internal/events", h.GetEvents)
+	for _, ah := range auditHandlers {
+		if ah != nil {
+			ah.RegisterRoutes(mux)
+		}
+	}
 
 	var handler http.Handler = mux
 	handler = LoggingMiddleware(h.logger, handler)

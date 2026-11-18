@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/auditapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/ingest"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/lease"
@@ -145,6 +146,7 @@ func main() {
 
 	h := queryapi.New(repo, logger, healthFn).WithInstanceID(cfg.InstanceID)
 	h.SetReady(true)
+	auditH := auditapi.New(repo, cfg.AuditToken, logger)
 
 	// 7. Start leader election, background polling loop, transactional outbox relay, and ingest consumer.
 	var wg sync.WaitGroup
@@ -171,7 +173,7 @@ func main() {
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
 	}
-	httpServer := queryapi.Server(queryapi.Routes(h), addr)
+	httpServer := queryapi.Server(queryapi.Routes(h, auditH), addr)
 
 	serverErrChan := make(chan error, 1)
 	go func() {

@@ -15,6 +15,7 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/audit"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
@@ -83,6 +84,15 @@ func (f *fakeRepo) GetPollerWatermark(_ context.Context, source string) (time.Ti
 }
 func (f *fakeRepo) GetLease(context.Context, string) (store.LeaseInfo, error) {
 	return store.LeaseInfo{}, nil
+}
+func (f *fakeRepo) ListAuditEvents(context.Context, store.AuditEventsFilter) (audit.EventsPage, error) {
+	return audit.EventsPage{}, nil
+}
+func (f *fakeRepo) ComputeChecksum(context.Context, string) (audit.Checksum, error) {
+	return audit.Checksum{}, nil
+}
+func (f *fakeRepo) LocateEvent(context.Context, string) (audit.LocationResponse, error) {
+	return audit.LocationResponse{}, nil
 }
 
 func fastBMKGServer(t *testing.T, called *atomic.Int32) *httptest.Server {

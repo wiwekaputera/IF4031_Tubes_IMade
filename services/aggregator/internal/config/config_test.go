@@ -10,6 +10,7 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("BMKG_API_KEY", "k")
 	t.Setenv("PVMBG_BEARER_TOKEN", "t")
 	t.Setenv("DB_DSN", "postgresql://root@localhost:26257/canonical?sslmode=disable")
+	t.Setenv("AUDIT_TOKEN", "audit-secret")
 }
 
 func TestLoad_LeaseDefaults(t *testing.T) {
@@ -35,5 +36,13 @@ func TestLoad_RejectsLeaseTTLNotGreaterThanTwiceRenew(t *testing.T) {
 	t.Setenv("LEASE_RENEW_INTERVAL_S", "5")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error when LEASE_TTL_S <= 2*LEASE_RENEW_INTERVAL_S")
+	}
+}
+
+func TestLoad_RequiresAuditToken(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("AUDIT_TOKEN", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when AUDIT_TOKEN is missing")
 	}
 }

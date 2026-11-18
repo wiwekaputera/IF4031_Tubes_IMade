@@ -25,22 +25,65 @@ type EventsPage struct {
 	UnavailableUnits []string             `json:"unavailable_units"`
 }
 
-// MarshalJSON ensures Items and UnavailableUnits serialize as [] rather than null.
+// auditEventJSON mirrors hazard.HazardEvent without omitempty on attributes
+// so that Audit API responses always include "attributes": {} when empty.
+type auditEventJSON struct {
+	HazardID    string                 `json:"hazard_id"`
+	Source      hazard.Source          `json:"source"`
+	HazardType  hazard.HazardType      `json:"hazard_type"`
+	Severity    hazard.Severity        `json:"severity"`
+	AreaName    string                 `json:"area_name"`
+	OccurredAt  string                 `json:"occurred_at"`
+	IngestedAt  string                 `json:"ingested_at"`
+	SourceRefID string                 `json:"source_ref_id,omitempty"`
+	Latitude    float64                `json:"latitude"`
+	Longitude   float64                `json:"longitude"`
+	Attributes  map[string]interface{} `json:"attributes"`
+}
+
+// MarshalJSON ensures Items and UnavailableUnits serialize as [] rather than null,
+// and each item's Attributes serializes as {} rather than being omitted.
 func (p EventsPage) MarshalJSON() ([]byte, error) {
-	type alias EventsPage
-	a := alias(p)
-	if a.Items == nil {
-		a.Items = []hazard.HazardEvent{}
+	items := make([]auditEventJSON, len(p.Items))
+	for i, ev := range p.Items {
+		attrs := ev.Attributes
+		if attrs == nil {
+			attrs = map[string]interface{}{}
+		}
+		items[i] = auditEventJSON{
+			HazardID:    ev.HazardID,
+			Source:      ev.Source,
+			HazardType:  ev.HazardType,
+			Severity:    ev.Severity,
+			AreaName:    ev.AreaName,
+			OccurredAt:  ev.OccurredAt,
+			IngestedAt:  ev.IngestedAt,
+			SourceRefID: ev.SourceRefID,
+			Latitude:    ev.Latitude,
+			Longitude:   ev.Longitude,
+			Attributes:  attrs,
+		}
 	}
-	if a.UnavailableUnits == nil {
-		a.UnavailableUnits = []string{}
+	unavail := p.UnavailableUnits
+	if unavail == nil {
+		unavail = []string{}
 	}
-	return json.Marshal(a)
+	return json.Marshal(struct {
+		Items            []auditEventJSON `json:"items"`
+		NextCursor       *string          `json:"next_cursor"`
+		Partial          bool             `json:"partial"`
+		UnavailableUnits []string         `json:"unavailable_units"`
+	}{
+		Items:            items,
+		NextCursor:       p.NextCursor,
+		Partial:          p.Partial,
+		UnavailableUnits: unavail,
+	})
 }
 
 // Checksum is the response for GET /internal/audit/checksum.
 type Checksum struct {
-	Source           string   `json:"source"`
+	Source           *string  `json:"source"`
 	Count            int64    `json:"count"`
 	Checksum         string   `json:"checksum"`
 	Algorithm        string   `json:"algorithm"`

@@ -22,6 +22,7 @@ type Config struct {
 	PVMBGCbProbeInterval time.Duration
 	PollInterval         time.Duration
 	DBDSN                string
+	AuditToken           string
 	NATSURL              string
 	OutboxPollInterval   time.Duration
 	OutboxBatchSize      int
@@ -46,6 +47,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	dbDSN, err := requireEnv("DB_DSN")
+	if err != nil {
+		return nil, err
+	}
+	auditToken, err := requireEnv("AUDIT_TOKEN")
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +120,7 @@ func Load() (*Config, error) {
 		PVMBGCbProbeInterval: time.Duration(cbProbeIntervalS) * time.Second,
 		PollInterval:         time.Duration(pollIntervalS) * time.Second,
 		DBDSN:                dbDSN,
+		AuditToken:           auditToken,
 		NATSURL:              getEnv("NATS_URL", "nats://nats-jetstream:4222"),
 		OutboxPollInterval:   time.Duration(outboxPollIntervalMs) * time.Millisecond,
 		OutboxBatchSize:      outboxBatchSize,

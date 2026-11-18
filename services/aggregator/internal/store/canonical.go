@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/audit"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
@@ -29,6 +30,9 @@ type CanonicalRepo interface {
 	UpsertFencedBatch(ctx context.Context, fence Fence, source string, watermark time.Time, recs []UpsertRequest) error
 	GetEvents(ctx context.Context, filter EventFilter) ([]hazard.HazardEvent, error)
 	ListEvents(ctx context.Context, filter ListFilter) (ListResult, error)
+	ListAuditEvents(ctx context.Context, filter AuditEventsFilter) (audit.EventsPage, error)
+	ComputeChecksum(ctx context.Context, source string) (audit.Checksum, error)
+	LocateEvent(ctx context.Context, hazardID string) (audit.LocationResponse, error)
 	GetVolcanoReferences(ctx context.Context) (map[string]VolcanoReference, error)
 	GetLatestEventTime(ctx context.Context, source string) (time.Time, error)
 	GetPollerWatermark(ctx context.Context, source string) (time.Time, error)

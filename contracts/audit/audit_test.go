@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
 func TestEmptySlicesMarshalAsEmptyArrays(t *testing.T) {
@@ -19,12 +21,25 @@ func TestEmptySlicesMarshalAsEmptyArrays(t *testing.T) {
 		t.Errorf("EventsPage{} missing \"unavailable_units\":[]: %s", s)
 	}
 
+	epWithItem, err := json.Marshal(EventsPage{
+		Items: []hazard.HazardEvent{{HazardID: "hz-1"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal EventsPage with item: %v", err)
+	}
+	if !strings.Contains(string(epWithItem), `"attributes":{}`) {
+		t.Errorf("EventsPage item missing \"attributes\":{}: %s", string(epWithItem))
+	}
+
 	cs, err := json.Marshal(Checksum{})
 	if err != nil {
 		t.Fatalf("marshal Checksum: %v", err)
 	}
 	if !strings.Contains(string(cs), `"unavailable_units":[]`) {
 		t.Errorf("Checksum{} missing \"unavailable_units\":[]: %s", string(cs))
+	}
+	if !strings.Contains(string(cs), `"source":null`) {
+		t.Errorf("Checksum{} missing \"source\":null: %s", string(cs))
 	}
 
 	lr, err := json.Marshal(LocationResponse{})

@@ -11,6 +11,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/audit"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
@@ -44,6 +45,15 @@ func (f *fakeQueryRepo) GetLease(context.Context, string) (store.LeaseInfo, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.leaseInfo, f.leaseErr
+}
+func (f *fakeQueryRepo) ListAuditEvents(context.Context, store.AuditEventsFilter) (audit.EventsPage, error) {
+	return audit.EventsPage{}, nil
+}
+func (f *fakeQueryRepo) ComputeChecksum(context.Context, string) (audit.Checksum, error) {
+	return audit.Checksum{}, nil
+}
+func (f *fakeQueryRepo) LocateEvent(context.Context, string) (audit.LocationResponse, error) {
+	return audit.LocationResponse{}, nil
 }
 func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) ([]hazard.HazardEvent, error) {
 	res, err := f.ListEvents(context.Background(), store.ListFilter{
