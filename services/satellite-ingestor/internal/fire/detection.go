@@ -1,5 +1,5 @@
-// Package fire turns VIIRS hotspot detections from the satellite feed into fires
-// (M2 P4). It is pure Go with no I/O so the Definisi Kebakaran rules can be tested directly.
+// Package fire turns VIIRS hotspot detections from the satellite feed into fires.
+// It is pure Go with no I/O so the fire rules can be tested directly.
 package fire
 
 import (

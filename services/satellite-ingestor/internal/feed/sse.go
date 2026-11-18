@@ -1,4 +1,4 @@
-// Package feed reads the satellite fire feed (Spesifikasi M2, P4) over
+// Package feed reads the satellite fire feed over
 // Server-Sent Events and resumes from a durable offset after restarts.
 package feed
 

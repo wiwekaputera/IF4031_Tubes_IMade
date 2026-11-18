@@ -1,4 +1,4 @@
-// Package dlq retries transient failures and replays parked messages (M2 T3.3, T3.5).
+// Package dlq retries transient failures and replays parked messages.
 // It depends only on the standard library so the policy can be tested in isolation.
 package dlq
 
@@ -105,7 +105,7 @@ func RunRetries(ctx context.Context, s Store, h Handler, now time.Time, limit in
 	return res, nil
 }
 
-// Replay reprocesses parked messages after the normalizer has been fixed (T3.5).
+// Replay reprocesses parked messages after the normalizer has been fixed.
 // Rows are handled oldest first. Once one row for a source_ref_id fails, later rows
 // for that same key are left parked, so per-key order is preserved.
 func Replay(ctx context.Context, s Store, h Handler, limit int) (Result, error) {

@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
   ON outbox (id) WHERE published_at IS NULL;
 
 -- ============================================================
--- Dead-letter queue (M2 T3.3)
+-- Dead-letter queue
 -- Holds the raw message exactly as received. status = 'retrying' (transient
 -- error, retried with backoff) or 'parked' (permanent schema/format error,
 -- only replay after the normalizer is updated).

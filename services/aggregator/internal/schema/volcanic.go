@@ -1,10 +1,10 @@
 // Package schema decides whether an incoming agency message is safe to accept.
 //
-// Policy (M2 T3.2):
+// Policy:
 //   - Accepted: unknown extra fields (stored as attributes), missing optional fields.
 //   - Rejected (permanent, parked in the DLQ): missing required fields (renames
 //     look like this), type changes such as number -> string, malformed JSON,
-//     invalid UTF-8, oversized bodies, and excessively nested bodies (T3.4).
+//     invalid UTF-8, oversized bodies, and excessively nested bodies.
 package schema
 
 import (
@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	// MaxBodyBytes caps a single agency message (T3.4).
+	// MaxBodyBytes caps a single agency message.
 	MaxBodyBytes = 1 << 20
-	// MaxDepth caps JSON nesting to protect the decoder (T3.4).
+	// MaxDepth caps JSON nesting to protect the decoder.
 	MaxDepth = 32
 )
 
