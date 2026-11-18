@@ -42,6 +42,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/internal/audit/checksum", h.requireAuth(h.Checksum))
 	mux.HandleFunc("/internal/audit/location", h.requireAuth(h.Location))
 	mux.HandleFunc("/internal/audit/unprocessed", h.requireAuth(h.Unprocessed))
+	mux.HandleFunc("/internal/admin/distribution", h.requireAuth(h.Distribution))
 }
 
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -229,4 +230,22 @@ func (h *Handler) Unprocessed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, page)
+}
+
+// Distribution handles GET /internal/admin/distribution.
+func (h *Handler) Distribution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := store.WithCorrelationID(r.Context(), r.Header.Get("X-Correlation-ID"))
+	report, err := h.repo.GetDistribution(ctx)
+	if err != nil {
+		h.logger.Error().Err(err).Msg("failed to get distribution report")
+		h.writeError(w, http.StatusInternalServerError, "internal_error", "gagal mengambil laporan distribusi")
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, report)
 }

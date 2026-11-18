@@ -58,6 +58,9 @@ func (f *fakeQueryRepo) ComputeChecksum(context.Context, string) (audit.Checksum
 func (f *fakeQueryRepo) LocateEvent(context.Context, string) (audit.LocationResponse, error) {
 	return audit.LocationResponse{}, nil
 }
+func (f *fakeQueryRepo) GetDistribution(context.Context) (store.DistributionReport, error) {
+	return store.DistributionReport{}, nil
+}
 func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) ([]hazard.HazardEvent, error) {
 	res, err := f.ListEvents(context.Background(), store.ListFilter{
 		HazardType: filter.HazardType,

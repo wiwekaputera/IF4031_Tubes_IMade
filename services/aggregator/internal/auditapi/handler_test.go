@@ -73,6 +73,10 @@ func (f *fakeAuditRepo) LocateEvent(_ context.Context, hazardID string) (audit.L
 	return f.locationResp, f.locationErr
 }
 
+func (f *fakeAuditRepo) GetDistribution(_ context.Context) (store.DistributionReport, error) {
+	return store.DistributionReport{}, nil
+}
+
 func (f *fakeAuditRepo) ListUnprocessed(_ context.Context, filter store.UnprocessedFilter) (audit.UnprocessedPage, error) {
 	f.lastUnprocessedFilter = filter
 	return f.unprocessedPage, f.unprocessedErr
@@ -382,6 +386,31 @@ func TestAuditUnprocessed(t *testing.T) {
 		var eb audit.ErrorBody
 		if err := json.Unmarshal(rec.Body.Bytes(), &eb); err != nil || eb.Error.Code != "service_unavailable" {
 			t.Fatalf("expected service_unavailable ErrorBody, got %s", rec.Body.String())
+		}
+	})
+}
+
+func TestDistributionEndpoint(t *testing.T) {
+	repo := &fakeAuditRepo{}
+	mux := http.NewServeMux()
+	New(repo, "secret-audit-token", zerolog.Nop()).RegisterRoutes(mux)
+
+	t.Run("unauthorized", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/admin/distribution", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+	})
+
+	t.Run("ok", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/admin/distribution", nil)
+		req.Header.Set("Authorization", "Bearer secret-audit-token")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
 		}
 	})
 }

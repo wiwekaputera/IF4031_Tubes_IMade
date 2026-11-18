@@ -455,3 +455,53 @@ Every request requires `Authorization: Bearer <AUDIT_TOKEN>` (configured via `AG
 
    **DLQ table contract (`dead_letters`)**: defined in `services/canonical-store/migrations/001_init.sql` (`id BIGSERIAL PRIMARY KEY`, `source`, `source_ref_id`, `raw_payload BYTES`, `reason`, `retryable BOOL`, `attempts INT4`, `status IN ('retrying', 'parked', 'resolved')`, `received_at TIMESTAMPTZ`, `next_attempt_at TIMESTAMPTZ`, `last_error`). Poison messages terminated by the JetStream ingest consumer are also recorded here with `status='parked'` and `retryable=false`.
 
+---
+
+## P1 — Loading the Historical Catalog & Data Distribution
+
+The aggregator image ships a `/loader` binary (`services/aggregator/cmd/loader`) for idempotent bulk loading of historical earthquake catalogs (CSV, JSON, or NDJSON) into CockroachDB.
+
+### Key Behavior
+- **Deterministic IDs & Idempotency**: Computes `hazard_id = hazard.ID("BMKG", source_ref_id)` and inserts in batches (`INSERT ... ON CONFLICT (shard, hazard_id) DO NOTHING`) with CockroachDB `40001` retry. Re-running on the same file loads `0` new rows.
+- **No Outbox Spam by Default**: Historical events do **not** write `outbox` rows unless `--with-outbox` is passed, so bulk loading does not flood downstream notifications.
+- **Column Auto-Detection & Mapping**: Auto-detects USGS (`time,latitude,longitude,depth,mag,place,id`) and BMKG (`tgl,ot,lat,lon,depth,mag,remark`) headers, or accepts explicit `--col-id`, `--col-time`, `--col-lat`, `--col-lon`, `--col-depth`, `--col-mag`, `--col-region`, and `--time-layout` flags. If no ID column exists, falls back to `"hist-" + sha256(raw_row)[:16]`.
+- **Resilient Parsing**: Invalid rows are counted and logged (first 20 with reason) without aborting the load.
+
+### Commands
+
+1. **Generate a skewed 50,000-row sample catalog** (80% in Sulawesi Tengah):
+   ```bash
+   python3 scripts/p1/gen-sample-catalog.py --rows 50000 --out /tmp/sample-catalog-50k.csv
+   ```
+
+2. **Dry-run validation** (parses and validates without writing to the database):
+   ```bash
+   docker compose run --rm --entrypoint /loader \
+     -v /tmp/sample-catalog-50k.csv:/data/catalog.csv:ro \
+     aggregator --file /data/catalog.csv --dry-run
+   ```
+
+3. **Load into CockroachDB** (and optionally sample per-node write metrics in another terminal):
+   ```bash
+   # Terminal 1: sample per-node CRDB write QPS & range counts every 2s
+   bash scripts/p1/load-metrics.sh 30 data/p1-load-metrics.csv
+
+   # Terminal 2: bulk load
+   docker compose run --rm --entrypoint /loader \
+     -v /tmp/sample-catalog-50k.csv:/data/catalog.csv:ro \
+     aggregator --file /data/catalog.csv --concurrency 4 --batch-size 500
+   ```
+
+4. **Verify idempotency** (re-run loads `0` new rows):
+   ```bash
+   docker compose run --rm --entrypoint /loader \
+     -v /tmp/sample-catalog-50k.csv:/data/catalog.csv:ro \
+     aggregator --file /data/catalog.csv
+   ```
+
+5. **Inspect per-shard & per-node data distribution** (`GET /internal/admin/distribution`, protected by `AUDIT_TOKEN`, plus raw SQL):
+   ```bash
+   bash scripts/p1/distribution.sh
+   ```
+
+

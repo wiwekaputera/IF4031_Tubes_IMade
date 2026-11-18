@@ -34,6 +34,7 @@ type CanonicalRepo interface {
 	ListUnprocessed(ctx context.Context, filter UnprocessedFilter) (audit.UnprocessedPage, error)
 	ComputeChecksum(ctx context.Context, source string) (audit.Checksum, error)
 	LocateEvent(ctx context.Context, hazardID string) (audit.LocationResponse, error)
+	GetDistribution(ctx context.Context) (DistributionReport, error)
 	GetVolcanoReferences(ctx context.Context) (map[string]VolcanoReference, error)
 	GetLatestEventTime(ctx context.Context, source string) (time.Time, error)
 	GetPollerWatermark(ctx context.Context, source string) (time.Time, error)

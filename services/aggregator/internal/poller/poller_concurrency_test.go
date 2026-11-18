@@ -97,6 +97,9 @@ func (f *fakeRepo) ComputeChecksum(context.Context, string) (audit.Checksum, err
 func (f *fakeRepo) LocateEvent(context.Context, string) (audit.LocationResponse, error) {
 	return audit.LocationResponse{}, nil
 }
+func (f *fakeRepo) GetDistribution(context.Context) (store.DistributionReport, error) {
+	return store.DistributionReport{}, nil
+}
 
 func fastBMKGServer(t *testing.T, called *atomic.Int32) *httptest.Server {
 	mux := http.NewServeMux()

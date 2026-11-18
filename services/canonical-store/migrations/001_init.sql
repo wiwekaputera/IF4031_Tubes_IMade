@@ -4,6 +4,7 @@
 CREATE DATABASE IF NOT EXISTS canonical;
 CREATE USER IF NOT EXISTS aggregator;
 GRANT ALL ON DATABASE canonical TO aggregator;
+GRANT SYSTEM VIEWCLUSTERMETADATA TO aggregator;
 
 USE canonical;
 
