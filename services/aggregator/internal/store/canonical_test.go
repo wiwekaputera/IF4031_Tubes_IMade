@@ -33,9 +33,9 @@ func findInitSQLPath() (string, error) {
 	for i := 0; i < 4; i++ {
 		repoRoot = filepath.Dir(repoRoot)
 	}
-	path := filepath.Join(repoRoot, "services", "canonical-store", "migrations", "init.sql")
+	path := filepath.Join(repoRoot, "services", "canonical-store", "migrations", "001_init.sql")
 	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("init.sql not found at %s: %w", path, err)
+		return "", fmt.Errorf("001_init.sql not found at %s: %w", path, err)
 	}
 	return path, nil
 }
@@ -67,22 +67,30 @@ func TestMain(m *testing.M) {
 
 	exec.Command("docker", "rm", "-f", "if4031-canonical-test").Run()
 	cmd := exec.Command("docker", "run", "-d", "--name", "if4031-canonical-test",
-		"-e", "POSTGRES_PASSWORD=pg", "-e", "POSTGRES_USER=aggregator", "-e", "POSTGRES_DB=canonical",
-		"-p", "5432:5432", "-v", initSQLPath+":/docker-entrypoint-initdb.d/init.sql:ro",
-		"postgres:16-alpine",
+		"-p", "26257:26257", "-v", initSQLPath+":/migrations/001_init.sql:ro",
+		"cockroachdb/cockroach:v24.1.6",
+		"start-single-node", "--insecure", "--store=type=mem,size=0.25",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to start postgres container: %v\n%s\n", err, out)
+		fmt.Fprintf(os.Stderr, "failed to start cockroachdb container: %v\n%s\n", err, out)
 		os.Exit(1)
 	}
 	containerID := strings.TrimSpace(string(out))
-	dsn := "postgresql://aggregator:pg@localhost:5432/canonical?sslmode=disable"
 
-	if err := waitForPostgres(dsn, 120*time.Second); err != nil {
+	// Wait for CRDB SQL port and apply 001_init.sql
+	if err := waitForPostgres("postgresql://root@localhost:26257/defaultdb?sslmode=disable", 120*time.Second); err != nil {
 		exec.Command("docker", "rm", "-f", containerID).Run()
 		os.Exit(1)
 	}
+	initOut, err := exec.Command("docker", "exec", containerID, "cockroach", "sql", "--insecure", "-f", "/migrations/001_init.sql").CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to apply 001_init.sql: %v\n%s\n", err, initOut)
+		exec.Command("docker", "rm", "-f", containerID).Run()
+		os.Exit(1)
+	}
+
+	dsn := "postgresql://aggregator@localhost:26257/canonical?sslmode=disable"
 
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -131,9 +139,8 @@ func TestUpsertEvent_PreservesHazardID(t *testing.T) {
 		t.Fatalf("first upsert failed: id=%s, err=%v", id, err)
 	}
 
-	// Second upsert with modified attributes and new UUID should preserve original HazardID
+	// Second upsert with modified attributes and same deterministic HazardID
 	req2 := req
-	req2.HazardID = uuid.NewString()
 	req2.Sources = map[string]interface{}{"pvmbg": map[string]interface{}{"val": 2}}
 	req2.Attributes = map[string]interface{}{"confidence_level": "medium", "extra": true}
 
@@ -185,9 +192,8 @@ func TestUpsertEvent_GuardsVersionAndOutboxOnUnchangedRePoll(t *testing.T) {
 		t.Fatalf("expected 1 outbox row initially, got %d", outboxCount)
 	}
 
-	// Re-poll the exact same unchanged record with a new transient HazardID
+	// Re-poll the exact same unchanged record with the same deterministic HazardID
 	reqRePoll := req
-	reqRePoll.HazardID = uuid.NewString()
 	if id2, err := testRepo.UpsertEvent(ctx, reqRePoll); err != nil || id2 != hazardID {
 		t.Fatalf("re-poll failed: id=%s, err=%v", id2, err)
 	}

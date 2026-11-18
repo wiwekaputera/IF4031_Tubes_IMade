@@ -287,15 +287,15 @@ fi
 # 8) Canonical store — tables + volcano_reference count via psql
 # =========================================================================
 echo
-echo "=== Canonical store (psql) ==="
-tables="$(docker compose exec -T canonical-store psql -U aggregator -d canonical -c '\dt' 2>&1 || true)"
+echo "=== Canonical store (CockroachDB) ==="
+tables="$(docker compose exec -T canonical-store-0 cockroach sql --insecure -d canonical --format=tsv -e 'SHOW TABLES;' 2>&1 || true)"
 if printf '%s' "$tables" | grep -qE 'canonical_events|outbox|volcano_reference'; then
-  ok "psql \\dt lists canonical_events, outbox, volcano_reference"
+  ok "cockroach SHOW TABLES lists canonical_events, outbox, volcano_reference"
 else
-  bad "psql \\dt did not list expected tables"
+  bad "cockroach SHOW TABLES did not list expected tables"
 fi
 
-volcano_count="$(docker compose exec -T canonical-store psql -U aggregator -d canonical -t -A -c 'SELECT count(*) FROM volcano_reference;' 2>&1 | tr -d '[:space:]' || true)"
+volcano_count="$(docker compose exec -T canonical-store-0 cockroach sql --insecure -d canonical --format=tsv -e 'SELECT count(*) FROM volcano_reference;' 2>&1 | tail -n1 | tr -d '[:space:]' || true)"
 if [[ "$volcano_count" == "5" ]]; then
   ok "SELECT count(*) FROM volcano_reference -> 5"
 else

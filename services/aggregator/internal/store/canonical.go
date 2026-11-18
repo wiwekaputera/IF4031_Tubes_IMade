@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
@@ -117,7 +119,7 @@ func (r *PostgresRepo) GetLatestEventTime(ctx context.Context, source string) (t
 	err := r.db.QueryRow(ctx, `
 		SELECT MAX(occurred_at)
 		FROM canonical_events
-		WHERE source = $1
+		WHERE source = $1 AND deleted_at IS NULL
 	`, source).Scan(&maxTime)
 	if err != nil {
 		return time.Time{}, err
@@ -126,6 +128,28 @@ func (r *PostgresRepo) GetLatestEventTime(ctx context.Context, source string) (t
 		return time.Time{}, nil
 	}
 	return maxTime.UTC(), nil
+}
+
+// withRetry40001 retries fn when CockroachDB returns SQLSTATE 40001 (serialization failure).
+func withRetry40001(ctx context.Context, fn func() error) error {
+	const maxRetries = 5
+	backoff := 10 * time.Millisecond
+	for attempt := 0; ; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "40001" || attempt >= maxRetries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+			backoff *= 2
+		}
+	}
 }
 
 func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (string, error) {
@@ -148,107 +172,110 @@ func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (stri
 		return "", err
 	}
 
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-
 	var storedHazardID string
-	var version int64
-	var ingestedAt time.Time
-	var isNewOrUpdated bool
-	err = tx.QueryRow(ctx, `
-		WITH pre AS (
-			SELECT version
-			FROM canonical_events
-			WHERE source = $2 AND source_ref_id = $3
-		),
-		ins AS (
-			INSERT INTO canonical_events
-				(hazard_id, source, source_ref_id, hazard_type, severity, area_name,
-				 latitude, longitude, occurred_at, ingested_at, sources, attributes)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11)
-			ON CONFLICT (source, source_ref_id) DO UPDATE SET
-				severity    = EXCLUDED.severity,
-				area_name   = EXCLUDED.area_name,
-				sources     = canonical_events.sources || EXCLUDED.sources,
-				attributes  = canonical_events.attributes || EXCLUDED.attributes,
-				version     = CASE
-					WHEN canonical_events.severity IS DISTINCT FROM EXCLUDED.severity
-					  OR canonical_events.area_name IS DISTINCT FROM EXCLUDED.area_name
-					  OR canonical_events.sources IS DISTINCT FROM (canonical_events.sources || EXCLUDED.sources)
-					  OR canonical_events.attributes IS DISTINCT FROM (canonical_events.attributes || EXCLUDED.attributes)
-					THEN canonical_events.version + 1
-					ELSE canonical_events.version
-				END,
-				updated_at  = CASE
-					WHEN canonical_events.severity IS DISTINCT FROM EXCLUDED.severity
-					  OR canonical_events.area_name IS DISTINCT FROM EXCLUDED.area_name
-					  OR canonical_events.sources IS DISTINCT FROM (canonical_events.sources || EXCLUDED.sources)
-					  OR canonical_events.attributes IS DISTINCT FROM (canonical_events.attributes || EXCLUDED.attributes)
-					THEN now()
-					ELSE canonical_events.updated_at
-				END
-			RETURNING hazard_id, version, ingested_at
-		)
-		SELECT
-			ins.hazard_id,
-			ins.version,
-			ins.ingested_at,
-			(pre.version IS NULL OR ins.version > pre.version) AS is_new_or_updated
-		FROM ins
-		LEFT JOIN pre ON true;
-	`,
-		rec.HazardID, rec.Source, rec.SourceRefID, string(rec.HazardType), string(rec.Severity),
-		rec.AreaName, rec.Latitude, rec.Longitude, rec.OccurredAt,
-		sourcesJSON, attrsJSON,
-	).Scan(&storedHazardID, &version, &ingestedAt, &isNewOrUpdated)
+	err = withRetry40001(ctx, func() error {
+		tx, err := r.db.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+
+		var version int64
+		var ingestedAt time.Time
+		var isNewOrUpdated bool
+		err = tx.QueryRow(ctx, `
+			WITH pre AS (
+				SELECT version
+				FROM canonical_events
+				WHERE hazard_id = $1
+			),
+			ins AS (
+				INSERT INTO canonical_events
+					(hazard_id, source, source_ref_id, hazard_type, severity, area_name,
+					 latitude, longitude, occurred_at, ingested_at, sources, attributes)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11)
+				ON CONFLICT (shard, hazard_id) DO UPDATE SET
+					severity    = EXCLUDED.severity,
+					area_name   = EXCLUDED.area_name,
+					sources     = canonical_events.sources || EXCLUDED.sources,
+					attributes  = canonical_events.attributes || EXCLUDED.attributes,
+					version     = CASE
+						WHEN canonical_events.severity IS DISTINCT FROM EXCLUDED.severity
+						  OR canonical_events.area_name IS DISTINCT FROM EXCLUDED.area_name
+						  OR canonical_events.sources IS DISTINCT FROM (canonical_events.sources || EXCLUDED.sources)
+						  OR canonical_events.attributes IS DISTINCT FROM (canonical_events.attributes || EXCLUDED.attributes)
+						THEN canonical_events.version + 1
+						ELSE canonical_events.version
+					END,
+					updated_at  = CASE
+						WHEN canonical_events.severity IS DISTINCT FROM EXCLUDED.severity
+						  OR canonical_events.area_name IS DISTINCT FROM EXCLUDED.area_name
+						  OR canonical_events.sources IS DISTINCT FROM (canonical_events.sources || EXCLUDED.sources)
+						  OR canonical_events.attributes IS DISTINCT FROM (canonical_events.attributes || EXCLUDED.attributes)
+						THEN now()
+						ELSE canonical_events.updated_at
+					END
+				RETURNING hazard_id, version, ingested_at
+			)
+			SELECT
+				ins.hazard_id,
+				ins.version,
+				ins.ingested_at,
+				(pre.version IS NULL OR ins.version > pre.version) AS is_new_or_updated
+			FROM ins
+			LEFT JOIN pre ON true;
+		`,
+			rec.HazardID, rec.Source, rec.SourceRefID, string(rec.HazardType), string(rec.Severity),
+			rec.AreaName, rec.Latitude, rec.Longitude, rec.OccurredAt,
+			sourcesJSON, attrsJSON,
+		).Scan(&storedHazardID, &version, &ingestedAt, &isNewOrUpdated)
+		if err != nil {
+			return err
+		}
+
+		if isNewOrUpdated {
+			he := hazard.HazardEvent{
+				HazardID:    storedHazardID,
+				Source:      hazard.Source(rec.Source),
+				SourceRefID: rec.SourceRefID,
+				HazardType:  rec.HazardType,
+				Severity:    rec.Severity,
+				AreaName:    rec.AreaName,
+				Latitude:    rec.Latitude,
+				Longitude:   rec.Longitude,
+				OccurredAt:  rec.OccurredAt.Format(time.RFC3339),
+				IngestedAt:  ingestedAt.Format(time.RFC3339),
+				Attributes:  rec.Attributes,
+			}
+
+			env := event.Envelope{
+				EventID:    storedHazardID,
+				Version:    version,
+				EventType:  rec.HazardType,
+				OccurredAt: rec.OccurredAt.Format(time.RFC3339),
+				TraceID:    rec.CorrelationID,
+				Data:       he,
+			}
+
+			payload, err := json.Marshal(env)
+			if err != nil {
+				return err
+			}
+
+			eventKey := storedHazardID + ":" + strconv.FormatInt(version, 10)
+			_, err = tx.Exec(ctx, `
+				INSERT INTO outbox (event_key, payload)
+				VALUES ($1, $2)
+				ON CONFLICT (event_key) DO NOTHING
+			`, eventKey, payload)
+			if err != nil {
+				return err
+			}
+		}
+
+		return tx.Commit(ctx)
+	})
 	if err != nil {
-		return "", err
-	}
-
-	if isNewOrUpdated {
-		he := hazard.HazardEvent{
-			HazardID:    storedHazardID,
-			Source:      hazard.Source(rec.Source),
-			SourceRefID: rec.SourceRefID,
-			HazardType:  rec.HazardType,
-			Severity:    rec.Severity,
-			AreaName:    rec.AreaName,
-			Latitude:    rec.Latitude,
-			Longitude:   rec.Longitude,
-			OccurredAt:  rec.OccurredAt.Format(time.RFC3339),
-			IngestedAt:  ingestedAt.Format(time.RFC3339),
-			Attributes:  rec.Attributes,
-		}
-
-		env := event.Envelope{
-			EventID:    storedHazardID,
-			Version:    version,
-			EventType:  rec.HazardType,
-			OccurredAt: rec.OccurredAt.Format(time.RFC3339),
-			TraceID:    rec.CorrelationID,
-			Data:       he,
-		}
-
-		payload, err := json.Marshal(env)
-		if err != nil {
-			return "", err
-		}
-
-		eventKey := storedHazardID + ":" + strconv.FormatInt(version, 10)
-		_, err = tx.Exec(ctx, `
-			INSERT INTO outbox (event_key, payload)
-			VALUES ($1, $2)
-			ON CONFLICT (event_key) DO NOTHING
-		`, eventKey, payload)
-		if err != nil {
-			return "", err
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
 		return "", err
 	}
 	return storedHazardID, nil
@@ -312,7 +339,7 @@ func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]haz
 		SELECT hazard_id, source, source_ref_id, hazard_type, severity, area_name,
 			latitude, longitude, occurred_at, ingested_at, attributes
 		FROM canonical_events
-		WHERE true
+		WHERE deleted_at IS NULL
 	`)
 
 	args := make([]any, 0, 4)
