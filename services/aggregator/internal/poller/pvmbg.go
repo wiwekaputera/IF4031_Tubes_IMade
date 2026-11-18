@@ -2,15 +2,18 @@ package poller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
-func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) {
+func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time, fenceToken int64) {
 	if !p.breaker.Allow() {
 		p.mu.Lock()
 		stale := p.health.PVMBG.LastSynced
@@ -26,6 +29,7 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 
 	currentSince := since
 	totalUpserted := 0
+	firstPage := true
 
 	for {
 		select {
@@ -35,7 +39,13 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 		default:
 		}
 
-		sinceStr := currentSince.UTC().Format(time.RFC3339)
+		fetchSince := currentSince
+		if firstPage && !fetchSince.IsZero() {
+			fetchSince = fetchSince.Add(-watermarkOverlap)
+		}
+		firstPage = false
+		sinceStr := fetchSince.UTC().Format(time.RFC3339)
+
 		reports, err := p.fetchVolcanicReports(ctx, corrID, sinceStr)
 		if err != nil {
 			p.breaker.RecordFailure()
@@ -57,20 +67,45 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 		}
 
 		var latestTime time.Time
+		recs := make([]store.UpsertRequest, 0, len(reports))
 		for _, report := range reports {
 			rec := p.normalizer.NormalizeVolcanic(report)
 			rec.CorrelationID = corrID
-
-			_, err := p.repo.UpsertEvent(ctx, rec)
-			if err != nil {
-				p.logger.Error().Err(err).Str("report_id", report.ReportID).Msg("failed to upsert volcanic report")
-				continue
-			}
-			totalUpserted++
+			recs = append(recs, rec)
 
 			t, err := parseAgencyTime(report.ReportedAt)
 			if err == nil && t.After(latestTime) {
 				latestTime = t
+			}
+		}
+
+		if p.elector != nil {
+			fence := store.Fence{
+				LeaseName: p.leaseName,
+				Holder:    p.cfg.InstanceID,
+				Token:     fenceToken,
+			}
+			if err := p.repo.UpsertFencedBatch(ctx, fence, string(hazard.SourcePVMBG), latestTime, recs); err != nil {
+				if errors.Is(err, store.ErrFenced) {
+					p.logger.Warn().
+						Int64("fencing_token", fenceToken).
+						Str("holder", p.cfg.InstanceID).
+						Str("correlation_id", corrID).
+						Msg("write rejected: stale fencing token")
+					p.elector.Demote()
+					return
+				}
+				p.logger.Error().Err(err).Str("correlation_id", corrID).Msg("failed to upsert PVMBG fenced batch")
+				return
+			}
+			totalUpserted += len(recs)
+		} else {
+			for _, rec := range recs {
+				if _, err := p.repo.UpsertEvent(ctx, rec); err != nil {
+					p.logger.Error().Err(err).Str("source_ref_id", rec.SourceRefID).Msg("failed to upsert volcanic report")
+					continue
+				}
+				totalUpserted++
 			}
 		}
 
@@ -103,8 +138,10 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 func StartPolling(ctx context.Context, wg *sync.WaitGroup, p *Poller, cfg *config.Config, logger zerolog.Logger) {
 	defer wg.Done()
 
-	if err := p.HydrateWatermarks(ctx); err != nil {
-		logger.Warn().Err(err).Msg("failed to hydrate poller watermarks on startup")
+	if p.elector == nil {
+		if err := p.HydrateWatermarks(ctx); err != nil {
+			logger.Warn().Err(err).Msg("failed to hydrate poller watermarks on startup")
+		}
 	}
 
 	ticker := time.NewTicker(cfg.PollInterval)

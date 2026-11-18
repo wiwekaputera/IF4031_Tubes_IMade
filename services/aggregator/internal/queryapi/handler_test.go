@@ -22,15 +22,28 @@ type fakeQueryRepo struct {
 	partial          bool
 	unavailableUnits []string
 	nextCursor       *string
+	leaseInfo        store.LeaseInfo
+	leaseErr         error
 }
 
 func (f *fakeQueryRepo) HealthCheck(context.Context) error                                     { return nil }
 func (f *fakeQueryRepo) UpsertEvent(context.Context, store.UpsertRequest) (string, error)     { return "", nil }
+func (f *fakeQueryRepo) UpsertFencedBatch(context.Context, store.Fence, string, time.Time, []store.UpsertRequest) error {
+	return nil
+}
 func (f *fakeQueryRepo) GetVolcanoReferences(context.Context) (map[string]store.VolcanoReference, error) {
 	return nil, nil
 }
 func (f *fakeQueryRepo) GetLatestEventTime(context.Context, string) (time.Time, error) {
 	return time.Time{}, nil
+}
+func (f *fakeQueryRepo) GetPollerWatermark(context.Context, string) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (f *fakeQueryRepo) GetLease(context.Context, string) (store.LeaseInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.leaseInfo, f.leaseErr
 }
 func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) ([]hazard.HazardEvent, error) {
 	res, err := f.ListEvents(context.Background(), store.ListFilter{
@@ -300,5 +313,70 @@ func TestGetEvents_ScatterMetaAndCursor(t *testing.T) {
 	h.GetEvents(recBad, httptest.NewRequest(http.MethodGet, "/internal/events?cursor=bad-cursor", nil))
 	if recBad.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid cursor, got %d", recBad.Code)
+	}
+}
+
+func TestReady(t *testing.T) {
+	h := New(&fakeQueryRepo{}, zerolog.Nop(), nil)
+
+	// Starts not-ready -> 503
+	rec1 := httptest.NewRecorder()
+	h.Ready(rec1, httptest.NewRequest(http.MethodGet, "/internal/ready", nil))
+	if rec1.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 before SetReady(true), got %d", rec1.Code)
+	}
+
+	// Ready -> 200
+	h.SetReady(true)
+	rec2 := httptest.NewRecorder()
+	h.Ready(rec2, httptest.NewRequest(http.MethodGet, "/internal/ready", nil))
+	if rec2.Code != http.StatusOK {
+		t.Errorf("expected 200 after SetReady(true), got %d", rec2.Code)
+	}
+
+	// Draining -> 503
+	h.SetReady(false)
+	rec3 := httptest.NewRecorder()
+	h.Ready(rec3, httptest.NewRequest(http.MethodGet, "/internal/ready", nil))
+	if rec3.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when draining, got %d", rec3.Code)
+	}
+}
+
+func TestLeader(t *testing.T) {
+	exp := time.Date(2026, 11, 18, 12, 0, 15, 0, time.UTC)
+	repo := &fakeQueryRepo{
+		leaseInfo: store.LeaseInfo{
+			Name:         store.DefaultLeaseName,
+			Holder:       "agg-1",
+			FencingToken: 7,
+			ExpiresAt:    exp,
+			IsActive:     true,
+		},
+	}
+
+	h1 := New(repo, zerolog.Nop(), nil).WithInstanceID("agg-1")
+	rec1 := httptest.NewRecorder()
+	h1.Leader(rec1, httptest.NewRequest(http.MethodGet, "/internal/leader", nil))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec1.Code)
+	}
+	var resp1 leaderResponse
+	if err := json.NewDecoder(rec1.Body).Decode(&resp1); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp1.InstanceID != "agg-1" || !resp1.IsLeader || resp1.FencingToken != 7 {
+		t.Errorf("unexpected leader response for holder: %+v", resp1)
+	}
+
+	h2 := New(repo, zerolog.Nop(), nil).WithInstanceID("agg-2")
+	rec2 := httptest.NewRecorder()
+	h2.Leader(rec2, httptest.NewRequest(http.MethodGet, "/internal/leader", nil))
+	var resp2 leaderResponse
+	if err := json.NewDecoder(rec2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp2.InstanceID != "agg-2" || resp2.IsLeader || resp2.FencingToken != 7 {
+		t.Errorf("unexpected leader response for follower: %+v", resp2)
 	}
 }

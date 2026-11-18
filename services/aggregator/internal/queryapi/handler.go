@@ -1,10 +1,12 @@
 package queryapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -18,6 +20,8 @@ type Handler struct {
 	repo             store.CanonicalRepo
 	logger           zerolog.Logger
 	sourceHealthFunc SourceHealthFunc
+	instanceID       string
+	ready            atomic.Bool
 }
 
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -49,6 +53,63 @@ func New(repo store.CanonicalRepo, logger zerolog.Logger, healthFn SourceHealthF
 		logger:           logger.With().Str("component", "queryapi").Logger(),
 		sourceHealthFunc: healthFn,
 	}
+}
+
+// WithInstanceID sets the instance identity reported by /internal/leader.
+func (h *Handler) WithInstanceID(id string) *Handler {
+	h.instanceID = id
+	return h
+}
+
+// SetReady toggles readiness for /internal/ready (200 when true, 503 when false).
+func (h *Handler) SetReady(ready bool) {
+	h.ready.Store(ready)
+}
+
+func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.ready.Load() {
+		h.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "DRAINING",
+		})
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]string{
+		"status": "READY",
+	})
+}
+
+type leaderResponse struct {
+	InstanceID     string `json:"instance_id"`
+	IsLeader       bool   `json:"is_leader"`
+	FencingToken   int64  `json:"fencing_token"`
+	LeaseExpiresAt string `json:"lease_expires_at"`
+}
+
+func (h *Handler) Leader(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	info, err := h.repo.GetLease(ctx, store.DefaultLeaseName)
+	if err != nil {
+		h.logger.Error().Err(err).Msg("failed to query leader lease")
+		h.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to query leader lease"})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, leaderResponse{
+		InstanceID:     h.instanceID,
+		IsLeader:       h.instanceID != "" && info.Holder == h.instanceID && info.IsActive,
+		FencingToken:   info.FencingToken,
+		LeaseExpiresAt: info.ExpiresAt.UTC().Format(time.RFC3339),
+	})
 }
 
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +218,8 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 func Routes(h *Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/internal/health", h.Health)
+	mux.HandleFunc("/internal/ready", h.Ready)
+	mux.HandleFunc("/internal/leader", h.Leader)
 	mux.HandleFunc("/internal/events", h.GetEvents)
 
 	var handler http.Handler = mux

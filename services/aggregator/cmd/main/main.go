@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/lease"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/outboxrelay"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/poller"
@@ -45,6 +46,7 @@ func main() {
 
 	logger.Info().
 		Str("port", cfg.Port).
+		Str("instance_id", cfg.InstanceID).
 		Str("bmkg_base_url", cfg.BMKGBaseURL).
 		Str("pvmbg_base_url", cfg.PVMBGBaseURL).
 		Msg("Starting aggregator service")
@@ -114,12 +116,10 @@ func main() {
 	}
 	logger.Info().Int("volcano_count", len(volcanoRefs)).Msg("Loaded volcano references")
 
-	// 6. Initialize normalizer, poller, and query API handlers
+	// 6. Initialize leader elector, normalizer, poller, and query API handlers
+	elector := lease.New(repo, store.DefaultLeaseName, cfg.InstanceID, cfg.LeaseTTL, cfg.LeaseRenewInterval, logger)
 	norm := normalizer.New(logger, volcanoRefs)
-	p := poller.New(cfg, norm, repo, logger)
-	if err := p.HydrateWatermarks(ctx); err != nil {
-		logger.Warn().Err(err).Msg("failed to hydrate poller watermarks on startup")
-	}
+	p := poller.New(cfg, norm, repo, logger).WithElector(elector)
 
 	healthFn := func() (string, string, time.Time, time.Time, *time.Time) {
 		hs := p.Health()
@@ -131,14 +131,19 @@ func main() {
 		return hs.BMKG.Status, hs.PVMBG.Status, hs.BMKG.LastSynced, hs.PVMBG.LastSynced, pvmbgStaleSince
 	}
 
-	h := queryapi.New(repo, logger, healthFn)
+	h := queryapi.New(repo, logger, healthFn).WithInstanceID(cfg.InstanceID)
+	h.SetReady(true)
 
-	// 7. Start background polling loop and transactional outbox relay.
+	// 7. Start leader election, background polling loop, and transactional outbox relay.
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	wg.Add(2)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		elector.Run(ctx)
+	}()
 	go poller.StartPolling(ctx, &wg, p, cfg, logger)
 	go func() {
 		defer wg.Done()
@@ -171,9 +176,22 @@ func main() {
 		logger.Error().Err(err).Msg("Server encountered fatal error")
 	}
 
-	// Stop background polling workers and wait for in-flight cycles to finish
+	// Mark not-ready immediately so kube-proxy stops routing new requests,
+	// stop background workers, release leader lease, wait drain period, then shut down HTTP.
+	h.SetReady(false)
 	cancel()
 	wg.Wait()
+
+	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer releaseCancel()
+	if err := elector.Release(releaseCtx); err != nil {
+		logger.Warn().Err(err).Msg("failed to release leader lease on shutdown")
+	}
+
+	if cfg.ShutdownDrain > 0 {
+		logger.Info().Dur("drain", cfg.ShutdownDrain).Msg("Draining connections before HTTP shutdown")
+		time.Sleep(cfg.ShutdownDrain)
+	}
 
 	// Shutdown HTTP server with 5s deadline
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)

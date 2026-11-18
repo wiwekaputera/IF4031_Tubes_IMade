@@ -313,9 +313,11 @@ func listEventsWithQuerier(
 		limit = defaultQueryLimit
 	}
 
-	shards := allShards()
+	var shards []int
 	if filter.HazardID != "" {
 		shards = []int{ShardForHazardID(filter.HazardID)}
+	} else {
+		shards = allShards()
 	}
 
 	var (

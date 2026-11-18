@@ -324,6 +324,9 @@ Every service validates its configuration at startup (fail-fast):
 | `AGGREGATOR_NATS_URL` | `nats://nats-jetstream:4222` | `aggregator` | Broker URL for the outbox relay |
 | `AGGREGATOR_PORT` | `8090` | `aggregator` | Internal query API port |
 | `INSTANCE_ID` | *(hostname)* | `aggregator` | Instance identifier sent in `X-Instance-ID` to upstream agencies |
+| `AGGREGATOR_LEASE_TTL_S` | `15` | `aggregator` | Leader lease TTL in seconds (must be > 2× renew interval) |
+| `AGGREGATOR_LEASE_RENEW_INTERVAL_S` | `5` | `aggregator` | Leader lease renewal interval in seconds |
+| `AGGREGATOR_SHUTDOWN_DRAIN_S` | `5` | `aggregator` | Graceful shutdown readiness drain period in seconds |
 | `CANONICAL_STORE_POSTGRES_USER` / `_PASSWORD` / `_DB` | `aggregator` / `change-me-pg-password` / `canonical` | `canonical-store` | PostgreSQL bootstrap credentials |
 | `TOKEN_DB_DSN` | `postgres://tokenservice:…@token-db:5432/tokendb` | `token-service` | Token DB connection string |
 | `ES256_PRIVATE_KEY_B64` | *(generate)* | `token-service` | Base64 PKCS#8 PEM P-256 key (`scripts/keys/gen-es256.sh`, done automatically by `up.sh`) |

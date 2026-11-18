@@ -26,6 +26,9 @@ type Config struct {
 	OutboxPollInterval   time.Duration
 	OutboxBatchSize      int
 	ShardQueryTimeout    time.Duration
+	LeaseTTL             time.Duration
+	LeaseRenewInterval   time.Duration
+	ShutdownDrain        time.Duration
 	LogLevel             string
 	InstanceID           string
 }
@@ -79,6 +82,21 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	leaseTTLS, err := positiveIntEnv("LEASE_TTL_S", 15)
+	if err != nil {
+		return nil, err
+	}
+	leaseRenewIntervalS, err := positiveIntEnv("LEASE_RENEW_INTERVAL_S", 5)
+	if err != nil {
+		return nil, err
+	}
+	if leaseTTLS <= 2*leaseRenewIntervalS {
+		return nil, fmt.Errorf("LEASE_TTL_S (%d) must be greater than 2 * LEASE_RENEW_INTERVAL_S (%d)", leaseTTLS, leaseRenewIntervalS)
+	}
+	shutdownDrainS, err := positiveIntEnv("SHUTDOWN_DRAIN_S", 5)
+	if err != nil {
+		return nil, err
+	}
 
 	hostname, _ := os.Hostname()
 	if hostname == "" {
@@ -101,6 +119,9 @@ func Load() (*Config, error) {
 		OutboxPollInterval:   time.Duration(outboxPollIntervalMs) * time.Millisecond,
 		OutboxBatchSize:      outboxBatchSize,
 		ShardQueryTimeout:    time.Duration(shardQueryTimeoutMs) * time.Millisecond,
+		LeaseTTL:             time.Duration(leaseTTLS) * time.Second,
+		LeaseRenewInterval:   time.Duration(leaseRenewIntervalS) * time.Second,
+		ShutdownDrain:        time.Duration(shutdownDrainS) * time.Second,
 		LogLevel:             strings.ToLower(getEnv("LOG_LEVEL", "info")),
 		InstanceID:           getEnv("INSTANCE_ID", hostname),
 	}, nil

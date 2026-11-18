@@ -19,9 +19,14 @@ import (
 )
 
 type fakeRepo struct {
-	mu          sync.Mutex
-	upserts     int
-	latestTimes map[string]time.Time
+	mu               sync.Mutex
+	upserts          int
+	latestTimes      map[string]time.Time
+	watermarks       map[string]time.Time
+	fencedErr        error
+	fencedBatches    int
+	lastFence        store.Fence
+	lastBatchSources []string
 }
 
 func (f *fakeRepo) HealthCheck(context.Context) error { return nil }
@@ -30,6 +35,26 @@ func (f *fakeRepo) UpsertEvent(_ context.Context, rec store.UpsertRequest) (stri
 	defer f.mu.Unlock()
 	f.upserts++
 	return "id-" + rec.HazardID, nil
+}
+func (f *fakeRepo) UpsertFencedBatch(_ context.Context, fence store.Fence, source string, watermark time.Time, recs []store.UpsertRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fencedErr != nil {
+		return f.fencedErr
+	}
+	f.fencedBatches++
+	f.lastFence = fence
+	f.lastBatchSources = append(f.lastBatchSources, source)
+	f.upserts += len(recs)
+	if !watermark.IsZero() {
+		if f.watermarks == nil {
+			f.watermarks = make(map[string]time.Time)
+		}
+		if watermark.After(f.watermarks[source]) {
+			f.watermarks[source] = watermark
+		}
+	}
+	return nil
 }
 func (f *fakeRepo) GetEvents(context.Context, store.EventFilter) ([]hazard.HazardEvent, error) {
 	return nil, nil
@@ -47,6 +72,17 @@ func (f *fakeRepo) GetLatestEventTime(_ context.Context, source string) (time.Ti
 		return f.latestTimes[source], nil
 	}
 	return time.Time{}, nil
+}
+func (f *fakeRepo) GetPollerWatermark(_ context.Context, source string) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.watermarks != nil {
+		return f.watermarks[source], nil
+	}
+	return time.Time{}, nil
+}
+func (f *fakeRepo) GetLease(context.Context, string) (store.LeaseInfo, error) {
+	return store.LeaseInfo{}, nil
 }
 
 func fastBMKGServer(t *testing.T, called *atomic.Int32) *httptest.Server {
