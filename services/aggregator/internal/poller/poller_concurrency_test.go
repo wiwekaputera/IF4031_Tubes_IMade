@@ -88,6 +88,9 @@ func (f *fakeRepo) GetLease(context.Context, string) (store.LeaseInfo, error) {
 func (f *fakeRepo) ListAuditEvents(context.Context, store.AuditEventsFilter) (audit.EventsPage, error) {
 	return audit.EventsPage{}, nil
 }
+func (f *fakeRepo) ListUnprocessed(context.Context, store.UnprocessedFilter) (audit.UnprocessedPage, error) {
+	return audit.UnprocessedPage{}, nil
+}
 func (f *fakeRepo) ComputeChecksum(context.Context, string) (audit.Checksum, error) {
 	return audit.Checksum{}, nil
 }

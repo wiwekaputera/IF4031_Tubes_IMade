@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -34,6 +35,11 @@ const (
 // IngestStore is the subset of the canonical repository needed by the ingest consumer.
 type IngestStore interface {
 	ApplyIngest(ctx context.Context, msg event.IngestMessage) (bool, error)
+}
+
+// UnprocessedRecorder optionally records terminated poison messages for audit inspection.
+type UnprocessedRecorder interface {
+	RecordUnprocessed(ctx context.Context, source, sourceRefID string, raw []byte, reason string) error
 }
 
 // Msg abstracts a JetStream message for unit testing.
@@ -170,6 +176,7 @@ func (c *Consumer) ProcessMessage(ctx context.Context, msg Msg) {
 				Str("subject", msg.Subject()).
 				Str("nats_msg_id", msg.MsgID()).
 				Msg("panic while processing ingest message; terminating")
+			c.recordParked(ctx, msg, "", "", "panic while processing ingest message")
 			if err := msg.Term(); err != nil {
 				c.logger.Error().Err(err).Str("subject", msg.Subject()).Msg("failed terminating panicked ingest message")
 			}
@@ -185,6 +192,7 @@ func (c *Consumer) ProcessMessage(ctx context.Context, msg Msg) {
 			Str("subject", msg.Subject()).
 			Str("nats_msg_id", msg.MsgID()).
 			Msg("terminating oversized ingest message")
+		c.recordParked(ctx, msg, "", "", "payload exceeds max size")
 		if err := msg.Term(); err != nil {
 			c.logger.Error().Err(err).Str("subject", msg.Subject()).Msg("failed terminating oversized ingest message")
 		}
@@ -199,6 +207,7 @@ func (c *Consumer) ProcessMessage(ctx context.Context, msg Msg) {
 			Str("subject", msg.Subject()).
 			Str("nats_msg_id", msg.MsgID()).
 			Msg("terminating undecodable ingest message")
+		c.recordParked(ctx, msg, "", "", "invalid json")
 		if termErr := msg.Term(); termErr != nil {
 			c.logger.Error().Err(termErr).Str("subject", msg.Subject()).Msg("failed terminating undecodable ingest message")
 		}
@@ -206,14 +215,16 @@ func (c *Consumer) ProcessMessage(ctx context.Context, msg Msg) {
 	}
 
 	if err := ingestMsg.Validate(); err != nil {
+		reason := "validation failed: " + err.Error()
 		c.logger.Error().
 			Err(err).
-			Str("reason", "validation failed: "+err.Error()).
+			Str("reason", reason).
 			Str("subject", msg.Subject()).
 			Str("nats_msg_id", msg.MsgID()).
 			Str("source", string(ingestMsg.Source)).
 			Str("source_ref_id", ingestMsg.SourceRefID).
 			Msg("terminating invalid ingest message")
+		c.recordParked(ctx, msg, string(ingestMsg.Source), ingestMsg.SourceRefID, reason)
 		if termErr := msg.Term(); termErr != nil {
 			c.logger.Error().Err(termErr).Str("subject", msg.Subject()).Msg("failed terminating invalid ingest message")
 		}
@@ -263,5 +274,26 @@ func (c *Consumer) ProcessMessage(ctx context.Context, msg Msg) {
 			Str("source_ref_id", ingestMsg.SourceRefID).
 			Int64("source_version", ingestMsg.SourceVersion).
 			Msg("ignored stale or duplicate ingest message")
+	}
+}
+
+func (c *Consumer) recordParked(ctx context.Context, msg Msg, source, sourceRefID, reason string) {
+	rec, ok := c.store.(UnprocessedRecorder)
+	if !ok {
+		return
+	}
+	if source == "" {
+		source = strings.TrimPrefix(msg.Subject(), "hazard.ingest.")
+		if source == "" || source == msg.Subject() {
+			source = "UNKNOWN"
+		}
+	}
+	if err := rec.RecordUnprocessed(ctx, source, sourceRefID, msg.Data(), reason); err != nil {
+		c.logger.Warn().
+			Err(err).
+			Str("subject", msg.Subject()).
+			Str("source", source).
+			Str("reason", reason).
+			Msg("failed recording terminated ingest message to dead_letters")
 	}
 }

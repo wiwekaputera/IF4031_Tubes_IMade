@@ -31,6 +31,7 @@ type CanonicalRepo interface {
 	GetEvents(ctx context.Context, filter EventFilter) ([]hazard.HazardEvent, error)
 	ListEvents(ctx context.Context, filter ListFilter) (ListResult, error)
 	ListAuditEvents(ctx context.Context, filter AuditEventsFilter) (audit.EventsPage, error)
+	ListUnprocessed(ctx context.Context, filter UnprocessedFilter) (audit.UnprocessedPage, error)
 	ComputeChecksum(ctx context.Context, source string) (audit.Checksum, error)
 	LocateEvent(ctx context.Context, hazardID string) (audit.LocationResponse, error)
 	GetVolcanoReferences(ctx context.Context) (map[string]VolcanoReference, error)

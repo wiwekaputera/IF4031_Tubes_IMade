@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/audit"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
@@ -303,4 +305,116 @@ func TestLocateEvent(t *testing.T) {
 			t.Errorf("expected empty non-nil Locations, got %v", resp.Locations)
 		}
 	})
+}
+
+type fakeUnprocessedQuerier struct {
+	rows []struct {
+		id         int64
+		source     string
+		receivedAt time.Time
+		reason     string
+		retryable  bool
+		attempts   int
+		status     string
+	}
+	err error
+}
+
+func (f *fakeUnprocessedQuerier) queryUnprocessed(
+	_ context.Context,
+	source string,
+	cursorTime *time.Time,
+	cursorID *int64,
+	limit int,
+) ([]unprocessedRow, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []unprocessedRow
+	for _, r := range f.rows {
+		if r.status != "retrying" && r.status != "parked" {
+			continue
+		}
+		if source != "" && r.source != source {
+			continue
+		}
+		if cursorTime != nil && cursorID != nil {
+			if r.receivedAt.Before(*cursorTime) || (r.receivedAt.Equal(*cursorTime) && r.id <= *cursorID) {
+				continue
+			}
+		}
+		out = append(out, unprocessedRow{
+			item: audit.UnprocessedItem{
+				MessageID:  strconv.FormatInt(r.id, 10),
+				Source:     r.source,
+				ReceivedAt: r.receivedAt.UTC().Format(time.RFC3339),
+				Reason:     r.reason,
+				Retryable:  r.retryable,
+				Attempts:   r.attempts,
+				Status:     audit.UnprocessedStatus(r.status),
+			},
+			receivedAt: r.receivedAt.UTC(),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func TestListUnprocessed(t *testing.T) {
+	t0 := time.Date(2026, 11, 18, 1, 0, 0, 123456000, time.UTC)
+	t1 := t0.Add(500 * time.Nanosecond)
+	t2 := t0.Add(time.Minute)
+
+	q := &fakeUnprocessedQuerier{
+		rows: []struct {
+			id         int64
+			source     string
+			receivedAt time.Time
+			reason     string
+			retryable  bool
+			attempts   int
+			status     string
+		}{
+			{id: 10, source: "PVMBG", receivedAt: t0, reason: "bad schema", retryable: false, attempts: 0, status: "parked"},
+			{id: 11, source: "BMKG", receivedAt: t0, reason: "timeout", retryable: true, attempts: 2, status: "retrying"},
+			{id: 12, source: "PVMBG", receivedAt: t1, reason: "recovered_ok", retryable: true, attempts: 1, status: "resolved"},
+			{id: 13, source: "PVMBG", receivedAt: t2, reason: "missing_volcano", retryable: false, attempts: 0, status: "parked"},
+		},
+	}
+
+	page1, err := listUnprocessedWithQuerier(context.Background(), q, UnprocessedFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("page1 failed: %v", err)
+	}
+	if len(page1.Items) != 1 || page1.Items[0].MessageID != "10" || page1.NextCursor == nil {
+		t.Fatalf("unexpected page1: %+v", page1)
+	}
+
+	page2, err := listUnprocessedWithQuerier(context.Background(), q, UnprocessedFilter{Limit: 2, Cursor: *page1.NextCursor})
+	if err != nil {
+		t.Fatalf("page2 failed: %v", err)
+	}
+	if len(page2.Items) != 2 || page2.Items[0].MessageID != "11" || page2.Items[1].MessageID != "13" || page2.NextCursor != nil {
+		t.Fatalf("unexpected page2: %+v", page2)
+	}
+
+	bySrc, err := listUnprocessedWithQuerier(context.Background(), q, UnprocessedFilter{Source: "PVMBG"})
+	if err != nil {
+		t.Fatalf("bySrc failed: %v", err)
+	}
+	if len(bySrc.Items) != 2 || bySrc.Items[0].MessageID != "10" || bySrc.Items[1].MessageID != "13" {
+		t.Fatalf("unexpected bySrc: %+v", bySrc)
+	}
+
+	badCur := encodeCursor(t0, "not-a-number")
+	if _, err := listUnprocessedWithQuerier(context.Background(), q, UnprocessedFilter{Cursor: badCur}); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("expected ErrInvalidCursor, got %v", err)
+	}
+
+	q.err = errors.New("db down")
+	if _, err := listUnprocessedWithQuerier(context.Background(), q, UnprocessedFilter{}); err == nil {
+		t.Fatalf("expected error when DB fails")
+	}
 }

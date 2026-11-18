@@ -185,3 +185,60 @@ func TestProcessMessage_RecoversPanicAndTerminates(t *testing.T) {
 		t.Fatalf("msg state = (termed=%v, acked=%v, naked=%v), want termed=true", msg.termed, msg.acked, msg.naked)
 	}
 }
+
+type recordedUnprocessed struct {
+	source      string
+	sourceRefID string
+	raw         []byte
+	reason      string
+}
+
+type recordingIngestStore struct {
+	fakeIngestStore
+	recorded []recordedUnprocessed
+	recErr   error
+}
+
+func (r *recordingIngestStore) RecordUnprocessed(_ context.Context, source, sourceRefID string, raw []byte, reason string) error {
+	r.recorded = append(r.recorded, recordedUnprocessed{
+		source:      source,
+		sourceRefID: sourceRefID,
+		raw:         raw,
+		reason:      reason,
+	})
+	return r.recErr
+}
+
+func TestConsumer_RecordsPoisonMessages(t *testing.T) {
+	st := &recordingIngestStore{}
+	c := New(nil, st, zerolog.Nop())
+
+	// Invalid JSON -> Term() + RecordUnprocessed with inferred source from subject.
+	badJSON := &fakeMsg{
+		subject: "hazard.ingest.SATELIT",
+		msgID:   "m-bad",
+		data:    []byte("{not-json"),
+	}
+	c.ProcessMessage(context.Background(), badJSON)
+	if !badJSON.termed {
+		t.Fatalf("expected bad JSON to be termed")
+	}
+	if len(st.recorded) != 1 || st.recorded[0].source != "SATELIT" || st.recorded[0].reason != "invalid json" {
+		t.Fatalf("unexpected recorded poison message: %+v", st.recorded)
+	}
+
+	// Best-effort: even if RecordUnprocessed returns an error, Term() still happens.
+	st.recErr = errors.New("db unavailable")
+	oversized := &fakeMsg{
+		subject: "hazard.ingest.SENSOR_PANTAI",
+		msgID:   "m-big",
+		data:    make([]byte, MaxPayloadBytes+1),
+	}
+	c.ProcessMessage(context.Background(), oversized)
+	if !oversized.termed {
+		t.Fatalf("expected oversized message to be termed even when RecordUnprocessed fails")
+	}
+	if len(st.recorded) != 2 || st.recorded[1].source != "SENSOR_PANTAI" || st.recorded[1].reason != "payload exceeds max size" {
+		t.Fatalf("unexpected second recorded poison message: %+v", st.recorded)
+	}
+}

@@ -3,8 +3,10 @@ package auditapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +28,10 @@ type fakeAuditRepo struct {
 	lastLocationID string
 	locationResp   audit.LocationResponse
 	locationErr    error
+
+	lastUnprocessedFilter store.UnprocessedFilter
+	unprocessedPage       audit.UnprocessedPage
+	unprocessedErr        error
 }
 
 func (f *fakeAuditRepo) HealthCheck(context.Context) error                                 { return nil }
@@ -67,6 +73,11 @@ func (f *fakeAuditRepo) LocateEvent(_ context.Context, hazardID string) (audit.L
 	return f.locationResp, f.locationErr
 }
 
+func (f *fakeAuditRepo) ListUnprocessed(_ context.Context, filter store.UnprocessedFilter) (audit.UnprocessedPage, error) {
+	f.lastUnprocessedFilter = filter
+	return f.unprocessedPage, f.unprocessedErr
+}
+
 func newTestMux(repo store.CanonicalRepo) *http.ServeMux {
 	h := New(repo, "secret-audit-token", zerolog.Nop())
 	mux := http.NewServeMux()
@@ -80,6 +91,7 @@ func TestAuditAuth(t *testing.T) {
 		"/internal/audit/events",
 		"/internal/audit/checksum",
 		"/internal/audit/location?hazard_id=hz-1",
+		"/internal/audit/unprocessed",
 	}
 
 	for _, ep := range endpoints {
@@ -264,4 +276,112 @@ func TestAuditLocation(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &eb); err != nil || eb.Error.Code != "not_found" {
 		t.Errorf("expected not_found ErrorBody, got %s", rec.Body.String())
 	}
+}
+
+func TestAuditUnprocessed(t *testing.T) {
+	nextCur := "cur-next"
+	repo := &fakeAuditRepo{
+		unprocessedPage: audit.UnprocessedPage{
+			Items: []audit.UnprocessedItem{
+				{
+					MessageID:  "101",
+					Source:     "PVMBG",
+					ReceivedAt: "2026-11-18T01:00:00Z",
+					Reason:     "missing_required:volcano_id",
+					Retryable:  false,
+					Attempts:   0,
+					Status:     audit.UnprocessedStatusParked,
+				},
+				{
+					MessageID:  "102",
+					Source:     "BMKG",
+					ReceivedAt: "2026-11-18T01:05:00Z",
+					Reason:     "upstream_timeout",
+					Retryable:  true,
+					Attempts:   2,
+					Status:     audit.UnprocessedStatusRetrying,
+				},
+			},
+			NextCursor: &nextCur,
+		},
+	}
+	mux := newTestMux(repo)
+
+	t.Run("invalid_source", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/audit/unprocessed?source=BAD", nil)
+		req.Header.Set("Authorization", "Bearer secret-audit-token")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rec.Code)
+		}
+	})
+
+	t.Run("invalid_limits", func(t *testing.T) {
+		for _, bad := range []string{"0", "-5", "1001", "abc"} {
+			req := httptest.NewRequest(http.MethodGet, "/internal/audit/unprocessed?limit="+bad, nil)
+			req.Header.Set("Authorization", "Bearer secret-audit-token")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("limit=%s: expected 400, got %d", bad, rec.Code)
+			}
+		}
+	})
+
+	t.Run("valid_response_and_defaults", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/audit/unprocessed?source=PVMBG", nil)
+		req.Header.Set("Authorization", "Bearer secret-audit-token")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if repo.lastUnprocessedFilter.Source != "PVMBG" || repo.lastUnprocessedFilter.Limit != 100 {
+			t.Fatalf("unexpected filter: %+v", repo.lastUnprocessedFilter)
+		}
+		if strings.Contains(rec.Body.String(), "raw_payload") {
+			t.Fatalf("response must never include raw_payload: %s", rec.Body.String())
+		}
+		var page audit.UnprocessedPage
+		if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		if len(page.Items) != 2 || page.Items[0].Retryable || !page.Items[1].Retryable || page.Items[1].Attempts != 2 {
+			t.Fatalf("unexpected items: %+v", page.Items)
+		}
+		if page.NextCursor == nil || *page.NextCursor != "cur-next" {
+			t.Fatalf("unexpected next_cursor: %v", page.NextCursor)
+		}
+	})
+
+	t.Run("invalid_cursor", func(t *testing.T) {
+		repo.unprocessedErr = store.ErrInvalidCursor
+		defer func() { repo.unprocessedErr = nil }()
+
+		req := httptest.NewRequest(http.MethodGet, "/internal/audit/unprocessed?cursor=bad", nil)
+		req.Header.Set("Authorization", "Bearer secret-audit-token")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rec.Code)
+		}
+	})
+
+	t.Run("db_error_returns_503", func(t *testing.T) {
+		repo.unprocessedErr = errors.New("connection refused")
+		defer func() { repo.unprocessedErr = nil }()
+
+		req := httptest.NewRequest(http.MethodGet, "/internal/audit/unprocessed", nil)
+		req.Header.Set("Authorization", "Bearer secret-audit-token")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503 on DB error, got %d", rec.Code)
+		}
+		var eb audit.ErrorBody
+		if err := json.Unmarshal(rec.Body.Bytes(), &eb); err != nil || eb.Error.Code != "service_unavailable" {
+			t.Fatalf("expected service_unavailable ErrorBody, got %s", rec.Body.String())
+		}
+	})
 }

@@ -103,6 +103,29 @@ CREATE TABLE IF NOT EXISTS poller_watermarks (
 );
 
 -- ============================================================
+-- Dead-letter queue (shared with DLQ worker / Audit API)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS dead_letters (
+  id              BIGSERIAL PRIMARY KEY,
+  source          STRING NOT NULL,
+  source_ref_id   STRING,
+  raw_payload     BYTES NOT NULL,
+  reason          TEXT NOT NULL,
+  retryable       BOOLEAN NOT NULL,
+  attempts        INT4 NOT NULL DEFAULT 0,
+  status          STRING NOT NULL CHECK (status IN ('retrying', 'parked', 'resolved')),
+  received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  next_attempt_at TIMESTAMPTZ,
+  last_error      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letters_status
+  ON dead_letters (status, next_attempt_at);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letters_unprocessed
+  ON dead_letters (status, received_at, id);
+
+-- ============================================================
 -- Cluster settings & replication
 -- ============================================================
 GRANT ALL ON ALL TABLES IN SCHEMA canonical.public TO aggregator;

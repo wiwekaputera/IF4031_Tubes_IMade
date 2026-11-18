@@ -475,3 +475,177 @@ func extractNodeLocality(locality string) string {
 	}
 	return "unknown"
 }
+
+// UnprocessedFilter defines parameters for paginated DLQ / unprocessed message reads.
+type UnprocessedFilter struct {
+	Source string
+	Limit  int
+	Cursor string
+}
+
+type unprocessedRow struct {
+	item       audit.UnprocessedItem
+	receivedAt time.Time
+}
+
+type unprocessedQuerier interface {
+	queryUnprocessed(ctx context.Context, source string, cursorTime *time.Time, cursorID *int64, limit int) ([]unprocessedRow, error)
+}
+
+type pgUnprocessedQuerier struct {
+	repo *PostgresRepo
+}
+
+func (q *pgUnprocessedQuerier) queryUnprocessed(
+	ctx context.Context,
+	source string,
+	cursorTime *time.Time,
+	cursorID *int64,
+	limit int,
+) ([]unprocessedRow, error) {
+	var sql strings.Builder
+	sql.Grow(240)
+	sql.WriteString(`
+		SELECT id, source, received_at, reason, retryable, attempts, status
+		FROM dead_letters
+		WHERE status IN ('retrying', 'parked')
+	`)
+
+	args := make([]any, 0, 4)
+	argIdx := 1
+
+	if source != "" {
+		sql.WriteString(" AND source = $")
+		sql.WriteString(strconv.Itoa(argIdx))
+		args = append(args, source)
+		argIdx++
+	}
+	if cursorTime != nil && cursorID != nil {
+		sql.WriteString(" AND (received_at, id) > ($")
+		sql.WriteString(strconv.Itoa(argIdx))
+		sql.WriteString(", $")
+		sql.WriteString(strconv.Itoa(argIdx + 1))
+		sql.WriteString(")")
+		args = append(args, *cursorTime, *cursorID)
+		argIdx += 2
+	}
+
+	sql.WriteString(" ORDER BY received_at ASC, id ASC LIMIT $")
+	sql.WriteString(strconv.Itoa(argIdx))
+	args = append(args, limit)
+
+	rows, err := q.repo.db.Query(ctx, sql.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]unprocessedRow, 0, min(limit, 64))
+	for rows.Next() {
+		var (
+			id         int64
+			src        string
+			receivedAt time.Time
+			reason     string
+			retryable  bool
+			attempts   int
+			status     string
+		)
+		if err := rows.Scan(&id, &src, &receivedAt, &reason, &retryable, &attempts, &status); err != nil {
+			return nil, err
+		}
+		recUTC := receivedAt.UTC()
+		out = append(out, unprocessedRow{
+			item: audit.UnprocessedItem{
+				MessageID:  strconv.FormatInt(id, 10),
+				Source:     src,
+				ReceivedAt: recUTC.Format(time.RFC3339),
+				Reason:     reason,
+				Retryable:  retryable,
+				Attempts:   attempts,
+				Status:     audit.UnprocessedStatus(status),
+			},
+			receivedAt: recUTC,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListUnprocessed returns retrying and parked rows from dead_letters ordered by
+// (received_at ASC, id ASC) with keyset cursor pagination.
+func (r *PostgresRepo) ListUnprocessed(ctx context.Context, filter UnprocessedFilter) (audit.UnprocessedPage, error) {
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+	return listUnprocessedWithQuerier(ctx, &pgUnprocessedQuerier{repo: r}, filter)
+}
+
+func listUnprocessedWithQuerier(
+	ctx context.Context,
+	querier unprocessedQuerier,
+	filter UnprocessedFilter,
+) (audit.UnprocessedPage, error) {
+	cursor, err := decodeCursor(filter.Cursor)
+	if err != nil {
+		return audit.UnprocessedPage{}, err
+	}
+
+	var (
+		cursorTime *time.Time
+		cursorID   *int64
+	)
+	if cursor != nil {
+		id, err := strconv.ParseInt(cursor.hazardID, 10, 64)
+		if err != nil {
+			return audit.UnprocessedPage{}, fmt.Errorf("%w: invalid id: %v", ErrInvalidCursor, err)
+		}
+		cursorTime = &cursor.occurredAt
+		cursorID = &id
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = defaultAuditLimit
+	}
+	if limit > maxAuditLimit {
+		limit = maxAuditLimit
+	}
+
+	rows, err := querier.queryUnprocessed(ctx, filter.Source, cursorTime, cursorID, limit+1)
+	if err != nil {
+		return audit.UnprocessedPage{}, err
+	}
+
+	var nextCursor *string
+	if len(rows) > limit {
+		rows = rows[:limit]
+		last := rows[limit-1]
+		c := encodeCursor(last.receivedAt, last.item.MessageID)
+		nextCursor = &c
+	}
+
+	items := make([]audit.UnprocessedItem, len(rows))
+	for i, row := range rows {
+		items[i] = row.item
+	}
+
+	return audit.UnprocessedPage{
+		Items:      items,
+		NextCursor: nextCursor,
+	}, nil
+}
+
+// RecordUnprocessed inserts a non-retryable parked message into dead_letters.
+func (r *PostgresRepo) RecordUnprocessed(ctx context.Context, source, sourceRefID string, raw []byte, reason string) error {
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO dead_letters
+			(source, source_ref_id, raw_payload, reason, retryable, attempts, status, last_error)
+		VALUES ($1, NULLIF($2, ''), $3, $4, false, 0, 'parked', $4)
+	`, source, sourceRefID, raw, reason)
+	return err
+}

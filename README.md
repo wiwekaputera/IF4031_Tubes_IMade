@@ -445,3 +445,13 @@ Every request requires `Authorization: Bearer <AUDIT_TOKEN>` (configured via `AG
      "http://localhost:8090/internal/audit/location?hazard_id=hz-7f3a91" | jq
    ```
 
+4. **`GET /internal/audit/unprocessed`** — Paginated list of DLQ messages in `dead_letters` with `status IN ('retrying', 'parked')` ordered by `(received_at ASC, id ASC)` (`resolved` rows are excluded; `raw_payload` is never returned):
+   - Query params: `source` (optional: `BMKG`, `PVMBG`, `SATELIT`, `SENSOR_PANTAI`), `limit` (optional, default `100`, max `1000`), `cursor` (optional opaque keyset cursor from `next_cursor`).
+   - Returns `503` (`service_unavailable`) on store error or timeout.
+   ```bash
+   curl -s -H "Authorization: Bearer $AGGREGATOR_AUDIT_TOKEN" \
+     "http://localhost:8090/internal/audit/unprocessed?limit=10" | jq
+   ```
+
+   **DLQ table contract (`dead_letters`)**: defined in `services/canonical-store/migrations/001_init.sql` (`id BIGSERIAL PRIMARY KEY`, `source`, `source_ref_id`, `raw_payload BYTES`, `reason`, `retryable BOOL`, `attempts INT4`, `status IN ('retrying', 'parked', 'resolved')`, `received_at TIMESTAMPTZ`, `next_attempt_at TIMESTAMPTZ`, `last_error`). Poison messages terminated by the JetStream ingest consumer are also recorded here with `status='parked'` and `retryable=false`.
+

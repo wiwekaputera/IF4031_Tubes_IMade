@@ -41,6 +41,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/internal/audit/events", h.requireAuth(h.Events))
 	mux.HandleFunc("/internal/audit/checksum", h.requireAuth(h.Checksum))
 	mux.HandleFunc("/internal/audit/location", h.requireAuth(h.Location))
+	mux.HandleFunc("/internal/audit/unprocessed", h.requireAuth(h.Unprocessed))
 }
 
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -185,4 +186,47 @@ func (h *Handler) Location(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, loc)
+}
+
+// Unprocessed handles GET /internal/audit/unprocessed.
+func (h *Handler) Unprocessed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	q := r.URL.Query()
+	source := q.Get("source")
+	if source != "" && !hazard.Source(source).Valid() {
+		h.writeError(w, http.StatusBadRequest, "bad_request", "parameter source tidak valid")
+		return
+	}
+
+	limit := defaultAuditLimit
+	if limStr := q.Get("limit"); limStr != "" {
+		lim, err := strconv.Atoi(limStr)
+		if err != nil || lim < 1 || lim > maxAuditLimit {
+			h.writeError(w, http.StatusBadRequest, "bad_request", "parameter limit harus antara 1 dan 1000")
+			return
+		}
+		limit = lim
+	}
+
+	ctx := store.WithCorrelationID(r.Context(), r.Header.Get("X-Correlation-ID"))
+	page, err := h.repo.ListUnprocessed(ctx, store.UnprocessedFilter{
+		Source: source,
+		Limit:  limit,
+		Cursor: q.Get("cursor"),
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidCursor) {
+			h.writeError(w, http.StatusBadRequest, "bad_request", "cursor tidak valid")
+			return
+		}
+		h.logger.Error().Err(err).Msg("failed to list unprocessed messages")
+		h.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "layanan penyimpanan tidak tersedia")
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, page)
 }
