@@ -26,6 +26,7 @@ type Config struct {
 	OutboxPollInterval   time.Duration
 	OutboxBatchSize      int
 	LogLevel             string
+	InstanceID           string
 }
 
 // Load reads configuration from environment variables with fail-fast
@@ -74,6 +75,11 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "unknown"
+	}
+
 	return &Config{
 		Port:                 getEnv("PORT", "8090"),
 		BMKGBaseURL:          getEnv("BMKG_BASE_URL", "http://bmkg-mock:8081"),
@@ -90,6 +96,7 @@ func Load() (*Config, error) {
 		OutboxPollInterval:   time.Duration(outboxPollIntervalMs) * time.Millisecond,
 		OutboxBatchSize:      outboxBatchSize,
 		LogLevel:             strings.ToLower(getEnv("LOG_LEVEL", "info")),
+		InstanceID:           getEnv("INSTANCE_ID", hostname),
 	}, nil
 }
 

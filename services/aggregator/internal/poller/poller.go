@@ -233,25 +233,28 @@ func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
 
 func (p *Poller) fetchSeismicEvents(ctx context.Context, corrID string, since string) ([]agency.SeismicEvent, error) {
 	url := fmt.Sprintf("%s/seismic-events?since=%s&limit=%d", p.cfg.BMKGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
-	return fetchAgencyEvents[agency.SeismicEvent](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
+	return fetchAgencyEvents[agency.SeismicEvent](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.InstanceID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchTsunamiWarnings(ctx context.Context, corrID string, since string) ([]agency.TsunamiWarning, error) {
 	url := fmt.Sprintf("%s/tsunami-warnings?since=%s&limit=%d", p.cfg.BMKGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
-	return fetchAgencyEvents[agency.TsunamiWarning](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
+	return fetchAgencyEvents[agency.TsunamiWarning](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.InstanceID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchVolcanicReports(ctx context.Context, corrID string, since string) ([]agency.VolcanicReport, error) {
 	url := fmt.Sprintf("%s/volcanic-reports?since=%s&limit=%d", p.cfg.PVMBGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
-	return fetchAgencyEvents[agency.VolcanicReport](ctx, p.logger, p.pvmbgClient, url, corrID, p.cfg.PVMBGBearerToken, "Authorization")
+	return fetchAgencyEvents[agency.VolcanicReport](ctx, p.logger, p.pvmbgClient, url, corrID, p.cfg.InstanceID, p.cfg.PVMBGBearerToken, "Authorization")
 }
 
-func fetchAgencyEvents[T any](ctx context.Context, logger zerolog.Logger, client *http.Client, url, corrID, token, authHeader string) ([]T, error) {
+func fetchAgencyEvents[T any](ctx context.Context, logger zerolog.Logger, client *http.Client, url, corrID, instanceID, token, authHeader string) ([]T, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("X-Correlation-ID", corrID)
+	if instanceID != "" {
+		req.Header.Set("X-Instance-ID", instanceID)
+	}
 	if authHeader == "X-BMKG-Key" {
 		req.Header.Set("X-BMKG-Key", token)
 	} else {

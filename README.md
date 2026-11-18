@@ -11,8 +11,8 @@ All 11 services build from a clean checkout and start with a single `docker comp
 
 | Service | Port | Network | Status | Description |
 | :--- | :---: | :--- | :---: | :--- |
-| `bmkg-mock` | `8081` | `agency_net` | 🟢 Operational | Simulated BMKG seismic & tsunami API with jittered delay and `X-BMKG-Key` auth |
-| `pvmbg-mock` | `8082` | `agency_net` | 🟢 Operational | Simulated PVMBG volcanic API with `/admin/outage`, `/admin/schema-version`, and Bearer auth |
+| `bmkg-mock` | `8081` | `agency_net` | 🟢 Operational | Simulated BMKG seismic & tsunami API with `/admin/requests`, `/admin/burst`, jittered delay, and `X-BMKG-Key` auth |
+| `pvmbg-mock` | `8082` | `agency_net` | 🟢 Operational | Simulated PVMBG volcanic API with `/admin/outage`, `/admin/schema-version`, `/admin/requests`, and Bearer auth |
 | `canonical-store` | *internal* | `store_net` | 🟢 Operational | PostgreSQL 16+ JSONB store (`canonical_events`, `outbox`, `volcano_reference`) |
 | `aggregator` | *internal* (`8090`) | `agency_net`, `store_net`, `internal_api_net`, `bus_net` | 🟢 Operational | Poller, normalizer, circuit breaker, transactional outbox relay, and query API |
 | `nats-jetstream` | *internal* (`4222`) | `bus_net` | 🟢 Operational | NATS 2.10 JetStream event broker (`BNPB_EVENTS` stream) |
@@ -323,6 +323,7 @@ Every service validates its configuration at startup (fail-fast):
 | `AGGREGATOR_DB_DSN` | `postgres://aggregator:…@canonical-store:5432/canonical` | `aggregator` | Canonical store connection string |
 | `AGGREGATOR_NATS_URL` | `nats://nats-jetstream:4222` | `aggregator` | Broker URL for the outbox relay |
 | `AGGREGATOR_PORT` | `8090` | `aggregator` | Internal query API port |
+| `INSTANCE_ID` | *(hostname)* | `aggregator` | Instance identifier sent in `X-Instance-ID` to upstream agencies |
 | `CANONICAL_STORE_POSTGRES_USER` / `_PASSWORD` / `_DB` | `aggregator` / `change-me-pg-password` / `canonical` | `canonical-store` | PostgreSQL bootstrap credentials |
 | `TOKEN_DB_DSN` | `postgres://tokenservice:…@token-db:5432/tokendb` | `token-service` | Token DB connection string |
 | `ES256_PRIVATE_KEY_B64` | *(generate)* | `token-service` | Base64 PKCS#8 PEM P-256 key (`scripts/keys/gen-es256.sh`, done automatically by `up.sh`) |
