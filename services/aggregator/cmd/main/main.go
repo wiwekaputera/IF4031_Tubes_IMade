@@ -73,7 +73,7 @@ func main() {
 	}
 	logger.Info().Msg("Connected to canonical store")
 
-	repo := store.NewPostgresRepo(dbPool, logger)
+	repo := store.NewPostgresRepo(dbPool, logger).WithShardQueryTimeout(cfg.ShardQueryTimeout)
 
 	// 4. Connect to JetStream and ensure the event stream is ready before
 	// starting ingestion, so every committed outbox row has a delivery path.

@@ -34,6 +34,9 @@ func (f *fakeRepo) UpsertEvent(_ context.Context, rec store.UpsertRequest) (stri
 func (f *fakeRepo) GetEvents(context.Context, store.EventFilter) ([]hazard.HazardEvent, error) {
 	return nil, nil
 }
+func (f *fakeRepo) ListEvents(context.Context, store.ListFilter) (store.ListResult, error) {
+	return store.ListResult{}, nil
+}
 func (f *fakeRepo) GetVolcanoReferences(context.Context) (map[string]store.VolcanoReference, error) {
 	return nil, nil
 }

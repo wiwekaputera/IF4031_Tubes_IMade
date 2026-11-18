@@ -15,10 +15,13 @@ import (
 )
 
 type fakeQueryRepo struct {
-	mu         sync.Mutex
-	events     []hazard.HazardEvent
-	lastFilter store.EventFilter
-	getErr     error
+	mu               sync.Mutex
+	events           []hazard.HazardEvent
+	lastFilter       store.ListFilter
+	getErr           error
+	partial          bool
+	unavailableUnits []string
+	nextCursor       *string
 }
 
 func (f *fakeQueryRepo) HealthCheck(context.Context) error                                     { return nil }
@@ -30,11 +33,24 @@ func (f *fakeQueryRepo) GetLatestEventTime(context.Context, string) (time.Time, 
 	return time.Time{}, nil
 }
 func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) ([]hazard.HazardEvent, error) {
+	res, err := f.ListEvents(context.Background(), store.ListFilter{
+		HazardType: filter.HazardType,
+		HazardID:   filter.HazardID,
+		Since:      filter.Since,
+		Limit:      filter.Limit,
+	})
+	return res.Events, err
+}
+
+func (f *fakeQueryRepo) ListEvents(_ context.Context, filter store.ListFilter) (store.ListResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastFilter = filter
 	if f.getErr != nil {
-		return nil, f.getErr
+		return store.ListResult{}, f.getErr
+	}
+	if filter.Cursor == "bad-cursor" {
+		return store.ListResult{}, store.ErrInvalidCursor
 	}
 	var out []hazard.HazardEvent
 	for _, e := range f.events {
@@ -42,6 +58,9 @@ func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) (
 			continue
 		}
 		if filter.HazardID != "" && e.HazardID != filter.HazardID {
+			continue
+		}
+		if filter.Source != "" && string(e.Source) != filter.Source {
 			continue
 		}
 		if filter.Since != nil {
@@ -55,10 +74,15 @@ func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) (
 	if filter.Limit > 0 && len(out) > filter.Limit {
 		out = out[:filter.Limit]
 	}
-	return out, nil
+	return store.ListResult{
+		Events:           out,
+		NextCursor:       f.nextCursor,
+		Partial:          f.partial,
+		UnavailableUnits: f.unavailableUnits,
+	}, nil
 }
 
-func (f *fakeQueryRepo) lastFilterCopy() store.EventFilter {
+func (f *fakeQueryRepo) lastFilterCopy() store.ListFilter {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastFilter
@@ -235,5 +259,46 @@ func TestHealthAndRepoError(t *testing.T) {
 	h.GetEvents(wErr, httptest.NewRequest(http.MethodGet, "/internal/events", nil))
 	if wErr.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 on repo error, got %d", wErr.Code)
+	}
+}
+
+func TestGetEvents_ScatterMetaAndCursor(t *testing.T) {
+	nextCur := "eyJ0IjoiMjAyNi0wOS0yMVQxMDowMDowMFoiLCJpZCI6IkUtMDAxIn0"
+	repo := &fakeQueryRepo{
+		events:           testEvents(),
+		partial:          true,
+		unavailableUnits: []string{"shard-2", "shard-5"},
+		nextCursor:       &nextCur,
+	}
+	h := New(repo, zerolog.Nop(), nil)
+
+	// Partial response returns 200 with meta.partial, unavailable_units, next_cursor
+	rec := httptest.NewRecorder()
+	h.GetEvents(rec, httptest.NewRequest(http.MethodGet, "/internal/events?source=BMKG", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on partial result, got %d", rec.Code)
+	}
+	if got := repo.lastFilterCopy().Source; got != "BMKG" {
+		t.Errorf("expected source filter BMKG, got %q", got)
+	}
+	var resp hazard.EventsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if !resp.Meta.Partial {
+		t.Error("expected meta.partial=true")
+	}
+	if len(resp.Meta.UnavailableUnits) != 2 || resp.Meta.UnavailableUnits[0] != "shard-2" {
+		t.Errorf("unexpected unavailable_units: %+v", resp.Meta.UnavailableUnits)
+	}
+	if resp.Meta.NextCursor == nil || *resp.Meta.NextCursor != nextCur {
+		t.Errorf("unexpected next_cursor: %v", resp.Meta.NextCursor)
+	}
+
+	// Bad cursor returns 400
+	recBad := httptest.NewRecorder()
+	h.GetEvents(recBad, httptest.NewRequest(http.MethodGet, "/internal/events?cursor=bad-cursor", nil))
+	if recBad.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid cursor, got %d", recBad.Code)
 	}
 }

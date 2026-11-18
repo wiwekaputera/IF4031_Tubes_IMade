@@ -25,6 +25,7 @@ type Config struct {
 	NATSURL              string
 	OutboxPollInterval   time.Duration
 	OutboxBatchSize      int
+	ShardQueryTimeout    time.Duration
 	LogLevel             string
 	InstanceID           string
 }
@@ -74,6 +75,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	shardQueryTimeoutMs, err := positiveIntEnv("SHARD_QUERY_TIMEOUT_MS", 800)
+	if err != nil {
+		return nil, err
+	}
 
 	hostname, _ := os.Hostname()
 	if hostname == "" {
@@ -95,6 +100,7 @@ func Load() (*Config, error) {
 		NATSURL:              getEnv("NATS_URL", "nats://nats-jetstream:4222"),
 		OutboxPollInterval:   time.Duration(outboxPollIntervalMs) * time.Millisecond,
 		OutboxBatchSize:      outboxBatchSize,
+		ShardQueryTimeout:    time.Duration(shardQueryTimeoutMs) * time.Millisecond,
 		LogLevel:             strings.ToLower(getEnv("LOG_LEVEL", "info")),
 		InstanceID:           getEnv("INSTANCE_ID", hostname),
 	}, nil

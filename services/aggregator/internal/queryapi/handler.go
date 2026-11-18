@@ -2,6 +2,7 @@ package queryapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -68,9 +69,11 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filter := store.EventFilter{}
+	filter := store.ListFilter{}
 	filter.HazardType = r.URL.Query().Get("type")
 	filter.HazardID = r.URL.Query().Get("hazard_id")
+	filter.Source = r.URL.Query().Get("source")
+	filter.Cursor = r.URL.Query().Get("cursor")
 	filter.Limit = 20
 	if limStr := r.URL.Query().Get("limit"); limStr != "" {
 		if lim, err := strconv.Atoi(limStr); err == nil && lim > 0 && lim <= 100 {
@@ -89,14 +92,21 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		filter.Since = sinceTime
 	}
 
-	ctx := r.Context()
-	events, err := h.repo.GetEvents(ctx, filter)
+	ctx := store.WithCorrelationID(r.Context(), correlationIDFromContext(r.Context()))
+	res, err := h.repo.ListEvents(ctx, filter)
 	if err != nil {
+		if errors.Is(err, store.ErrInvalidCursor) {
+			h.writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid pagination cursor",
+			})
+			return
+		}
 		h.logger.Error().Err(err).Msg("failed to fetch events")
 		h.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 		return
 	}
 
+	events := res.Events
 	if events == nil {
 		events = make([]hazard.HazardEvent, 0)
 	}
@@ -104,7 +114,10 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	resp := hazard.EventsResponse{
 		Data: events,
 		Meta: hazard.EventsMeta{
-			Count: len(events),
+			Count:            len(events),
+			Partial:          res.Partial,
+			UnavailableUnits: res.UnavailableUnits,
+			NextCursor:       res.NextCursor,
 		},
 	}
 

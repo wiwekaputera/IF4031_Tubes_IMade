@@ -26,6 +26,7 @@ type CanonicalRepo interface {
 	HealthCheck(ctx context.Context) error
 	UpsertEvent(ctx context.Context, rec UpsertRequest) (string, error)
 	GetEvents(ctx context.Context, filter EventFilter) ([]hazard.HazardEvent, error)
+	ListEvents(ctx context.Context, filter ListFilter) (ListResult, error)
 	GetVolcanoReferences(ctx context.Context) (map[string]VolcanoReference, error)
 	GetLatestEventTime(ctx context.Context, source string) (time.Time, error)
 }
@@ -65,8 +66,9 @@ type OutboxRecord struct {
 }
 
 type PostgresRepo struct {
-	db     *pgxpool.Pool
-	logger zerolog.Logger
+	db                *pgxpool.Pool
+	logger            zerolog.Logger
+	shardQueryTimeout time.Duration
 }
 
 func NewPostgresRepo(db *pgxpool.Pool, logger zerolog.Logger) *PostgresRepo {
