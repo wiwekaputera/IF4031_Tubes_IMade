@@ -15,7 +15,13 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
-func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) {
+type pendingDLQ struct {
+	raw    []byte
+	ref    string
+	reason string
+}
+
+func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time, fenceToken int64) {
 	if !p.breaker.Allow() {
 		p.mu.Lock()
 		stale := p.health.PVMBG.LastSynced
@@ -32,6 +38,7 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 	currentSince := since
 	totalUpserted := 0
 	totalParked := 0
+	firstPage := true
 
 	for {
 		select {
@@ -41,7 +48,13 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 		default:
 		}
 
-		sinceStr := currentSince.UTC().Format(time.RFC3339)
+		fetchSince := currentSince
+		if firstPage && !fetchSince.IsZero() {
+			fetchSince = fetchSince.Add(-watermarkOverlap)
+		}
+		firstPage = false
+		sinceStr := fetchSince.UTC().Format(time.RFC3339)
+
 		items, err := p.fetchVolcanicReports(ctx, corrID, sinceStr)
 		if err != nil {
 			p.breaker.RecordFailure()
@@ -63,25 +76,110 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time) 
 		}
 
 		var latestTime time.Time
-		for _, raw := range items {
-			ts, err := p.processPVMBG(ctx, corrID, raw)
-			if err != nil {
-				reason, retryable := "upsert_failed: "+err.Error(), true
-				var pe *dlq.PermanentError
-				if errors.As(err, &pe) {
-					reason, retryable = pe.Reason, false
+		if p.elector != nil {
+			recs := make([]store.UpsertRequest, 0, len(items))
+			var toPark []pendingDLQ
+			for _, raw := range items {
+				rec, ts, err := p.classifyPVMBG(corrID, raw)
+				if err != nil {
+					reason := err.Error()
+					var pe *dlq.PermanentError
+					if errors.As(err, &pe) {
+						reason = pe.Reason
+					}
+					ref, _ := schema.Peek(raw)
+					toPark = append(toPark, pendingDLQ{raw: raw, ref: ref, reason: reason})
+				} else {
+					recs = append(recs, rec)
 				}
-				ref, _ := schema.Peek(raw)
-				if perr := p.parkPVMBG(ctx, corrID, raw, ref, reason, retryable); perr != nil {
-					// Stop without moving the watermark so this page is read again next poll.
+				if !ts.IsZero() && ts.After(latestTime) {
+					latestTime = ts
+				}
+			}
+
+			fence := store.Fence{
+				LeaseName: p.leaseName,
+				Holder:    p.cfg.InstanceID,
+				Token:     fenceToken,
+			}
+
+			if len(toPark) == 0 {
+				if err := p.repo.UpsertFencedBatch(ctx, fence, string(hazard.SourcePVMBG), latestTime, recs); err != nil {
+					if errors.Is(err, store.ErrFenced) {
+						p.logger.Warn().
+							Int64("fencing_token", fenceToken).
+							Str("holder", p.cfg.InstanceID).
+							Str("correlation_id", corrID).
+							Msg("write rejected: stale fencing token")
+						p.elector.Demote()
+						return
+					}
+					p.logger.Error().Err(err).Str("correlation_id", corrID).Msg("failed to upsert PVMBG fenced batch")
 					return
 				}
-				totalParked++
+				totalUpserted += len(recs)
 			} else {
-				totalUpserted++
+				// Verify lease and commit any valid records first without advancing the watermark.
+				if err := p.repo.UpsertFencedBatch(ctx, fence, string(hazard.SourcePVMBG), time.Time{}, recs); err != nil {
+					if errors.Is(err, store.ErrFenced) {
+						p.logger.Warn().
+							Int64("fencing_token", fenceToken).
+							Str("holder", p.cfg.InstanceID).
+							Str("correlation_id", corrID).
+							Msg("write rejected: stale fencing token")
+						p.elector.Demote()
+						return
+					}
+					p.logger.Error().Err(err).Str("correlation_id", corrID).Msg("failed to upsert PVMBG fenced batch")
+					return
+				}
+				totalUpserted += len(recs)
+
+				for _, d := range toPark {
+					if perr := p.parkPVMBG(ctx, corrID, d.raw, d.ref, d.reason, false); perr != nil {
+						// Stop without moving the watermark so this page is read again next poll.
+						return
+					}
+					totalParked++
+				}
+
+				if !latestTime.IsZero() {
+					if err := p.repo.UpsertFencedBatch(ctx, fence, string(hazard.SourcePVMBG), latestTime, nil); err != nil {
+						if errors.Is(err, store.ErrFenced) {
+							p.logger.Warn().
+								Int64("fencing_token", fenceToken).
+								Str("holder", p.cfg.InstanceID).
+								Str("correlation_id", corrID).
+								Msg("write rejected: stale fencing token")
+							p.elector.Demote()
+							return
+						}
+						p.logger.Error().Err(err).Str("correlation_id", corrID).Msg("failed to advance PVMBG watermark")
+						return
+					}
+				}
 			}
-			if !ts.IsZero() && ts.After(latestTime) {
-				latestTime = ts
+		} else {
+			for _, raw := range items {
+				ts, err := p.processPVMBG(ctx, corrID, raw)
+				if err != nil {
+					reason, retryable := "upsert_failed: "+err.Error(), true
+					var pe *dlq.PermanentError
+					if errors.As(err, &pe) {
+						reason, retryable = pe.Reason, false
+					}
+					ref, _ := schema.Peek(raw)
+					if perr := p.parkPVMBG(ctx, corrID, raw, ref, reason, retryable); perr != nil {
+						// Stop without moving the watermark so this page is read again next poll.
+						return
+					}
+					totalParked++
+				} else {
+					totalUpserted++
+				}
+				if !ts.IsZero() && ts.After(latestTime) {
+					latestTime = ts
+				}
 			}
 		}
 
@@ -140,8 +238,10 @@ func (p *Poller) parkPVMBG(ctx context.Context, corrID string, raw []byte, sourc
 func StartPolling(ctx context.Context, wg *sync.WaitGroup, p *Poller, cfg *config.Config, logger zerolog.Logger) {
 	defer wg.Done()
 
-	if err := p.HydrateWatermarks(ctx); err != nil {
-		logger.Warn().Err(err).Msg("failed to hydrate poller watermarks on startup")
+	if p.elector == nil {
+		if err := p.HydrateWatermarks(ctx); err != nil {
+			logger.Warn().Err(err).Msg("failed to hydrate poller watermarks on startup")
+		}
 	}
 
 	ticker := time.NewTicker(cfg.PollInterval)
@@ -167,6 +267,28 @@ func (p *Poller) PVMBGRetryHandler() dlq.Handler {
 	}
 }
 
+// classifyPVMBG validates and normalizes one PVMBG message with panic recovery.
+func (p *Poller) classifyPVMBG(corrID string, raw []byte) (rec store.UpsertRequest, ts time.Time, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			rec = store.UpsertRequest{}
+			ts = time.Time{}
+			err = &dlq.PermanentError{Reason: fmt.Sprintf("panic: %v", r)}
+		}
+	}()
+
+	report, rej := schema.ClassifyVolcanicReport(raw)
+	if rej != nil {
+		_, reportedAt := schema.Peek(raw)
+		return store.UpsertRequest{}, reportedAt, &dlq.PermanentError{Reason: rej.Reason}
+	}
+
+	ts, _ = parseAgencyTime(report.ReportedAt)
+	rec = p.normalizer.NormalizeVolcanic(report)
+	rec.CorrelationID = corrID
+	return rec, ts, nil
+}
+
 // processPVMBG classifies, normalizes and stores one PVMBG message.
 // It returns the message's reported time (zero if unknown) and:
 //   - nil when the message was stored,
@@ -183,15 +305,10 @@ func (p *Poller) processPVMBG(ctx context.Context, corrID string, raw []byte) (t
 		}
 	}()
 
-	report, rej := schema.ClassifyVolcanicReport(raw)
-	if rej != nil {
-		_, reportedAt := schema.Peek(raw)
-		return reportedAt, &dlq.PermanentError{Reason: rej.Reason}
+	rec, ts, err := p.classifyPVMBG(corrID, raw)
+	if err != nil {
+		return ts, err
 	}
-
-	ts, _ = parseAgencyTime(report.ReportedAt)
-	rec := p.normalizer.NormalizeVolcanic(report)
-	rec.CorrelationID = corrID
 	if _, err := p.repo.UpsertEvent(ctx, rec); err != nil {
 		return ts, err
 	}

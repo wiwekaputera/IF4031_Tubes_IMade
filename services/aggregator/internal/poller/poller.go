@@ -3,6 +3,7 @@ package poller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,7 +21,17 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const defaultBatchPageLimit = 250
+const (
+	defaultBatchPageLimit = 250
+	watermarkOverlap      = 1 * time.Second
+)
+
+// LeaderElector abstracts leader lease checks and demotion for the poller.
+type LeaderElector interface {
+	RenewNow(ctx context.Context) (token int64, ok bool)
+	IsLeader() (token int64, ok bool)
+	Demote()
+}
 
 func parseAgencyTime(s string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339, s)
@@ -42,15 +53,18 @@ type SourceHealth struct {
 }
 
 type Poller struct {
-	cfg         *config.Config
-	normalizer  *normalizer.Normalizer
-	repo        store.CanonicalRepo
-	bmkClient   *http.Client
-	pvmbgClient *http.Client
-	breaker     *circuitbreaker.Breaker
-	logger      zerolog.Logger
-	mu          sync.RWMutex
-	health      *SourceHealth
+	cfg             *config.Config
+	normalizer      *normalizer.Normalizer
+	repo            store.CanonicalRepo
+	elector         LeaderElector
+	leaseName       string
+	lastLeaderToken int64
+	bmkClient       *http.Client
+	pvmbgClient     *http.Client
+	breaker         *circuitbreaker.Breaker
+	logger          zerolog.Logger
+	mu              sync.RWMutex
+	health          *SourceHealth
 }
 
 func New(cfg *config.Config, norm *normalizer.Normalizer, repo store.CanonicalRepo, logger zerolog.Logger) *Poller {
@@ -58,6 +72,7 @@ func New(cfg *config.Config, norm *normalizer.Normalizer, repo store.CanonicalRe
 		cfg:         cfg,
 		normalizer:  norm,
 		repo:        repo,
+		leaseName:   store.DefaultLeaseName,
 		bmkClient:   &http.Client{Timeout: cfg.BMKGTimeout},
 		pvmbgClient: &http.Client{Timeout: cfg.PVMBGTimeout},
 		breaker:     circuitbreaker.New(cfg.PVMBGCbThreshold, cfg.PVMBGCbProbeInterval),
@@ -67,6 +82,13 @@ func New(cfg *config.Config, norm *normalizer.Normalizer, repo store.CanonicalRe
 			PVMBG: SourceStatus{Status: "DOWN"},
 		},
 	}
+}
+
+// WithElector attaches a leader elector so the poller only polls while holding
+// a valid lease and fences every write batch.
+func (p *Poller) WithElector(e LeaderElector) *Poller {
+	p.elector = e
+	return p
 }
 
 func (p *Poller) Health() *SourceHealth {
@@ -100,6 +122,32 @@ func (p *Poller) HydrateWatermarks(ctx context.Context) error {
 	return nil
 }
 
+func (p *Poller) loadWatermarks(ctx context.Context) {
+	bmkgTime, err := p.repo.GetPollerWatermark(ctx, string(hazard.SourceBMKG))
+	if err != nil {
+		p.logger.Warn().Err(err).Msg("failed to load BMKG watermark from database")
+	} else {
+		p.mu.Lock()
+		p.health.BMKG.LastSynced = bmkgTime
+		p.mu.Unlock()
+		if !bmkgTime.IsZero() {
+			p.logger.Info().Time("watermark", bmkgTime).Msg("loaded BMKG watermark from database")
+		}
+	}
+
+	pvmbgTime, err := p.repo.GetPollerWatermark(ctx, string(hazard.SourcePVMBG))
+	if err != nil {
+		p.logger.Warn().Err(err).Msg("failed to load PVMBG watermark from database")
+	} else {
+		p.mu.Lock()
+		p.health.PVMBG.LastSynced = pvmbgTime
+		p.mu.Unlock()
+		if !pvmbgTime.IsZero() {
+			p.logger.Info().Time("watermark", pvmbgTime).Msg("loaded PVMBG watermark from database")
+		}
+	}
+}
+
 func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 	// If context has no deadline, assign a generous cycle timeout so multi-page
 	// backlog draining can complete without hanging indefinitely.
@@ -111,6 +159,25 @@ func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
+	}
+
+	var fenceToken int64
+	if p.elector != nil {
+		tok, ok := p.elector.RenewNow(ctx)
+		if !ok {
+			return
+		}
+		fenceToken = tok
+
+		p.mu.RLock()
+		prevTok := p.lastLeaderToken
+		p.mu.RUnlock()
+		if tok != prevTok {
+			p.loadWatermarks(ctx)
+			p.mu.Lock()
+			p.lastLeaderToken = tok
+			p.mu.Unlock()
+		}
 	}
 
 	p.mu.RLock()
@@ -128,21 +195,22 @@ func (p *Poller) Poll(ctx context.Context, corrID string, since time.Time) {
 	eg, egCtx := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
-		p.pollBMKG(egCtx, corrID, bmkgSince)
+		p.pollBMKG(egCtx, corrID, bmkgSince, fenceToken)
 		return nil
 	})
 
 	eg.Go(func() error {
-		p.pollPVMBG(egCtx, corrID, pvmbgSince)
+		p.pollPVMBG(egCtx, corrID, pvmbgSince, fenceToken)
 		return nil
 	})
 
 	_ = eg.Wait()
 }
 
-func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
+func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time, fenceToken int64) {
 	currentSince := since
 	totalUpserted := 0
+	firstPage := true
 
 	for {
 		select {
@@ -152,7 +220,12 @@ func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
 		default:
 		}
 
-		sinceStr := currentSince.UTC().Format(time.RFC3339)
+		fetchSince := currentSince
+		if firstPage && !fetchSince.IsZero() {
+			fetchSince = fetchSince.Add(-watermarkOverlap)
+		}
+		firstPage = false
+		sinceStr := fetchSince.UTC().Format(time.RFC3339)
 
 		events, err := p.fetchSeismicEvents(ctx, corrID, sinceStr)
 		if err != nil {
@@ -182,6 +255,7 @@ func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
 		}
 
 		var latestTime time.Time
+		recs := make([]store.UpsertRequest, 0, len(events))
 		for _, evt := range events {
 			var warning *agency.TsunamiWarning
 			if w, ok := warningsMap[evt.EventID]; ok {
@@ -190,18 +264,41 @@ func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
 
 			rec := p.normalizer.NormalizeSeismic(evt, warning)
 			rec.CorrelationID = corrID
-
-			id, err := p.repo.UpsertEvent(ctx, rec)
-			if err != nil {
-				p.logger.Error().Err(err).Str("event_id", evt.EventID).Msg("failed to upsert seismic event")
-				continue
-			}
-			_ = id
-			totalUpserted++
+			recs = append(recs, rec)
 
 			t, err := parseAgencyTime(evt.OccurredAt)
 			if err == nil && t.After(latestTime) {
 				latestTime = t
+			}
+		}
+
+		if p.elector != nil {
+			fence := store.Fence{
+				LeaseName: p.leaseName,
+				Holder:    p.cfg.InstanceID,
+				Token:     fenceToken,
+			}
+			if err := p.repo.UpsertFencedBatch(ctx, fence, string(hazard.SourceBMKG), latestTime, recs); err != nil {
+				if errors.Is(err, store.ErrFenced) {
+					p.logger.Warn().
+						Int64("fencing_token", fenceToken).
+						Str("holder", p.cfg.InstanceID).
+						Str("correlation_id", corrID).
+						Msg("write rejected: stale fencing token")
+					p.elector.Demote()
+					return
+				}
+				p.logger.Error().Err(err).Str("correlation_id", corrID).Msg("failed to upsert BMKG fenced batch")
+				return
+			}
+			totalUpserted += len(recs)
+		} else {
+			for _, rec := range recs {
+				if _, err := p.repo.UpsertEvent(ctx, rec); err != nil {
+					p.logger.Error().Err(err).Str("source_ref_id", rec.SourceRefID).Msg("failed to upsert seismic event")
+					continue
+				}
+				totalUpserted++
 			}
 		}
 
@@ -233,25 +330,28 @@ func (p *Poller) pollBMKG(ctx context.Context, corrID string, since time.Time) {
 
 func (p *Poller) fetchSeismicEvents(ctx context.Context, corrID string, since string) ([]agency.SeismicEvent, error) {
 	url := fmt.Sprintf("%s/seismic-events?since=%s&limit=%d", p.cfg.BMKGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
-	return fetchAgencyEvents[agency.SeismicEvent](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
+	return fetchAgencyEvents[agency.SeismicEvent](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.InstanceID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchTsunamiWarnings(ctx context.Context, corrID string, since string) ([]agency.TsunamiWarning, error) {
 	url := fmt.Sprintf("%s/tsunami-warnings?since=%s&limit=%d", p.cfg.BMKGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
-	return fetchAgencyEvents[agency.TsunamiWarning](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
+	return fetchAgencyEvents[agency.TsunamiWarning](ctx, p.logger, p.bmkClient, url, corrID, p.cfg.InstanceID, p.cfg.BMKGAPIKey, "X-BMKG-Key")
 }
 
 func (p *Poller) fetchVolcanicReports(ctx context.Context, corrID string, since string) ([]json.RawMessage, error) {
 	url := fmt.Sprintf("%s/volcanic-reports?since=%s&limit=%d", p.cfg.PVMBGBaseURL, url.QueryEscape(since), defaultBatchPageLimit)
-	return fetchAgencyEvents[json.RawMessage](ctx, p.logger, p.pvmbgClient, url, corrID, p.cfg.PVMBGBearerToken, "Authorization")
+	return fetchAgencyEvents[json.RawMessage](ctx, p.logger, p.pvmbgClient, url, corrID, p.cfg.InstanceID, p.cfg.PVMBGBearerToken, "Authorization")
 }
 
-func fetchAgencyEvents[T any](ctx context.Context, logger zerolog.Logger, client *http.Client, url, corrID, token, authHeader string) ([]T, error) {
+func fetchAgencyEvents[T any](ctx context.Context, logger zerolog.Logger, client *http.Client, url, corrID, instanceID, token, authHeader string) ([]T, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("X-Correlation-ID", corrID)
+	if instanceID != "" {
+		req.Header.Set("X-Instance-ID", instanceID)
+	}
 	if authHeader == "X-BMKG-Key" {
 		req.Header.Set("X-BMKG-Key", token)
 	} else {

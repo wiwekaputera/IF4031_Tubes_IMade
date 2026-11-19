@@ -22,6 +22,7 @@ type Handler struct {
 	logger        zerolog.Logger
 	outage        *admin.OutageState
 	schemaVersion *admin.SchemaVersionState
+	recorder      *RequestRecorder
 }
 
 // NewHandler creates a new HTTP Handler instance.
@@ -32,6 +33,7 @@ func NewHandler(s store.Store, cfg *config.Config, outage *admin.OutageState, sc
 		logger:        logger.With().Str("component", "handler").Logger(),
 		outage:        outage,
 		schemaVersion: schemaVersion,
+		recorder:      NewRequestRecorder(defaultRecorderCapacity),
 	}
 }
 
@@ -185,9 +187,11 @@ func (h *Handler) Routes() http.Handler {
 	// Public admin control plane (no auth)
 	mux.HandleFunc("/admin/outage", h.ToggleOutage)
 	mux.HandleFunc("/admin/schema-version", h.ToggleSchemaVersion)
+	mux.HandleFunc("/admin/requests", h.GetAdminRequests)
+	mux.HandleFunc("/admin/requests/reset", h.ResetAdminRequests)
 
-	// Protected data endpoint: auth + latency (jitter only on /volcanic-reports when outage is OFF)
-	dataMiddleware := Chain(AuthMiddleware(h.cfg.BearerToken), LatencyMiddleware(h.cfg.DelayMinMs, h.cfg.DelayMaxMs, h.outage))
+	// Protected data endpoint: recorder + auth + latency (jitter only on /volcanic-reports when outage is OFF)
+	dataMiddleware := Chain(RecordMiddleware(h.recorder), AuthMiddleware(h.cfg.BearerToken), LatencyMiddleware(h.cfg.DelayMinMs, h.cfg.DelayMaxMs, h.outage))
 	mux.Handle("/volcanic-reports", dataMiddleware(http.HandlerFunc(h.GetVolcanicReports)))
 
 	// Global middleware applied from outermost to innermost:

@@ -28,7 +28,10 @@ networks:
 # Volumes
 # ─────────────────────────────────────────────────────────────
 volumes:
-  canonical_store_data:
+  canonical_store_0_data:
+  canonical_store_1_data:
+  canonical_store_2_data:
+  canonical_store_3_data:
   token_db_data:
   nats_data:
   notification_bbolt_data:
@@ -88,22 +91,85 @@ services:
 
   # ── Data store ───────────────────────────────────────────────
 
-  canonical-store:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: ${CANONICAL_STORE_POSTGRES_USER:-aggregator}
-      POSTGRES_PASSWORD: ${CANONICAL_STORE_POSTGRES_PASSWORD}
-      POSTGRES_DB: ${CANONICAL_STORE_POSTGRES_DB:-canonical}
+  canonical-store-0:
+    image: cockroachdb/cockroach:v24.1.6
+    command: start --insecure --join=canonical-store-0,canonical-store-1,canonical-store-2,canonical-store-3 --locality=node=canonical-store-0 --cache=.25 --max-sql-memory=.25
+    mem_limit: 768m
     volumes:
-      - canonical_store_data:/var/lib/postgresql/data
-      - ./services/canonical-store/migrations/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - canonical_store_0_data:/cockroach/cockroach-data
     networks:
       - store_net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${CANONICAL_STORE_POSTGRES_USER:-aggregator} -d ${CANONICAL_STORE_POSTGRES_DB:-canonical}"]
-      interval: 10s
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+
+  canonical-store-1:
+    image: cockroachdb/cockroach:v24.1.6
+    command: start --insecure --join=canonical-store-0,canonical-store-1,canonical-store-2,canonical-store-3 --locality=node=canonical-store-1 --cache=.25 --max-sql-memory=.25
+    mem_limit: 768m
+    volumes:
+      - canonical_store_1_data:/cockroach/cockroach-data
+    networks:
+      - store_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  canonical-store-2:
+    image: cockroachdb/cockroach:v24.1.6
+    command: start --insecure --join=canonical-store-0,canonical-store-1,canonical-store-2,canonical-store-3 --locality=node=canonical-store-2 --cache=.25 --max-sql-memory=.25
+    mem_limit: 768m
+    volumes:
+      - canonical_store_2_data:/cockroach/cockroach-data
+    networks:
+      - store_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  canonical-store-3:
+    image: cockroachdb/cockroach:v24.1.6
+    command: start --insecure --join=canonical-store-0,canonical-store-1,canonical-store-2,canonical-store-3 --locality=node=canonical-store-3 --cache=.25 --max-sql-memory=.25
+    mem_limit: 768m
+    volumes:
+      - canonical_store_3_data:/cockroach/cockroach-data
+    networks:
+      - store_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  canonical-store-init:
+    image: cockroachdb/cockroach:v24.1.6
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        cockroach init --insecure --host=canonical-store-0:26257 || true
+        until cockroach sql --insecure --host=canonical-store-0:26257 -e "SELECT 1" >/dev/null 2>&1; do sleep 1; done
+        cockroach sql --insecure --host=canonical-store-0:26257 -f /migrations/001_init.sql
+    volumes:
+      - ./services/canonical-store/migrations/001_init.sql:/migrations/001_init.sql:ro
+    depends_on:
+      canonical-store-0:
+        condition: service_healthy
+      canonical-store-1:
+        condition: service_healthy
+      canonical-store-2:
+        condition: service_healthy
+      canonical-store-3:
+        condition: service_healthy
+    networks:
+      - store_net
+    restart: "no"
 
   token-db:
     image: postgres:16-alpine
@@ -155,7 +221,11 @@ services:
       PVMBG_CB_THRESHOLD: ${AGGREGATOR_PVMBG_CB_THRESHOLD:-3}
       PVMBG_CB_PROBE_INTERVAL: ${AGGREGATOR_PVMBG_CB_PROBE_INTERVAL:-30}
       POLL_INTERVAL_S: ${AGGREGATOR_POLL_INTERVAL_S:-3}
+      LEASE_TTL_S: ${AGGREGATOR_LEASE_TTL_S:-15}
+      LEASE_RENEW_INTERVAL_S: ${AGGREGATOR_LEASE_RENEW_INTERVAL_S:-5}
+      SHUTDOWN_DRAIN_S: ${AGGREGATOR_SHUTDOWN_DRAIN_S:-5}
       DB_DSN: ${AGGREGATOR_DB_DSN}
+      AUDIT_TOKEN: ${AGGREGATOR_AUDIT_TOKEN}
       NATS_URL: ${AGGREGATOR_NATS_URL:-nats://nats-jetstream:4222}
       PORT: ${AGGREGATOR_PORT:-8090}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -165,8 +235,8 @@ services:
         condition: service_healthy
       pvmbg-mock:
         condition: service_healthy
-      canonical-store:
-        condition: service_healthy
+      canonical-store-init:
+        condition: service_completed_successfully
       nats-jetstream:
         condition: service_healthy
     networks:

@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: canonical-store-init
+spec:
+  template:
+    spec:
+      containers:
+        - name: init
+          env:
+            - name: CONTROL_PLANE_NODE
+              valueFrom:
+                configMapKeyRef:
+                  name: canonical-store-zone-config
+                  key: CONTROL_PLANE_NODE
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              echo "Initializing CockroachDB cluster (two-node overlay)..."
+              until /cockroach/cockroach init --insecure --host=canonical-store-0.canonical-store:26257 2>&1 | tee /tmp/init.out; do
+                if grep -qiE "already been initialized|already initialized" /tmp/init.out; then
+                  echo "Cluster already initialized."
+                  break
+                fi
+                echo "Waiting for canonical-store-0..."
+                sleep 3
+              done
+              echo "Waiting for SQL endpoint..."
+              until /cockroach/cockroach sql --insecure --host=canonical-store-0.canonical-store:26257 -e "SELECT 1" >/dev/null 2>&1; do
+                sleep 2
+              done
+              echo "Applying 001_init.sql..."
+              /cockroach/cockroach sql --insecure --host=canonical-store-0.canonical-store:26257 -f /migrations/001_init.sql
+              echo "Applying two-node zone constraint for control-plane node: ${CONTROL_PLANE_NODE}..."
+              /cockroach/cockroach sql --insecure --host=canonical-store-0.canonical-store:26257 -e \
+                "ALTER RANGE default CONFIGURE ZONE USING num_replicas = 3, constraints = '{\"+node=${CONTROL_PLANE_NODE}\": 2}';"
+              echo "Two-node cluster initialization complete."

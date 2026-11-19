@@ -15,17 +15,19 @@ import (
 
 // Handler coordinates HTTP requests for the bmkg-mock service.
 type Handler struct {
-	store  store.Store
-	cfg    *config.Config
-	logger zerolog.Logger
+	store    store.Store
+	cfg      *config.Config
+	logger   zerolog.Logger
+	recorder *RequestRecorder
 }
 
 // NewHandler creates a new HTTP Handler instance.
 func NewHandler(s store.Store, cfg *config.Config, logger zerolog.Logger) *Handler {
 	return &Handler{
-		store:  s,
-		cfg:    cfg,
-		logger: logger.With().Str("component", "handler").Logger(),
+		store:    s,
+		cfg:      cfg,
+		logger:   logger.With().Str("component", "handler").Logger(),
+		recorder: NewRequestRecorder(defaultRecorderCapacity),
 	}
 }
 
@@ -151,8 +153,13 @@ func (h *Handler) Routes() http.Handler {
 	// Public endpoint (no auth, no simulated latency)
 	mux.HandleFunc("/health", h.Health)
 
-	// Protected data endpoints: auth + latency jitter
-	dataMiddleware := Chain(AuthMiddleware(h.cfg.APIKey), LatencyMiddleware(h.cfg.DelayMinMs, h.cfg.DelayMaxMs))
+	// Public admin control plane (no auth, no simulated latency)
+	mux.HandleFunc("/admin/requests", h.GetAdminRequests)
+	mux.HandleFunc("/admin/requests/reset", h.ResetAdminRequests)
+	mux.HandleFunc("/admin/burst", h.PostAdminBurst)
+
+	// Protected data endpoints: recorder + auth + latency jitter
+	dataMiddleware := Chain(RecordMiddleware(h.recorder), AuthMiddleware(h.cfg.APIKey), LatencyMiddleware(h.cfg.DelayMinMs, h.cfg.DelayMaxMs))
 	mux.Handle("/seismic-events", dataMiddleware(http.HandlerFunc(h.GetSeismicEvents)))
 	mux.Handle("/tsunami-warnings", dataMiddleware(http.HandlerFunc(h.GetTsunamiWarnings)))
 

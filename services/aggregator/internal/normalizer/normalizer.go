@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/agency"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
@@ -59,7 +58,7 @@ func (n *Normalizer) NormalizeSeismic(event agency.SeismicEvent, warning *agency
 	}
 
 	return store.UpsertRequest{
-		HazardID:    uuid.New().String(),
+		HazardID:    hazard.ID(hazard.SourceBMKG, event.EventID),
 		Source:      string(hazard.SourceBMKG),
 		SourceRefID: event.EventID,
 		HazardType:  hazard.HazardTypeSeismic,
@@ -117,7 +116,7 @@ func (n *Normalizer) NormalizeVolcanic(report agency.VolcanicReport) store.Upser
 	}
 
 	return store.UpsertRequest{
-		HazardID:    uuid.New().String(),
+		HazardID:    hazard.ID(hazard.SourcePVMBG, report.ReportID),
 		Source:      string(hazard.SourcePVMBG),
 		SourceRefID: report.ReportID,
 		HazardType:  hazard.HazardTypeVolcanic,

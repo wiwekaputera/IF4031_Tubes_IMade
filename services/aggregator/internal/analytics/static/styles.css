@@ -1,0 +1,415 @@
+:root {
+  --bg-light: #f5f7fa;
+  --bg-dark: #0f1419;
+  --surface-light: #ffffff;
+  --surface-dark: #19212a;
+  --surface-alt-light: #eef2f6;
+  --surface-alt-dark: #222d38;
+  --text-light: #1a202c;
+  --text-dark: #e6edf3;
+  --muted-light: #4a5568;
+  --muted-dark: #94a3b8;
+  --border-light: #d1d9e0;
+  --border-dark: #2d3b48;
+  --accent-light: #0056b3;
+  --accent-dark: #38bdf8;
+  --accent-text-light: #ffffff;
+  --accent-text-dark: #082f49;
+  --warn-bg-light: #fef3c7;
+  --warn-bg-dark: #451a03;
+  --warn-border-light: #d97706;
+  --warn-border-dark: #f59e0b;
+  --warn-text-light: #78350f;
+  --warn-text-dark: #fde68a;
+
+  --bg: var(--bg-light);
+  --surface: var(--surface-light);
+  --surface-alt: var(--surface-alt-light);
+  --text: var(--text-light);
+  --muted: var(--muted-light);
+  --border: var(--border-light);
+  --accent: var(--accent-light);
+  --accent-text: var(--accent-text-light);
+  --warn-bg: var(--warn-bg-light);
+  --warn-border: var(--warn-border-light);
+  --warn-text: var(--warn-text-light);
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: var(--bg-dark);
+    --surface: var(--surface-dark);
+    --surface-alt: var(--surface-alt-dark);
+    --text: var(--text-dark);
+    --muted: var(--muted-dark);
+    --border: var(--border-dark);
+    --accent: var(--accent-dark);
+    --accent-text: var(--accent-text-dark);
+    --warn-bg: var(--warn-bg-dark);
+    --warn-border: var(--warn-border-dark);
+    --warn-text: var(--warn-text-dark);
+  }
+}
+
+@supports (color: light-dark(white, black)) {
+  :root {
+    --bg: light-dark(var(--bg-light), var(--bg-dark));
+    --surface: light-dark(var(--surface-light), var(--surface-dark));
+    --surface-alt: light-dark(var(--surface-alt-light), var(--surface-alt-dark));
+    --text: light-dark(var(--text-light), var(--text-dark));
+    --muted: light-dark(var(--muted-light), var(--muted-dark));
+    --border: light-dark(var(--border-light), var(--border-dark));
+    --accent: light-dark(var(--accent-light), var(--accent-dark));
+    --accent-text: light-dark(var(--accent-text-light), var(--accent-text-dark));
+    --warn-bg: light-dark(var(--warn-bg-light), var(--warn-bg-dark));
+    --warn-border: light-dark(var(--warn-border-light), var(--warn-border-dark));
+    --warn-text: light-dark(var(--warn-text-light), var(--warn-text-dark));
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+.skip-link:focus {
+  position: fixed;
+  inset-block-start: 0.75rem;
+  inset-inline-start: 0.75rem;
+  z-index: 100;
+  padding: 0.5rem 1rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+:where(a:any-link, button, input, select):focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.site-header {
+  background: var(--surface);
+  border-block-end: 1px solid var(--border);
+  padding-block: 1rem;
+  padding-inline: 1.25rem;
+}
+
+.header-inner {
+  max-inline-size: 1360px;
+  margin-inline: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.375rem;
+}
+
+h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.subtitle {
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.meta-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.container {
+  max-inline-size: 1360px;
+  margin-inline: auto;
+  padding: 1.25rem;
+  display: grid;
+  gap: 1.25rem;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.85rem;
+  padding: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.control-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.control-group label {
+  font-size: 0.825rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+button,
+input,
+select {
+  min-block-size: 2.35rem;
+  padding-inline: 0.75rem;
+  padding-block: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-alt);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.875rem;
+}
+
+button {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+.preset-btn.is-active,
+.primary-btn {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  min-block-size: 2.35rem;
+}
+
+.toggle-label input {
+  min-block-size: auto;
+  accent-color: var(--accent);
+}
+
+.partial-banner {
+  padding: 0.9rem 1.1rem;
+  border-radius: 8px;
+  border: 2px solid var(--warn-border);
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--warn-bg),
+    var(--warn-bg) 12px,
+    color-mix(in srgb, var(--warn-border) 14%, var(--warn-bg)) 12px,
+    color-mix(in srgb, var(--warn-border) 14%, var(--warn-bg)) 24px
+  );
+  color: var(--warn-text);
+  font-size: 0.95rem;
+}
+
+.error-banner {
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  border: 1px solid #dc2626;
+  background: color-mix(in srgb, #dc2626 14%, var(--surface));
+  color: inherit;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0.85rem;
+}
+
+.kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.kpi-card.is-partial {
+  border-style: dashed;
+  border-color: var(--warn-border);
+}
+
+.kpi-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.kpi-value {
+  font-size: 1.6rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+  gap: 1.15rem;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 0.75rem;
+  min-inline-size: 0;
+}
+
+.panel-wide {
+  grid-column: 1 / -1;
+}
+
+.panel-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.chart-box {
+  position: relative;
+  block-size: 320px;
+  inline-size: 100%;
+}
+
+.chart-box canvas {
+  display: block;
+}
+
+.table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  max-block-size: 320px;
+  container-type: inline-size;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+table {
+  inline-size: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.9rem;
+}
+
+thead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 1;
+  background: var(--surface-alt);
+}
+
+th,
+td {
+  padding: 0.55rem 0.75rem;
+  text-align: start;
+  border-block-end: 1px solid var(--border);
+}
+
+.num-col {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+@container (width < 420px) {
+  table,
+  thead,
+  tbody,
+  tr,
+  th,
+  td {
+    display: block;
+  }
+
+  thead {
+    display: none;
+  }
+
+  tr {
+    margin-block-end: 0.65rem;
+    border-block-end: 2px solid var(--border);
+    padding: 0.35rem 0;
+  }
+
+  td,
+  tbody th {
+    display: flex;
+    justify-content: space-between;
+    border-block-end: none;
+    padding-block: 0.25rem;
+  }
+
+  .num-col {
+    text-align: start;
+  }
+}
+
+.site-footer {
+  max-inline-size: 1360px;
+  margin-inline: auto;
+  padding: 0 1.25rem 1.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.site-footer code {
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: var(--surface-alt);
+}

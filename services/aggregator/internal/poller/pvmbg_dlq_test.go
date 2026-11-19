@@ -66,7 +66,7 @@ func TestPVMBGParksRejectedAndKeepsValid(t *testing.T) {
 	repo := &recordingRepo{fakeRepo: &fakeRepo{}}
 	p.repo = repo
 
-	p.pollPVMBG(context.Background(), "dlq-mixed", time.Time{})
+	p.pollPVMBG(context.Background(), "dlq-mixed", time.Time{}, 0)
 
 	if repo.fakeRepo.upserts != 2 {
 		t.Fatalf("upserts = %d, want 2", repo.fakeRepo.upserts)
@@ -102,7 +102,7 @@ func TestPVMBGUpsertFailureIsQueuedForRetry(t *testing.T) {
 	repo := &recordingRepo{fakeRepo: &fakeRepo{}, upsertErr: errors.New("db down")}
 	p.repo = repo
 
-	p.pollPVMBG(context.Background(), "dlq-retry", time.Time{})
+	p.pollPVMBG(context.Background(), "dlq-retry", time.Time{}, 0)
 
 	if len(repo.dlq) != 1 {
 		t.Fatalf("dlq rows = %d, want 1", len(repo.dlq))
@@ -121,7 +121,7 @@ func TestPVMBGWatermarkHeldWhenDLQWriteFails(t *testing.T) {
 	repo := &recordingRepo{fakeRepo: &fakeRepo{}, dlqErr: errors.New("db down")}
 	p.repo = repo
 
-	p.pollPVMBG(context.Background(), "dlq-fail", time.Time{})
+	p.pollPVMBG(context.Background(), "dlq-fail", time.Time{}, 0)
 
 	if !p.Health().PVMBG.LastSynced.IsZero() {
 		t.Fatalf("watermark advanced to %v although DLQ write failed", p.Health().PVMBG.LastSynced)
@@ -139,7 +139,7 @@ func TestPanicInMessageIsParkedNotFatal(t *testing.T) {
 	repo := &recordingRepo{fakeRepo: &fakeRepo{}, panicUpsert: true}
 	p.repo = repo
 
-	p.pollPVMBG(context.Background(), "dlq-panic", time.Time{})
+	p.pollPVMBG(context.Background(), "dlq-panic", time.Time{}, 0)
 
 	if len(repo.dlq) != 2 {
 		t.Fatalf("dlq rows = %d, want 2 (both messages parked, poll survived)", len(repo.dlq))

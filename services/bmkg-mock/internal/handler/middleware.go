@@ -106,6 +106,11 @@ func LoggingMiddleware(logger zerolog.Logger) Middleware {
 
 			latencyMs := time.Since(start).Milliseconds()
 			corrID := CorrelationIDFromContext(r.Context())
+			clientInstance := r.Header.Get("X-Instance-ID")
+			if clientInstance == "" {
+				clientInstance = "unknown"
+			}
+			since := r.URL.Query().Get("since")
 
 			event := logger.Info()
 			if rec.statusCode >= 500 {
@@ -117,6 +122,8 @@ func LoggingMiddleware(logger zerolog.Logger) Middleware {
 			event.
 				Str("service", "bmkg-mock").
 				Str("correlation_id", corrID).
+				Str("client_instance", clientInstance).
+				Str("since", since).
 				Str("method", r.Method).
 				Str("path", r.URL.Path).
 				Str("query", r.URL.RawQuery).

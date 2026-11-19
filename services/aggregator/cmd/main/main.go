@@ -15,13 +15,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/auditapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/dlq"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/ingest"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/lease"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/outboxrelay"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/poller"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/queryapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
 )
 
 func main() {
@@ -46,6 +50,7 @@ func main() {
 
 	logger.Info().
 		Str("port", cfg.Port).
+		Str("instance_id", cfg.InstanceID).
 		Str("bmkg_base_url", cfg.BMKGBaseURL).
 		Str("pvmbg_base_url", cfg.PVMBGBaseURL).
 		Msg("Starting aggregator service")
@@ -74,7 +79,7 @@ func main() {
 	}
 	logger.Info().Msg("Connected to canonical store")
 
-	repo := store.NewPostgresRepo(dbPool, logger)
+	repo := store.NewPostgresRepo(dbPool, logger).WithShardQueryTimeout(cfg.ShardQueryTimeout)
 
 	// 4. Connect to JetStream and ensure the event stream is ready before
 	// starting ingestion, so every committed outbox row has a delivery path.
@@ -99,6 +104,16 @@ func main() {
 	}
 	logger.Info().Str("stream", "BNPB_EVENTS").Msg("JetStream event stream ready")
 
+	if err := ingest.EnsureIngestStream(js); err != nil {
+		logger.Fatal().Err(err).Msg("failed to ensure JetStream ingest stream")
+	}
+	logger.Info().Str("stream", event.IngestStreamName).Msg("JetStream ingest stream ready")
+
+	ingestConsumer := ingest.New(js, repo, logger)
+	if err := ingestConsumer.Subscribe(); err != nil {
+		logger.Fatal().Err(err).Msg("failed to subscribe to JetStream ingest consumer")
+	}
+
 	relay := outboxrelay.New(
 		repo,
 		outboxrelay.NewJetStreamPublisher(js),
@@ -115,12 +130,10 @@ func main() {
 	}
 	logger.Info().Int("volcano_count", len(volcanoRefs)).Msg("Loaded volcano references")
 
-	// 6. Initialize normalizer, poller, and query API handlers
+	// 6. Initialize leader elector, normalizer, poller, and query API handlers
+	elector := lease.New(repo, store.DefaultLeaseName, cfg.InstanceID, cfg.LeaseTTL, cfg.LeaseRenewInterval, logger)
 	norm := normalizer.New(logger, volcanoRefs)
-	p := poller.New(cfg, norm, repo, logger)
-	if err := p.HydrateWatermarks(ctx); err != nil {
-		logger.Warn().Err(err).Msg("failed to hydrate poller watermarks on startup")
-	}
+	p := poller.New(cfg, norm, repo, logger).WithElector(elector)
 
 	healthFn := func() (string, string, time.Time, time.Time, *time.Time) {
 		hs := p.Health()
@@ -132,7 +145,9 @@ func main() {
 		return hs.BMKG.Status, hs.PVMBG.Status, hs.BMKG.LastSynced, hs.PVMBG.LastSynced, pvmbgStaleSince
 	}
 
-	h := queryapi.New(repo, logger, healthFn)
+	h := queryapi.New(repo, logger, healthFn).WithInstanceID(cfg.InstanceID)
+	h.SetReady(true)
+	auditH := auditapi.New(repo, cfg.AuditToken, logger)
 
 	retryHandler := p.PVMBGRetryHandler()
 	dlqHandler, err := dlq.NewHTTPHandler(repo, retryHandler, cfg.InternalOpsToken)
@@ -140,17 +155,25 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to build DLQ routes")
 	}
 
-	// 7. Start background polling loop and transactional outbox relay.
+	// 7. Start leader election, background polling loop, DLQ retry worker, transactional outbox relay, and ingest consumer.
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	wg.Add(3)
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		elector.Run(ctx)
+	}()
 	go poller.StartPolling(ctx, &wg, p, cfg, logger)
 	go poller.RunDLQWorker(ctx, &wg, repo, retryHandler, 5*time.Second, logger)
 	go func() {
 		defer wg.Done()
 		relay.Run(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		ingestConsumer.Run(ctx)
 	}()
 
 	// 8. Initialize HTTP server for internal query API
@@ -161,7 +184,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/internal/dlq", dlqHandler)
 	mux.Handle("/internal/dlq/", dlqHandler)
-	mux.Handle("/", queryapi.Routes(h))
+	mux.Handle("/", queryapi.Routes(h, auditH))
 	httpServer := queryapi.Server(mux, addr)
 
 	serverErrChan := make(chan error, 1)
@@ -183,9 +206,22 @@ func main() {
 		logger.Error().Err(err).Msg("Server encountered fatal error")
 	}
 
-	// Stop background polling workers and wait for in-flight cycles to finish
+	// Mark not-ready immediately so kube-proxy stops routing new requests,
+	// stop background workers, release leader lease, wait drain period, then shut down HTTP.
+	h.SetReady(false)
 	cancel()
 	wg.Wait()
+
+	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer releaseCancel()
+	if err := elector.Release(releaseCtx); err != nil {
+		logger.Warn().Err(err).Msg("failed to release leader lease on shutdown")
+	}
+
+	if cfg.ShutdownDrain > 0 {
+		logger.Info().Dur("drain", cfg.ShutdownDrain).Msg("Draining connections before HTTP shutdown")
+		time.Sleep(cfg.ShutdownDrain)
+	}
 
 	// Shutdown HTTP server with 5s deadline
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -1,0 +1,13 @@
+# Two-node topology zone configuration.
+# Set CONTROL_PLANE_NODE to the exact node name from `kubectl get nodes`
+# (the control-plane / non-worker node that must survive worker node loss).
+#
+# Caveat: Pinning 2 of 3 Raft replicas to CONTROL_PLANE_NODE keeps quorum alive
+# when the worker node is destroyed, at the cost of the control-plane node
+# holding a copy of every range.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: canonical-store-zone-config
+data:
+  CONTROL_PLANE_NODE: "node-a"

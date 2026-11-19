@@ -11,30 +11,84 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/audit"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
 type fakeQueryRepo struct {
-	mu         sync.Mutex
-	events     []hazard.HazardEvent
-	lastFilter store.EventFilter
-	getErr     error
+	mu               sync.Mutex
+	events           []hazard.HazardEvent
+	lastFilter       store.ListFilter
+	getErr           error
+	partial          bool
+	unavailableUnits []string
+	nextCursor       *string
+	leaseInfo           store.LeaseInfo
+	leaseErr            error
+	lastAnalyticsFilter store.AnalyticsFilter
+	analyticsResp       store.AnalyticsSummary
+	analyticsErr        error
 }
 
 func (f *fakeQueryRepo) HealthCheck(context.Context) error                                     { return nil }
 func (f *fakeQueryRepo) UpsertEvent(context.Context, store.UpsertRequest) (string, error)     { return "", nil }
+func (f *fakeQueryRepo) UpsertFencedBatch(context.Context, store.Fence, string, time.Time, []store.UpsertRequest) error {
+	return nil
+}
 func (f *fakeQueryRepo) GetVolcanoReferences(context.Context) (map[string]store.VolcanoReference, error) {
 	return nil, nil
 }
 func (f *fakeQueryRepo) GetLatestEventTime(context.Context, string) (time.Time, error) {
 	return time.Time{}, nil
 }
+func (f *fakeQueryRepo) GetPollerWatermark(context.Context, string) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (f *fakeQueryRepo) GetLease(context.Context, string) (store.LeaseInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.leaseInfo, f.leaseErr
+}
+func (f *fakeQueryRepo) ListAuditEvents(context.Context, store.AuditEventsFilter) (audit.EventsPage, error) {
+	return audit.EventsPage{}, nil
+}
+func (f *fakeQueryRepo) ListUnprocessed(context.Context, store.UnprocessedFilter) (audit.UnprocessedPage, error) {
+	return audit.UnprocessedPage{}, nil
+}
+func (f *fakeQueryRepo) ComputeChecksum(context.Context, string) (audit.Checksum, error) {
+	return audit.Checksum{}, nil
+}
+func (f *fakeQueryRepo) LocateEvent(context.Context, string) (audit.LocationResponse, error) {
+	return audit.LocationResponse{}, nil
+}
+func (f *fakeQueryRepo) GetDistribution(context.Context) (store.DistributionReport, error) {
+	return store.DistributionReport{}, nil
+}
+func (f *fakeQueryRepo) GetAnalyticsSummary(_ context.Context, filter store.AnalyticsFilter) (store.AnalyticsSummary, error) {
+	f.mu.Lock()
+	f.lastAnalyticsFilter = filter
+	f.mu.Unlock()
+	return f.analyticsResp, f.analyticsErr
+}
 func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) ([]hazard.HazardEvent, error) {
+	res, err := f.ListEvents(context.Background(), store.ListFilter{
+		HazardType: filter.HazardType,
+		HazardID:   filter.HazardID,
+		Since:      filter.Since,
+		Limit:      filter.Limit,
+	})
+	return res.Events, err
+}
+
+func (f *fakeQueryRepo) ListEvents(_ context.Context, filter store.ListFilter) (store.ListResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastFilter = filter
 	if f.getErr != nil {
-		return nil, f.getErr
+		return store.ListResult{}, f.getErr
+	}
+	if filter.Cursor == "bad-cursor" {
+		return store.ListResult{}, store.ErrInvalidCursor
 	}
 	var out []hazard.HazardEvent
 	for _, e := range f.events {
@@ -42,6 +96,9 @@ func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) (
 			continue
 		}
 		if filter.HazardID != "" && e.HazardID != filter.HazardID {
+			continue
+		}
+		if filter.Source != "" && string(e.Source) != filter.Source {
 			continue
 		}
 		if filter.Since != nil {
@@ -55,10 +112,15 @@ func (f *fakeQueryRepo) GetEvents(_ context.Context, filter store.EventFilter) (
 	if filter.Limit > 0 && len(out) > filter.Limit {
 		out = out[:filter.Limit]
 	}
-	return out, nil
+	return store.ListResult{
+		Events:           out,
+		NextCursor:       f.nextCursor,
+		Partial:          f.partial,
+		UnavailableUnits: f.unavailableUnits,
+	}, nil
 }
 
-func (f *fakeQueryRepo) lastFilterCopy() store.EventFilter {
+func (f *fakeQueryRepo) lastFilterCopy() store.ListFilter {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastFilter
@@ -239,3 +301,109 @@ func TestHealthAndRepoError(t *testing.T) {
 }
 
 func (f *fakeQueryRepo) InsertDeadLetter(context.Context, store.DeadLetter) error { return nil }
+
+func TestGetEvents_ScatterMetaAndCursor(t *testing.T) {
+	nextCur := "eyJ0IjoiMjAyNi0wOS0yMVQxMDowMDowMFoiLCJpZCI6IkUtMDAxIn0"
+	repo := &fakeQueryRepo{
+		events:           testEvents(),
+		partial:          true,
+		unavailableUnits: []string{"shard-2", "shard-5"},
+		nextCursor:       &nextCur,
+	}
+	h := New(repo, zerolog.Nop(), nil)
+
+	// Partial response returns 200 with meta.partial, unavailable_units, next_cursor
+	rec := httptest.NewRecorder()
+	h.GetEvents(rec, httptest.NewRequest(http.MethodGet, "/internal/events?source=BMKG", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on partial result, got %d", rec.Code)
+	}
+	if got := repo.lastFilterCopy().Source; got != "BMKG" {
+		t.Errorf("expected source filter BMKG, got %q", got)
+	}
+	var resp hazard.EventsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if !resp.Meta.Partial {
+		t.Error("expected meta.partial=true")
+	}
+	if len(resp.Meta.UnavailableUnits) != 2 || resp.Meta.UnavailableUnits[0] != "shard-2" {
+		t.Errorf("unexpected unavailable_units: %+v", resp.Meta.UnavailableUnits)
+	}
+	if resp.Meta.NextCursor == nil || *resp.Meta.NextCursor != nextCur {
+		t.Errorf("unexpected next_cursor: %v", resp.Meta.NextCursor)
+	}
+
+	// Bad cursor returns 400
+	recBad := httptest.NewRecorder()
+	h.GetEvents(recBad, httptest.NewRequest(http.MethodGet, "/internal/events?cursor=bad-cursor", nil))
+	if recBad.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid cursor, got %d", recBad.Code)
+	}
+}
+
+func TestReady(t *testing.T) {
+	h := New(&fakeQueryRepo{}, zerolog.Nop(), nil)
+
+	// Starts not-ready -> 503
+	rec1 := httptest.NewRecorder()
+	h.Ready(rec1, httptest.NewRequest(http.MethodGet, "/internal/ready", nil))
+	if rec1.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 before SetReady(true), got %d", rec1.Code)
+	}
+
+	// Ready -> 200
+	h.SetReady(true)
+	rec2 := httptest.NewRecorder()
+	h.Ready(rec2, httptest.NewRequest(http.MethodGet, "/internal/ready", nil))
+	if rec2.Code != http.StatusOK {
+		t.Errorf("expected 200 after SetReady(true), got %d", rec2.Code)
+	}
+
+	// Draining -> 503
+	h.SetReady(false)
+	rec3 := httptest.NewRecorder()
+	h.Ready(rec3, httptest.NewRequest(http.MethodGet, "/internal/ready", nil))
+	if rec3.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when draining, got %d", rec3.Code)
+	}
+}
+
+func TestLeader(t *testing.T) {
+	exp := time.Date(2026, 11, 18, 12, 0, 15, 0, time.UTC)
+	repo := &fakeQueryRepo{
+		leaseInfo: store.LeaseInfo{
+			Name:         store.DefaultLeaseName,
+			Holder:       "agg-1",
+			FencingToken: 7,
+			ExpiresAt:    exp,
+			IsActive:     true,
+		},
+	}
+
+	h1 := New(repo, zerolog.Nop(), nil).WithInstanceID("agg-1")
+	rec1 := httptest.NewRecorder()
+	h1.Leader(rec1, httptest.NewRequest(http.MethodGet, "/internal/leader", nil))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec1.Code)
+	}
+	var resp1 leaderResponse
+	if err := json.NewDecoder(rec1.Body).Decode(&resp1); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp1.InstanceID != "agg-1" || !resp1.IsLeader || resp1.FencingToken != 7 {
+		t.Errorf("unexpected leader response for holder: %+v", resp1)
+	}
+
+	h2 := New(repo, zerolog.Nop(), nil).WithInstanceID("agg-2")
+	rec2 := httptest.NewRecorder()
+	h2.Leader(rec2, httptest.NewRequest(http.MethodGet, "/internal/leader", nil))
+	var resp2 leaderResponse
+	if err := json.NewDecoder(rec2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp2.InstanceID != "agg-2" || resp2.IsLeader || resp2.FencingToken != 7 {
+		t.Errorf("unexpected leader response for follower: %+v", resp2)
+	}
+}

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: canonical-store
+  labels:
+    app: canonical-store
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: canonical-store
+  ports:
+    - name: grpc
+      port: 26257
+      targetPort: 26257
+    - name: http
+      port: 8080
+      targetPort: 8080

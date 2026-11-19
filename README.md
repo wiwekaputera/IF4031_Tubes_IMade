@@ -12,8 +12,8 @@
 | Area | Milestone 1 | Milestone 2 | Owner | Status |
 | :--- | :--- | :--- | :--- | :---: |
 | Platform | Docker Compose on one machine | Kubernetes (k3s), two nodes with separate kernels | Fayadh | 🚧 In progress |
-| Canonical store (P1) | One PostgreSQL instance | Sharded and replicated store, survives a node loss | Made | 🚧 In progress |
-| Aggregator (P2) | One instance, every instance polls | ≥3 instances, one leader polls, fencing token | Made, Fayadh | 🚧 In progress |
+| Canonical store (P1) | One PostgreSQL instance | 4-node CockroachDB (`RF=3`), 8 logical hash shards, Audit API, analytics dashboard | Made | 🟢 Done |
+| Aggregator (P2) | One instance, every instance polls | ≥3 instances, DB-backed leader election + fencing token (core done; 10k-VU k6 pending) | Made, Fayadh | 🚧 In progress |
 | Schema changes (P3) | Additive changes only | Incompatible changes rejected into a dead-letter queue, retry and replay | Theo | 🟢 Done |
 | Field reports (P3) | — | `POST /field-reports`, accepted with 202, never lost or duplicated | Fayadh | 🚧 In progress |
 | Satellite fire feed (P4) | — | New `satellite-ingestor`: SSE feed → fires → WILDFIRE hazard events | Theo | 🟢 Done |
@@ -28,10 +28,10 @@ Docker Compose still runs the whole system on one machine for development. The K
 
 | Service | Port | Network | Status | Description |
 | :--- | :---: | :--- | :---: | :--- |
-| `bmkg-mock` | `8081` | `agency_net` | 🟢 Operational | Simulated BMKG seismic & tsunami API |
-| `pvmbg-mock` | `8082` | `agency_net` | 🟢 Operational | Simulated PVMBG volcanic API; `/admin/schema-version?mode=incompatible` breaks the schema on purpose |
-| `canonical-store` | *internal* | `store_net` | 🟢 Operational | PostgreSQL store (`canonical_events`, `outbox`, `dead_letters`) |
-| `aggregator` | *internal* (`8090`) | `agency_net`, `store_net`, `internal_api_net`, `bus_net` | 🟢 Operational | Poller, normalizer, schema policy, dead-letter queue, outbox relay, query API |
+| `bmkg-mock` | `8081` | `agency_net` | 🟢 Operational | Simulated BMKG seismic & tsunami API with `/admin/requests`, `/admin/burst`, jittered delay, and `X-BMKG-Key` auth |
+| `pvmbg-mock` | `8082` | `agency_net` | 🟢 Operational | Simulated PVMBG volcanic API with `/admin/outage`, `/admin/schema-version?mode=incompatible`, `/admin/requests`, and Bearer auth |
+| `canonical-store-0..3` | *internal* | `store_net` | 🟢 Operational | 4-node CockroachDB `v24.1.6` cluster (`RF=3`, 8 logical hash shards `shard-0..7`, `canonical_events`, `outbox`, `leader_leases`, `poller_watermarks`, `dead_letters`) |
+| `aggregator` | *internal* (`8090`) | `agency_net`, `store_net`, `internal_api_net`, `bus_net` | 🟢 Operational | HA leader-elected poller, fenced writes, schema policy & DLQ, scatter-gather query API, Audit API, analytics dashboard, outbox relay, JetStream ingest consumer |
 | `nats-jetstream` | *internal* (`4222`) | `bus_net` | 🟢 Operational | JetStream broker (`BNPB_EVENTS`, `HAZARD_INGEST` streams) |
 | `stub-sink` | *internal* (`8085`) | `bus_net` | 🟢 Operational | Notification target with idempotency check |
 | `notification-consumer` | *internal* (`8086`) | `bus_net` | 🟢 Operational | Durable consumer with bbolt dedup, forwards to stub sink |
@@ -41,6 +41,8 @@ Docker Compose still runs the whole system on one machine for development. The K
 | `client-api` | `8080` | `edge_net`, `internal_api_net` | 🟢 Operational | Edge gateway with scope projection and rate limiting |
 | `satellite-store` | *internal* | `satellite_net` | 🟢 Operational | PostgreSQL owned by `satellite-ingestor` only: detections, fires, offset, outbox, dead letters |
 | `satellite-ingestor` | `9091` (metrics) | `agency_net`, `satellite_net`, `bus_net` | 🟢 Operational | Satellite feed client, fire clustering, publishes WILDFIRE events to `hazard.ingest.SATELIT` |
+
+Ports `8080`–`8083` and `9091` can be changed via `.env`.
 
 ---
 
@@ -164,13 +166,54 @@ incurl(){ docker run --rm --network if4031-tubes-imade_internal_api_net curlimag
 
 ### P1 — Distributed Storage
 
-> 🚧 **Owner: Made.** To be completed: store choice and partition key, historical catalogue load and data spread per node, cross-shard "latest 50" query with cursor, partial results (`partial: true`, `unavailable_units`) when a node is down, node removal and addition, Audit API, analytics dashboard.
+The canonical store runs as a 4-node **CockroachDB `v24.1.6`** cluster (`RF=3`, `server.time_until_store_dead = '1m15s'`) with 8 pre-split computed hash shards (`shard = mod(crc32ieee(hazard_id), 8)`, `shard-0`..`shard-7`) and deterministic `hazard_id = "hz-" + sha256(source + "|" + source_ref_id)[:16]`.
+
+- **Kubernetes manifests:** [deploy/k8s/README.md](deploy/k8s/README.md) (`base/`, `overlays/multi-node/`, `overlays/two-node/`, `jobs/aggregator-loader.yaml`, `scripts/k8s/create-secrets.sh`).
+- **Automated P1 scenario scripts (`c1`–`c7`, `MODE=compose|k8s`):** [scripts/demo/m2/p1/README.md](scripts/demo/m2/p1/README.md).
+
+#### Historical Catalog Loader & Data Distribution
+
+The aggregator image ships `/loader` (`services/aggregator/cmd/loader`) for idempotent bulk loading (`ON CONFLICT (shard, hazard_id) DO NOTHING`, no outbox spam unless `--with-outbox` is passed; auto-detects USGS/BMKG CSV/JSON/NDJSON headers or custom `--col-*` flags):
+
+```bash
+# 1. Generate a skewed 50,000-row sample catalog (80% Sulawesi Tengah)
+python3 scripts/p1/gen-sample-catalog.py --rows 50000 --out /tmp/sample-catalog-50k.csv
+
+# 2. Load into CockroachDB (re-running loads 0 new rows)
+docker compose run --rm --entrypoint /loader \
+  -v /tmp/sample-catalog-50k.csv:/data/catalog.csv:ro \
+  aggregator --file /data/catalog.csv --concurrency 4 --batch-size 500
+
+# 3. Inspect per-shard & per-node distribution (GET /internal/admin/distribution)
+bash scripts/p1/distribution.sh
+```
+
+#### Audit API (`/internal/audit/*`)
+
+All endpoints require `Authorization: Bearer <AGGREGATOR_AUDIT_TOKEN>` (returns `401` if invalid):
+- `GET /internal/audit/events?source=&since=&limit=&cursor=` — paginated non-deleted events ordered by `(ingested_at ASC, hazard_id ASC)` with `partial` and `unavailable_units`.
+- `GET /internal/audit/checksum?source=` — SHA-256 of sorted non-deleted `source_ref_id` values (`AUDIT_TOKEN="$AGGREGATOR_AUDIT_TOKEN" bash scripts/audit/checksum-check.sh BMKG`).
+- `GET /internal/audit/location?hazard_id=...` — leaseholder (`primary`) and follower (`replica`) node placement via `SHOW RANGE`.
+- `GET /internal/audit/unprocessed?source=&limit=&cursor=` — paginated `dead_letters` rows with `status IN ('retrying', 'parked')` (excludes `resolved` and `raw_payload`).
+
+#### Analytics Dashboard (`/analytics/`)
+
+Embedded Chart.js dashboard (no external CDN) backed by scatter-gather `GET /internal/analytics/summary`:
+- `SEISMIC` events with non-null `attributes.tsunami_warning` are counted under `TSUNAMI` (mutually exclusive from `SEISMIC`).
+- On shard timeout (`800 ms`), returns HTTP `200` with `partial: true`, `unavailable_units`, warning banner, and `≥` count prefixes.
+- Verify totals match Audit API: `bash scripts/p1/dashboard-vs-audit.sh`.
+
+#### JetStream Ingest Contract (`hazard.ingest.<SOURCE>`)
+
+Non-aggregator sources (`SATELIT`, `SENSOR_PANTAI`) publish `event.IngestMessage` to stream `HAZARD_INGEST` (`hazard.ingest.>`, `Nats-Msg-Id = message_id`). Aggregator replicas share durable pull consumer `aggregator-ingest` (`256 KiB` cap, panic recovery, poison messages terminated & parked in `dead_letters`). Updates (`op: "upsert"`, full replace) and soft-deletes (`op: "delete"`, tombstone + outbox `attributes.deleted=true`) apply only when `source_version > stored source_version`.
 
 ---
 
 ### P2 — High-Availability Aggregator
 
-> 🚧 **Owners: Made (leader election, fencing, exactly-once ingest), Fayadh (load test).** To be completed: ≥3 replicas, leader lease and failover ≤60 s, fencing against a frozen old leader, clock skew scenario, k6 ≥10,000 VU × ≥120 s with scaling 3→5→2, rolling update without failed requests.
+- **Core HA (Made — 🟢 Done):** Aggregator runs `≥ 3` replicas behind one Service (`aggregator:8090`), with DB-backed leader election (`leader_leases` using CockroachDB HLC `now()`), monotonic `fencing_token` checked in `SERIALIZABLE` write transactions (`UpsertFencedBatch`), renew-before-poll, durable `poller_watermarks`, `GET /internal/leader`, `GET /internal/ready` (`503 DRAINING` on `SIGTERM`), and graceful shutdown drain (`SHUTDOWN_DRAIN_S=5`).
+  - Automated P2 scenario scripts (`c1`–`c5`, `MODE=compose|k8s`): [scripts/demo/m2/p2/README.md](scripts/demo/m2/p2/README.md).
+- **Load testing, scaling & rolling update (Fayadh — 🚧 In progress):** k6 `≥ 10,000 VU × ≥ 120 s` with scaling `3→5→2`, throughput `3 vs 1` replicas, and zero-error rolling update.
 
 ---
 
@@ -198,8 +241,8 @@ The DLQ is the `dead_letters` table. It keeps the raw message byte for byte with
    ```bash
    docker compose logs --since 1m aggregator | grep -i dlq
    incurl -H "Authorization: Bearer $INTERNAL_OPS_TOKEN" "http://aggregator:8090/internal/dlq?status=parked&limit=5"
-   docker compose exec -T canonical-store psql -U aggregator -d canonical \
-     -c "SELECT id, source, source_ref_id, reason, status, attempts FROM dead_letters ORDER BY id DESC LIMIT 10;"
+   docker compose exec -T canonical-store-0 cockroach sql --insecure -d canonical \
+     -e "SELECT id, source, source_ref_id, reason, status, attempts FROM dead_letters ORDER BY id DESC LIMIT 10;"
    docker compose ps aggregator          # still running, no restart
    ```
 3. **Only internal ops may inspect the DLQ:**
@@ -336,7 +379,14 @@ All variables are in [.env.example](.env.example). Milestone 1 variables are unc
 
 | Variable | Default | Service | Description |
 | :--- | :---: | :--- | :--- |
+| `AGGREGATOR_DB_DSN` | `postgresql://aggregator@canonical-store-0:26257,…/canonical?sslmode=disable` | `aggregator` | Multi-host CockroachDB connection string |
+| `AGGREGATOR_AUDIT_TOKEN` | `change-me-audit-token` | `aggregator` | Bearer token required by `/internal/audit/*` and `/internal/admin/distribution` |
 | `INTERNAL_OPS_TOKEN` | *(required)* | `aggregator` | Bearer token for `/internal/dlq` routes. Generate with `openssl rand -hex 32` |
+| `INSTANCE_ID` | *(hostname)* | `aggregator` | Instance identifier sent in `X-Instance-ID` and stored as lease holder |
+| `AGGREGATOR_LEASE_TTL_S` | `15` | `aggregator` | Leader lease TTL in seconds (must be `> 2 ×` renew interval) |
+| `AGGREGATOR_LEASE_RENEW_INTERVAL_S` | `5` | `aggregator` | Leader lease renewal interval in seconds |
+| `AGGREGATOR_SHUTDOWN_DRAIN_S` | `5` | `aggregator` | Graceful shutdown readiness drain period in seconds |
+| `SHARD_QUERY_TIMEOUT_MS` | `800` | `aggregator` | Per-shard scatter-gather query timeout (ms) before returning `partial: true` |
 | `SATELLITE_FEED_URL` | `https://satellite.naufarrel.dev` | `satellite-ingestor` | Satellite feed base URL |
 | `SATELLITE_FEED_TOKEN` | *(required)* | `satellite-ingestor` | Group token from the assistants. Keep it in `.env` / a Secret only |
 | `SATELLITE_METRICS_PORT` | `9091` | `satellite-ingestor` | Host port for `/metrics` and `/healthz` |
