@@ -11,7 +11,7 @@
 
 | Area | Milestone 1 | Milestone 2 | Owner | Status |
 | :--- | :--- | :--- | :--- | :---: |
-| Platform | Docker Compose on one machine | Kubernetes (k3s), two nodes with separate kernels | Fayadh | 🚧 In progress |
+| Platform | Docker Compose on one machine | Kubernetes (k3s), two nodes with separate kernels: manifests for every component, Secrets, NetworkPolicies, one-command deploy, Tester Agent | Fayadh | 🚧 Manifests and scripts done; topology declaration after the demo cluster is up |
 | Canonical store (P1) | One PostgreSQL instance | 4-node CockroachDB (`RF=3`), 8 logical hash shards, Audit API, analytics dashboard | Made | 🟢 Done |
 | Aggregator (P2) | One instance, every instance polls | ≥3 instances, DB-backed leader election + fencing token (core done; 10k-VU k6 pending) | Made, Fayadh | 🚧 In progress |
 | Schema changes (P3) | Additive changes only | Incompatible changes rejected into a dead-letter queue, retry and replay | Theo | 🟢 Done |
@@ -109,20 +109,80 @@ set -a; source .env; set +a
 
 ## Kubernetes Deployment
 
-> 🚧 **Owner: Fayadh.** To be completed: topology declaration (physical hosts, VMs, CPU/RAM per node), the one-command deploy, the namespace `sistem-informasi-kebencanaan-bnpb`, Secrets and ConfigMaps, NetworkPolicies, and the Tester Agent setup.
+Every component runs on k3s in the namespace `sistem-informasi-kebencanaan-bnpb`. Manifests, placement and resource choices are described in [deploy/k8s/README.md](deploy/k8s/README.md).
 
-Values the satellite ingestor needs in the cluster:
+### Topology declaration
 
-| Item | Value |
+| Node | Kubernetes role | Type | Physical host | Host CPU / RAM | Node vCPU / RAM | OS / kernel |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `node-a` | control plane + worker | VM (_hypervisor_) | _host laptop_ | _CPU_ / _RAM_ | _n_ vCPU / _n_ GB | Ubuntu Server 24.04 / _kernel_ |
+| `node-b` | worker | VM (_hypervisor_) | _host laptop_ | _CPU_ / _RAM_ | _n_ vCPU / _n_ GB | Ubuntu Server 24.04 / _kernel_ |
+
+Fill in the italic values from the demo cluster (`kubectl get nodes -o wide`, `lscpu`, `free -h`). Node-kill scenarios only target `node-b`.
+
+### 1. Create the cluster (k3s, two nodes with separate kernels)
+
+Two Linux VMs (or native machines) on the same network, at least 4 vCPU / 6 GB RAM for `node-a` and 2 vCPU / 4 GB for `node-b`. kind, k3d and minikube share one kernel and are only for development.
+
+```bash
+# node-a: control plane + worker
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik --node-name=node-a" sh -
+sudo cat /var/lib/rancher/k3s/server/node-token          # copy the token
+
+# node-b: worker
+curl -sfL https://get.k3s.io | K3S_URL=https://<node-a-ip>:6443 K3S_TOKEN=<token> \
+  INSTALL_K3S_EXEC="--node-name=node-b" sh -
+
+# workstation: use the cluster from outside
+scp <user>@<node-a-ip>:/etc/rancher/k3s/k3s.yaml ~/.kube/config   # needs sudo-readable copy
+sed -i 's/127.0.0.1/<node-a-ip>/' ~/.kube/config
+kubectl get nodes -o wide                                  # both nodes Ready, two kernels
+```
+
+For the image import over SSH, the SSH user on each node needs passwordless sudo for `k3s` (`echo "$USER ALL=(ALL) NOPASSWD: /usr/local/bin/k3s" | sudo tee /etc/sudoers.d/k3s`).
+
+### 2. Deploy (one command)
+
+```bash
+cp .env.example .env    # fill in real values (see Quick Start), at least the ES256 key
+K3S_NODES="<user>@<node-a-ip> <user>@<node-b-ip>" bash scripts/k8s/up.sh
+```
+
+`up.sh` builds every image and imports it into both nodes, creates the Secrets from `.env`, loads the Grafana dashboards, applies the `two-node` overlay (with the detected control-plane node name), and waits until every workload is ready. Run on `node-a` itself, `K3S_NODES` can be left out for a single-node import. Options: `OVERLAY=multi-node` for ≥ 3 nodes, `SKIP_BUILD=1` to reuse the imported images.
+
+| Entry point | Address |
 | :--- | :--- |
-| Image | `services/satellite-ingestor/Dockerfile`, built from the repository root |
-| Role label | `role=consumer` |
-| Secret | `SATELLITE_FEED_TOKEN`, the database password |
-| Env | `DATABASE_URL`, `NATS_URL`, `SATELLITE_FEED_URL`, `METRICS_ADDR=:9090` |
-| Probes | `GET /healthz` on port 9090 (checks Postgres and NATS) |
-| Metrics | `GET /metrics` on port 9090 |
-| Store | Its own PostgreSQL (`satellite-store`); only the ingestor may reach it |
-| Replicas | 1 until the leader lease from P2 is available; the offset is in the database, so a restarted pod resumes exactly |
+| client-api | `http://<any-node-ip>:30080` |
+| token-service | `http://<any-node-ip>:30083` |
+| bmkg-mock / pvmbg-mock (admin endpoints) | `http://<any-node-ip>:30081` / `:30082` |
+| Grafana / Prometheus / Jaeger | `:30300` / `:30090` / `:30686` |
+| aggregator (internal) | `kubectl -n sistem-informasi-kebencanaan-bnpb port-forward svc/aggregator 8090:8090` |
+
+### 3. Verify the platform requirements
+
+```bash
+bash scripts/k8s/verify.sh
+```
+
+Checks, with output usable as report evidence: ≥ 2 nodes with distinct kernels, a valid `role` label on every pod, memory requests/limits on every container, node-local storage for every `role=store` pod, NetworkPolicy refusing a foreign pod at `token-db`, `satellite-store` and `canonical-store` (with a control probe that does connect to NATS), and a token → `GET /v1/events` round trip through the NodePorts.
+
+### 4. Tester Agent
+
+Installed from the assistants' pinned manifest without changes; nothing in this repository restricts it (no NetworkPolicy on its namespace, no taints, no RBAC changes).
+
+```bash
+bash scripts/k8s/tester-agent.sh install            # one pod per node
+bash scripts/k8s/tester-agent.sh list               # scenario names
+bash scripts/k8s/tester-agent.sh practice <name>    # run a practice scenario
+bash scripts/k8s/tester-agent.sh logs               # action log of every agent pod
+```
+
+### 5. Teardown
+
+```bash
+bash scripts/k8s/down.sh                             # keeps /var/lib/bnpb on the nodes
+WIPE_DATA=1 K3S_NODES="..." bash scripts/k8s/down.sh # also deletes the node-local data
+```
 
 ---
 
@@ -210,7 +270,7 @@ docker compose logs client-api aggregator | grep demo-trace-1     # same trace_i
 
 ### Limits and pending work
 
-- **Kubernetes:** Prometheus, Grafana and Jaeger run in Compose. Their cluster manifests (`role=other`) follow the platform layout once it is on `main`. In the cluster, Prometheus discovers pods instead of using the static target list.
+- **Kubernetes:** Prometheus, Grafana and Jaeger also run in the cluster (`role=other`, `deploy/k8s/base/observability`). There Prometheus discovers pods through the `prometheus.io/scrape|port|path` annotations instead of the static target list, so new aggregator replicas are scraped automatically; the `instance` label is the pod name and `node` the node it runs on.
 - **Jaeger storage is in memory** (last 50,000 traces); traces are lost when Jaeger restarts. Metrics in Prometheus are kept for 7 days.
 - **Load tests:** every request is traced by default. For the 10,000-VU test, set `OTEL_TRACES_SAMPLER=parentbased_traceidratio` and `OTEL_TRACES_SAMPLER_ARG=0.01` on client-api so tracing does not distort the results.
 - **Log correlation:** request and message logs carry `trace_id`. Log lines written outside a request (for example the aggregator's poll loop) carry only what they already had.
