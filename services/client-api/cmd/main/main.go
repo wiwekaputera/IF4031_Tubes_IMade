@@ -107,6 +107,19 @@ func main() {
 		logger.Fatal().Err(err).Msg("client-api: failed to set up field report publisher")
 	}
 	defer reportPublisher.Close()
+	go func() {
+		// Create the stream early so the consumer can bind before the first report.
+		for ctx.Err() == nil {
+			if err := reportPublisher.EnsureStream(); err == nil {
+				logger.Info().Msg("client-api: field report stream ready")
+				return
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}()
 	fieldReports := httpapi.FieldReportsHandler(httpapi.FieldReportsOptions{
 		Publisher:      reportPublisher,
 		PublishTimeout: cfg.FieldReportPublishTimeout,

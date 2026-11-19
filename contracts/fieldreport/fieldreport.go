@@ -17,6 +17,13 @@ const (
 	StreamName    = "FIELD_REPORTS"
 	Subject       = "field.reports.submitted"
 	SubjectFilter = "field.reports.>"
+
+	// StreamMaxAge is how long the stream keeps reports.
+	StreamMaxAge = 14 * 24 * time.Hour
+	// DuplicateWindow is how long JetStream rejects a repeated message ID.
+	// It covers a client retrying after a lost 202; the consumer's own dedup
+	// store covers anything older.
+	DuplicateWindow = 2 * time.Hour
 )
 
 // Limits on the request accepted from a field team.

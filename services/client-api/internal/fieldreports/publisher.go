@@ -29,19 +29,25 @@ type Publisher interface {
 	Publish(ctx context.Context, r fieldreport.Report) (duplicate bool, err error)
 }
 
-// StreamConfig is the JetStream stream holding field reports. File storage so
-// a broker restart keeps them; the duplicate window covers client retries
-// after a lost 202 (the consumer deduplicates beyond it).
+// StreamConfig is the JetStream stream holding field reports, on file
+// storage so a broker restart keeps them. field-report-consumer creates the
+// same stream when it starts first.
 func StreamConfig() *nats.StreamConfig {
 	return &nats.StreamConfig{
 		Name:       fieldreport.StreamName,
 		Subjects:   []string{fieldreport.SubjectFilter},
 		Storage:    nats.FileStorage,
 		Retention:  nats.LimitsPolicy,
-		MaxAge:     14 * 24 * time.Hour,
-		Duplicates: 2 * time.Hour,
+		MaxAge:     fieldreport.StreamMaxAge,
+		Duplicates: fieldreport.DuplicateWindow,
 		Replicas:   1,
 	}
+}
+
+// EnsureStream creates the stream if it does not exist yet. Errors are
+// returned to the caller; Publish retries it on the next report.
+func (p *NATSPublisher) EnsureStream() error {
+	return p.ensure()
 }
 
 // NATSPublisher publishes to JetStream. It connects in the background so
