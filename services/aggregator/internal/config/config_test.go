@@ -9,6 +9,7 @@ func setBaseEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("BMKG_API_KEY", "k")
 	t.Setenv("PVMBG_BEARER_TOKEN", "t")
+	t.Setenv("INTERNAL_OPS_TOKEN", "ops-secret")
 	t.Setenv("DB_DSN", "postgresql://root@localhost:26257/canonical?sslmode=disable")
 	t.Setenv("AUDIT_TOKEN", "audit-secret")
 }

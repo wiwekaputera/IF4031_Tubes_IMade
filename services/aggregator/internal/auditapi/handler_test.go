@@ -57,6 +57,7 @@ func (f *fakeAuditRepo) GetPollerWatermark(context.Context, string) (time.Time, 
 func (f *fakeAuditRepo) GetLease(context.Context, string) (store.LeaseInfo, error) {
 	return store.LeaseInfo{}, nil
 }
+func (f *fakeAuditRepo) InsertDeadLetter(context.Context, store.DeadLetter) error { return nil }
 
 func (f *fakeAuditRepo) ListAuditEvents(_ context.Context, filter store.AuditEventsFilter) (audit.EventsPage, error) {
 	f.lastEventsFilter = filter

@@ -16,12 +16,13 @@ set +a
 
 BMKG_KEY="${AGGREGATOR_BMKG_API_KEY:-${BMKG_API_KEY:-}}"
 PVMBG_TOKEN="${AGGREGATOR_PVMBG_BEARER_TOKEN:-${PVMBG_BEARER_TOKEN:-}}"
+INTERNAL_OPS_TOK="${INTERNAL_OPS_TOKEN:-}"
 AUDIT_TOK="${AGGREGATOR_AUDIT_TOKEN:-${AUDIT_TOKEN:-}}"
 DEFAULT_DSN="postgresql://aggregator@canonical-store-0.canonical-store:26257,canonical-store-1.canonical-store:26257,canonical-store-2.canonical-store:26257,canonical-store-3.canonical-store:26257/canonical?sslmode=disable"
 DB_DSN_VAL="${K8S_DB_DSN:-$DEFAULT_DSN}"
 
-if [[ -z "$BMKG_KEY" || -z "$PVMBG_TOKEN" || -z "$AUDIT_TOK" ]]; then
-  echo "Error: BMKG_API_KEY, PVMBG_BEARER_TOKEN, and AUDIT_TOKEN must be set in $ENV_FILE" >&2
+if [[ -z "$BMKG_KEY" || -z "$PVMBG_TOKEN" || -z "$INTERNAL_OPS_TOK" || -z "$AUDIT_TOK" ]]; then
+  echo "Error: BMKG_API_KEY, PVMBG_BEARER_TOKEN, INTERNAL_OPS_TOKEN, and AUDIT_TOKEN must be set in $ENV_FILE" >&2
   exit 1
 fi
 
@@ -30,6 +31,7 @@ kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -
 kubectl -n "$NAMESPACE" create secret generic aggregator-secrets \
   --from-literal=BMKG_API_KEY="$BMKG_KEY" \
   --from-literal=PVMBG_BEARER_TOKEN="$PVMBG_TOKEN" \
+  --from-literal=INTERNAL_OPS_TOKEN="$INTERNAL_OPS_TOK" \
   --from-literal=AUDIT_TOKEN="$AUDIT_TOK" \
   --from-literal=DB_DSN="$DB_DSN_VAL" \
   --dry-run=client -o yaml | kubectl apply -f -
