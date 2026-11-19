@@ -16,6 +16,7 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/handler"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/seed"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 )
 
 func main() {
@@ -24,7 +25,18 @@ func main() {
 	logger := zerolog.New(os.Stdout).With().
 		Timestamp().
 		Str("service", "bmkg-mock").
-		Logger()
+		Logger().
+		Hook(observability.LogHook{})
+
+	shutdownTracing, err := observability.Init(context.Background(), "bmkg-mock")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("bmkg-mock: failed to set up tracing")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 
 	// 2. Load runtime configuration with fail-fast validation
 	cfg, err := config.Load()

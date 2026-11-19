@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability/pgxtrace"
 	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/clients"
 	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/token-service/internal/httpapi"
@@ -23,7 +25,17 @@ import (
 func main() {
 	// Configure zerolog structured logger
 	zerolog.TimeFieldFormat = time.RFC3339Nano
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	logger := zerolog.New(os.Stdout).With().Timestamp().Logger().Hook(observability.LogHook{})
+
+	shutdownTracing, err := observability.Init(context.Background(), "token-service")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("token-service: failed to set up tracing")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 
 	// Load configuration with fail-fast validation
 	cfg, err := config.Load()
@@ -62,6 +74,7 @@ func main() {
 	poolConfig.MaxConns = 10
 	poolConfig.MinConns = 2
 	poolConfig.MaxConnLifetime = 30 * time.Minute
+	poolConfig.ConnConfig.Tracer = pgxtrace.Tracer{Service: "token-service"}
 
 	dbPool, err := pgxpool.NewWithConfig(dbCtx, poolConfig)
 	if err != nil {
@@ -90,7 +103,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           handler,
+		Handler:           observability.Middleware("token-service", handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -99,6 +112,20 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Metrics go on their own port so they are not exposed on the public edge.
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":9090"
+	}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", observability.MetricsHandler())
+	metricsServer := &http.Server{Addr: metricsAddr, Handler: metricsMux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error().Err(err).Msg("token-service: metrics server error")
+		}
+	}()
 
 	go func() {
 		logger.Info().Str("addr", server.Addr).Msg("token-service: listening")
@@ -116,5 +143,6 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error().Err(err).Msg("token-service: shutdown error")
 	}
+	_ = metricsServer.Shutdown(shutdownCtx)
 	logger.Info().Msg("token-service: stopped")
 }

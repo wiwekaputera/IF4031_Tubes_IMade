@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 )
 
 // Client defines the interface for interacting with upstream Aggregator.
@@ -72,7 +73,7 @@ func NewClient(opts Options) *AggregatorClient {
 		}
 		httpClient = &http.Client{
 			Timeout:   timeout,
-			Transport: transport,
+			Transport: observability.Transport("client-api", transport),
 		}
 	}
 

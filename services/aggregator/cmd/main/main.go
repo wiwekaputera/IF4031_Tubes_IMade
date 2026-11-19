@@ -17,11 +17,14 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/dlq"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/metrics"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/outboxrelay"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/poller"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/queryapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability/pgxtrace"
 )
 
 func main() {
@@ -30,7 +33,18 @@ func main() {
 	logger := zerolog.New(os.Stdout).With().
 		Timestamp().
 		Str("service", "aggregator").
-		Logger()
+		Logger().
+		Hook(observability.LogHook{})
+
+	shutdownTracing, err := observability.Init(context.Background(), "aggregator")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to set up tracing")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 
 	// 2. Load runtime configuration with fail-fast validation
 	cfg, err := config.Load()
@@ -62,7 +76,12 @@ func main() {
 	}
 
 	// 3. Connect to canonical PostgreSQL store via connection pool
-	dbPool, err := pgxpool.New(context.Background(), cfg.DBDSN)
+	poolCfg, err := pgxpool.ParseConfig(cfg.DBDSN)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("invalid database DSN")
+	}
+	poolCfg.ConnConfig.Tracer = pgxtrace.Tracer{Service: "aggregator"}
+	dbPool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
@@ -145,6 +164,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	metrics.Leader.Set(1) // single instance until leader election sets this
+	go metrics.Run(ctx, metrics.Snapshot{
+		Sources: func() []metrics.Source {
+			hs := p.Health()
+			return []metrics.Source{
+				{Name: "BMKG", Status: hs.BMKG.Status, LastSynced: hs.BMKG.LastSynced},
+				{Name: "PVMBG", Status: hs.PVMBG.Status, LastSynced: hs.PVMBG.LastSynced},
+			}
+		},
+		DeadLetters:   repo.CountDeadLetters,
+		OutboxBacklog: repo.OutboxBacklog,
+	}, 5*time.Second, logger)
+
 	wg.Add(3)
 	go poller.StartPolling(ctx, &wg, p, cfg, logger)
 	go poller.RunDLQWorker(ctx, &wg, repo, retryHandler, 5*time.Second, logger)
@@ -159,10 +191,11 @@ func main() {
 		addr = ":" + addr
 	}
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", observability.MetricsHandler())
 	mux.Handle("/internal/dlq", dlqHandler)
 	mux.Handle("/internal/dlq/", dlqHandler)
 	mux.Handle("/", queryapi.Routes(h))
-	httpServer := queryapi.Server(mux, addr)
+	httpServer := queryapi.Server(observability.Middleware("aggregator", mux), addr)
 
 	serverErrChan := make(chan error, 1)
 	go func() {

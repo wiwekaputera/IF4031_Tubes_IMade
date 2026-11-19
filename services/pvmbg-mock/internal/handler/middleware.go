@@ -119,6 +119,7 @@ func LoggingMiddleware(logger zerolog.Logger, service string) Middleware {
 			}
 
 			event.
+				Ctx(r.Context()).
 				Str("service", service).
 				Str("correlation_id", corrID).
 				Str("method", r.Method).

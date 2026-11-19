@@ -115,6 +115,7 @@ func LoggingMiddleware(logger zerolog.Logger) Middleware {
 			}
 
 			event.
+				Ctx(r.Context()).
 				Str("service", "bmkg-mock").
 				Str("correlation_id", corrID).
 				Str("method", r.Method).

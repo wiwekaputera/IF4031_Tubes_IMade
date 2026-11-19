@@ -18,6 +18,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -97,14 +98,22 @@ type auditConsumer struct {
 	logger zerolog.Logger
 }
 
+// process handles one message inside a consumer span that continues the
+// producer's trace, and records the outcome.
 func (c *auditConsumer) process(msg *nats.Msg) {
+	ctx, op := observability.StartConsume(context.Background(), "audit-consumer", msg.Subject, msg.Header)
+	op.End(c.handle(ctx, msg), nil)
+}
+
+// handle appends one event to the audit history and returns the outcome.
+func (c *auditConsumer) handle(ctx context.Context, msg *nats.Msg) string {
 	var envelope event.Envelope
 	if err := json.Unmarshal(msg.Data, &envelope); err != nil || envelope.EventID == "" || envelope.Version < 1 {
 		c.logger.Error().Err(err).Msg("invalid event envelope; terminating message")
 		if termErr := msg.Term(); termErr != nil {
 			c.logger.Error().Err(termErr).Msg("failed terminating invalid message")
 		}
-		return
+		return "invalid"
 	}
 	inserted, err := c.store.appendOnce(envelope)
 	if err != nil {
@@ -112,18 +121,21 @@ func (c *auditConsumer) process(msg *nats.Msg) {
 		if nakErr := msg.NakWithDelay(time.Second); nakErr != nil {
 			c.logger.Error().Err(nakErr).Msg("failed requesting redelivery")
 		}
-		return
+		return "retry"
 	}
 	if err := msg.Ack(); err != nil {
 		c.logger.Error().Err(err).Str("event_id", envelope.EventID).Msg("failed acknowledging audit event")
-		return
+		return "ack_failed"
 	}
-	if inserted {
-		c.logger.Info().
-			Str("event_key", fmt.Sprintf("%s:%d", envelope.EventID, envelope.Version)).
-			Str("correlation_id", envelope.TraceID).
-			Msg("event appended to audit history")
+	if !inserted {
+		return "duplicate"
 	}
+	c.logger.Info().
+		Ctx(ctx).
+		Str("event_key", fmt.Sprintf("%s:%d", envelope.EventID, envelope.Version)).
+		Str("correlation_id", envelope.TraceID).
+		Msg("event appended to audit history")
+	return "ok"
 }
 
 func healthHandler(conn *nats.Conn) http.Handler {
@@ -159,7 +171,17 @@ func runConsumer(ctx context.Context, sub *nats.Subscription, consumer *auditCon
 
 func main() {
 	zerolog.TimeFieldFormat = time.RFC3339Nano
-	logger := zerolog.New(os.Stdout).With().Timestamp().Str("service", "audit-consumer").Logger()
+	logger := zerolog.New(os.Stdout).With().Timestamp().Str("service", "audit-consumer").Logger().Hook(observability.LogHook{})
+
+	shutdownTracing, err := observability.Init(context.Background(), "audit-consumer")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to set up tracing")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 	natsURL := envOr("NATS_URL", defaultNATSURL)
 	dbPath := envOr("BBOLT_PATH", defaultDBPath)
 
@@ -204,7 +226,7 @@ func main() {
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
 	}
-	server := &http.Server{Addr: addr, Handler: healthHandler(conn), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Addr: addr, Handler: withMetrics(healthHandler(conn)), ReadHeaderTimeout: 5 * time.Second}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
 
@@ -232,6 +254,14 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error().Err(err).Msg("health server shutdown failed")
 	}
+}
+
+// withMetrics serves /metrics beside the existing health handler.
+func withMetrics(health http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", observability.MetricsHandler())
+	mux.Handle("/", health)
+	return mux
 }
 
 func envOr(key, fallback string) string {

@@ -2,6 +2,7 @@
 FROM golang:1.23-alpine AS builder
 WORKDIR /app
 COPY contracts ./contracts
+COPY observability ./observability
 WORKDIR /app/services/audit-consumer
 COPY services/audit-consumer/go.mod services/audit-consumer/go.sum ./
 RUN go mod download

@@ -2,6 +2,7 @@
 FROM golang:1.23-alpine AS builder
 WORKDIR /app
 COPY contracts ./contracts
+COPY observability ./observability
 WORKDIR /app/services/stub-sink
 COPY services/stub-sink/go.mod services/stub-sink/go.sum ./
 RUN go mod download

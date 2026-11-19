@@ -2,6 +2,7 @@
 FROM golang:1.25-alpine AS builder
 WORKDIR /app
 COPY contracts ./contracts
+COPY observability ./observability
 WORKDIR /app/services/token-service
 COPY services/token-service/go.mod services/token-service/go.sum ./
 RUN go mod download

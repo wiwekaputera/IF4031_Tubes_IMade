@@ -11,6 +11,7 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/model"
 	"github.com/wiwekaputera/if4031-tubes-imade/bmkg-mock/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 )
 
 // Handler coordinates HTTP requests for the bmkg-mock service.
@@ -159,6 +160,7 @@ func (h *Handler) Routes() http.Handler {
 	// Global middleware applied from outermost to innermost:
 	// 1. Correlation ID
 	// 2. Zerolog Request Logging
+	mux.Handle("GET /metrics", observability.MetricsHandler())
 	globalMiddleware := Chain(CorrelationIDMiddleware, LoggingMiddleware(h.logger))
-	return globalMiddleware(mux)
+	return observability.Middleware("bmkg-mock", globalMiddleware(mux))
 }

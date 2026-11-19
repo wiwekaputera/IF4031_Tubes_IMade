@@ -117,3 +117,31 @@ func (r *PostgresRepo) queryDeadLetters(ctx context.Context, sql string, args ..
 	}
 	return out, rows.Err()
 }
+
+// CountDeadLetters returns the number of dead letters per status.
+func (r *PostgresRepo) CountDeadLetters(ctx context.Context) (map[string]int64, error) {
+	rows, err := r.db.Query(ctx, `SELECT status, count(*) FROM dead_letters GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var (
+			status string
+			n      int64
+		)
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, err
+		}
+		out[status] = n
+	}
+	return out, rows.Err()
+}
+
+// OutboxBacklog counts outbox rows not yet published.
+func (r *PostgresRepo) OutboxBacklog(ctx context.Context) (int64, error) {
+	var n int64
+	err := r.db.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE published_at IS NULL`).Scan(&n)
+	return n, err
+}

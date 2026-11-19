@@ -17,6 +17,7 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -58,8 +59,8 @@ func New(cfg *config.Config, norm *normalizer.Normalizer, repo store.CanonicalRe
 		cfg:         cfg,
 		normalizer:  norm,
 		repo:        repo,
-		bmkClient:   &http.Client{Timeout: cfg.BMKGTimeout},
-		pvmbgClient: &http.Client{Timeout: cfg.PVMBGTimeout},
+		bmkClient:   &http.Client{Timeout: cfg.BMKGTimeout, Transport: observability.Transport("aggregator", nil)},
+		pvmbgClient: &http.Client{Timeout: cfg.PVMBGTimeout, Transport: observability.Transport("aggregator", nil)},
 		breaker:     circuitbreaker.New(cfg.PVMBGCbThreshold, cfg.PVMBGCbProbeInterval),
 		logger:      logger.With().Str("component", "poller").Logger(),
 		health: &SourceHealth{

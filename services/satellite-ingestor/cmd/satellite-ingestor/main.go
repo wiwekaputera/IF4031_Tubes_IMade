@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,7 +30,10 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/metrics"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/relay"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability/pgxtrace"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/migrations"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -39,7 +43,18 @@ const (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Same field names as the zerolog services: "message", "service".
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.MessageKey {
+				a.Key = "message"
+			}
+			if a.Key == slog.LevelKey {
+				a.Value = slog.StringValue(strings.ToLower(a.Value.String()))
+			}
+			return a
+		},
+	})).With("service", "satellite-ingestor")
 	if err := run(log); err != nil {
 		log.Error("satellite-ingestor stopped", "err", err)
 		os.Exit(1)
@@ -69,7 +84,22 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, dsn)
+	shutdownTracing, err := observability.Init(ctx, "satellite-ingestor")
+	if err != nil {
+		return fmt.Errorf("set up tracing: %w", err)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(flushCtx)
+	}()
+
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("parse DATABASE_URL: %w", err)
+	}
+	poolCfg.ConnConfig.Tracer = pgxtrace.Tracer{Service: "satellite-ingestor"}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
@@ -101,6 +131,7 @@ func run(log *slog.Logger) error {
 
 	client := feed.NewClient(feedURL, token)
 	client.Log = log
+	client.HTTP = &http.Client{Transport: observability.Transport("satellite-ingestor", nil)}
 	metrics.SetState(proc.State())
 
 	mux := http.NewServeMux()
@@ -116,7 +147,7 @@ func run(log *slog.Logger) error {
 		}
 		w.Write([]byte("ok"))
 	})
-	srv := &http.Server{Addr: metricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: metricsAddr, Handler: observability.Middleware("satellite-ingestor", mux), ReadHeaderTimeout: 5 * time.Second}
 
 	// The relay runs beside the feed. The feed only writes to Postgres, so a
 	// broker outage delays publishing but never stops ingestion.
@@ -138,8 +169,14 @@ func run(log *slog.Logger) error {
 	}()
 
 	handle := func(ctx context.Context, m feed.Message) error {
+		// One span per feed message, so its database queries and any publish
+		// nest under it. Compose samples a fraction of these traces.
+		ctx, span := observability.Tracer().Start(ctx, "satellite "+m.Type)
+		span.SetAttributes(attribute.Int64("feed.offset", m.Offset))
+		defer span.End()
 		before := proc.State()
 		if err := proc.Handle(ctx, m); err != nil {
+			span.RecordError(err)
 			return err
 		}
 		metrics.Observe(m, before, proc.State())

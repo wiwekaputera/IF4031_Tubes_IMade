@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -89,35 +90,43 @@ type notificationConsumer struct {
 	logger     zerolog.Logger
 }
 
+// process handles one message inside a consumer span that continues the
+// producer's trace, and records the outcome.
 func (c *notificationConsumer) process(msg *nats.Msg) {
+	ctx, op := observability.StartConsume(context.Background(), "notification-consumer", msg.Subject, msg.Header)
+	op.End(c.handle(ctx, msg), nil)
+}
+
+// handle delivers one event to the sink and returns the outcome for metrics.
+func (c *notificationConsumer) handle(parent context.Context, msg *nats.Msg) string {
 	var envelope event.Envelope
 	if err := json.Unmarshal(msg.Data, &envelope); err != nil || envelope.EventID == "" || envelope.Version < 1 {
 		c.logger.Error().Err(err).Msg("invalid event envelope; terminating message")
 		if termErr := msg.Term(); termErr != nil {
 			c.logger.Error().Err(termErr).Msg("failed terminating invalid message")
 		}
-		return
+		return "invalid"
 	}
 
 	duplicate, err := c.state.isProcessed(envelope.EventID, envelope.Version)
 	if err != nil {
 		c.retry(msg, envelope, err)
-		return
+		return "retry"
 	}
 	if duplicate {
 		if err := msg.Ack(); err != nil {
 			c.logger.Error().Err(err).Str("event_id", envelope.EventID).Msg("failed acknowledging duplicate event")
 		}
-		return
+		return "duplicate"
 	}
 
 	key := fmt.Sprintf("%s:%d", envelope.EventID, envelope.Version)
-	ctx, cancel := context.WithTimeout(context.Background(), sinkTimeout)
+	ctx, cancel := context.WithTimeout(parent, sinkTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.sinkURL+"/notify", bytes.NewReader(msg.Data))
 	if err != nil {
 		c.retry(msg, envelope, err)
-		return
+		return "retry"
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Idempotency-Key", key)
@@ -131,7 +140,7 @@ func (c *notificationConsumer) process(msg *nats.Msg) {
 	if err != nil {
 		c.logger.Error().Err(err).Str("event_key", key).Str("correlation_id", envelope.TraceID).Dur("latency", latency).Msg("notification sink request failed")
 		c.retry(msg, envelope, err)
-		return
+		return "retry"
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	response.Body.Close()
@@ -139,20 +148,21 @@ func (c *notificationConsumer) process(msg *nats.Msg) {
 		err := fmt.Errorf("notification sink returned HTTP %d", response.StatusCode)
 		c.logger.Error().Err(err).Str("event_key", key).Str("correlation_id", envelope.TraceID).Dur("latency", latency).Msg("notification sink rejected event")
 		c.retry(msg, envelope, err)
-		return
+		return "retry"
 	}
 
 	// The sink also deduplicates by this key, covering a crash between its
 	// successful response and this local bbolt write.
 	if err := c.state.markProcessed(envelope.EventID, envelope.Version); err != nil {
 		c.retry(msg, envelope, err)
-		return
+		return "retry"
 	}
 	if err := msg.Ack(); err != nil {
 		c.logger.Error().Err(err).Str("event_key", key).Msg("failed acknowledging notification")
-		return
+		return "ack_failed"
 	}
-	c.logger.Info().Str("event_key", key).Str("correlation_id", envelope.TraceID).Dur("latency", latency).Msg("notification delivered")
+	c.logger.Info().Ctx(ctx).Str("event_key", key).Str("correlation_id", envelope.TraceID).Dur("latency", latency).Msg("notification delivered")
+	return "ok"
 }
 
 func (c *notificationConsumer) retry(msg *nats.Msg, envelope event.Envelope, cause error) {
@@ -195,7 +205,17 @@ func runConsumer(ctx context.Context, sub *nats.Subscription, consumer *notifica
 
 func main() {
 	zerolog.TimeFieldFormat = time.RFC3339Nano
-	logger := zerolog.New(os.Stdout).With().Timestamp().Str("service", "notification-consumer").Logger()
+	logger := zerolog.New(os.Stdout).With().Timestamp().Str("service", "notification-consumer").Logger().Hook(observability.LogHook{})
+
+	shutdownTracing, err := observability.Init(context.Background(), "notification-consumer")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to set up tracing")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 	natsURL := envOr("NATS_URL", defaultNATSURL)
 	sinkURL := strings.TrimRight(envOr("STUB_SINK_URL", defaultSinkURL), "/")
 	dbPath := envOr("BBOLT_PATH", defaultDBPath)
@@ -236,7 +256,7 @@ func main() {
 	defer state.db.Close()
 	consumer := &notificationConsumer{
 		state: state, sinkURL: sinkURL,
-		httpClient: &http.Client{Timeout: sinkTimeout},
+		httpClient: &http.Client{Timeout: sinkTimeout, Transport: observability.Transport("notification-consumer", nil)},
 		logger:     logger,
 	}
 
@@ -245,7 +265,7 @@ func main() {
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
 	}
-	server := &http.Server{Addr: addr, Handler: makeHealthHandler(conn), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Addr: addr, Handler: withMetrics(makeHealthHandler(conn)), ReadHeaderTimeout: 5 * time.Second}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
 
@@ -273,6 +293,14 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error().Err(err).Msg("health server shutdown failed")
 	}
+}
+
+// withMetrics serves /metrics beside the existing health handler.
+func withMetrics(health http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", observability.MetricsHandler())
+	mux.Handle("/", health)
+	return mux
 }
 
 func envOr(key, fallback string) string {
