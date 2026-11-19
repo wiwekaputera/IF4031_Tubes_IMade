@@ -29,15 +29,17 @@ type notification struct {
 
 type sink struct {
 	mu     sync.RWMutex
-	byKey  map[string]notification
-	order  []string
-	logger zerolog.Logger
+	byKey   map[string]notification
+	order   []string
+	reports *reportInbox
+	logger  zerolog.Logger
 }
 
 func newSink(logger zerolog.Logger) *sink {
 	return &sink{
-		byKey:  make(map[string]notification),
-		logger: logger,
+		byKey:   make(map[string]notification),
+		reports: newReportInbox(),
+		logger:  logger,
 	}
 }
 
@@ -46,6 +48,8 @@ func (s *sink) routes() http.Handler {
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("POST /notify", s.notify)
 	mux.HandleFunc("GET /received", s.received)
+	mux.HandleFunc("POST /field-reports", s.receiveFieldReport)
+	mux.HandleFunc("GET /field-reports", s.listFieldReports)
 	mux.Handle("GET /metrics", observability.MetricsHandler())
 	return observability.Middleware("stub-sink", mux)
 }
