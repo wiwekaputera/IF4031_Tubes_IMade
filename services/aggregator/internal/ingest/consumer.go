@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 )
 
 const (
@@ -162,7 +163,11 @@ func (c *Consumer) Run(ctx context.Context) {
 			continue
 		}
 		for _, m := range msgs {
-			c.ProcessMessage(ctx, natsMessage{msg: m})
+			// Continue the producer's trace (for example satellite-ingestor), so a
+			// fire shows as one trace from the feed to the canonical store.
+			mctx, op := observability.StartConsume(ctx, "aggregator", m.Subject, m.Header)
+			c.ProcessMessage(mctx, natsMessage{msg: m})
+			op.End("processed", nil)
 		}
 	}
 }

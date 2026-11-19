@@ -12,6 +12,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/store"
 )
 
@@ -43,11 +44,18 @@ func NewJetStream(js nats.JetStreamContext) *JetStream { return &JetStream{js: j
 
 // Publish implements Publisher.
 func (p *JetStream) Publish(ctx context.Context, subject, messageID string, payload []byte) error {
+	ctx, op := observability.StartPublish(ctx, "satellite-ingestor", subject)
 	msg := nats.NewMsg(subject)
 	msg.Data = payload
 	msg.Header.Set(nats.MsgIdHdr, messageID)
+	observability.Inject(ctx, msg.Header)
 	_, err := p.js.PublishMsg(msg, nats.Context(ctx))
-	return err
+	if err != nil {
+		op.End("error", err)
+		return err
+	}
+	op.End("ok", nil)
+	return nil
 }
 
 // EnsureIngestStream creates the ingest stream if it does not exist yet. An

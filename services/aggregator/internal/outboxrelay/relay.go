@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 )
 
 const (
@@ -41,11 +42,18 @@ func NewJetStreamPublisher(js nats.JetStreamContext) *JetStreamPublisher {
 }
 
 func (p *JetStreamPublisher) Publish(ctx context.Context, subject, messageID string, payload []byte) error {
+	ctx, op := observability.StartPublish(ctx, "aggregator", subject)
 	msg := nats.NewMsg(subject)
 	msg.Data = payload
 	msg.Header.Set(nats.MsgIdHdr, messageID)
+	observability.Inject(ctx, msg.Header)
 	_, err := p.js.PublishMsg(msg, nats.Context(ctx))
-	return err
+	if err != nil {
+		op.End("error", err)
+		return err
+	}
+	op.End("ok", nil)
+	return nil
 }
 
 type Relay struct {
@@ -109,7 +117,10 @@ func (r *Relay) PublishPending(ctx context.Context) error {
 		}
 
 		started := time.Now()
-		if err := r.publisher.Publish(ctx, event.EventSubject, row.EventKey, row.Payload); err != nil {
+		// The envelope's trace_id is the correlation ID of the ingest that
+		// produced the event; carrying it lets consumers' logs join up.
+		pubCtx := observability.WithCorrelationID(ctx, envelope.TraceID)
+		if err := r.publisher.Publish(pubCtx, event.EventSubject, row.EventKey, row.Payload); err != nil {
 			r.logger.Error().
 				Err(err).
 				Str("event_key", row.EventKey).

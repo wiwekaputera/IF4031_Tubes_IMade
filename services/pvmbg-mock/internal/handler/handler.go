@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/admin"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/model"
@@ -197,6 +198,7 @@ func (h *Handler) Routes() http.Handler {
 	// Global middleware applied from outermost to innermost:
 	// 1. Correlation ID
 	// 2. Zerolog Request Logging
+	mux.Handle("GET /metrics", observability.MetricsHandler())
 	globalMiddleware := Chain(CorrelationIDMiddleware, LoggingMiddleware(h.logger, "pvmbg-mock"))
-	return globalMiddleware(mux)
+	return observability.Middleware("pvmbg-mock", globalMiddleware(mux))
 }

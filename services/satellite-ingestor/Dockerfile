@@ -4,6 +4,7 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 COPY services/satellite-ingestor/go.mod services/satellite-ingestor/go.sum ./
 COPY contracts /contracts
+COPY observability /observability
 RUN go mod download
 COPY services/satellite-ingestor/. .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bin/service ./cmd/satellite-ingestor

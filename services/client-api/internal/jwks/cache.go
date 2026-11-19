@@ -16,6 +16,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -33,7 +34,7 @@ var (
 
 const (
 	DefaultRefreshInterval = 10 * time.Minute
-	
+
 	DefaultMinRefetchInterval = 30 * time.Second
 )
 
@@ -66,8 +67,8 @@ type KeyCache struct {
 	minRefetchInterval time.Duration
 	logger             zerolog.Logger
 
-	mu                 sync.RWMutex
-	keys               map[string]*ecdsa.PublicKey
+	mu                  sync.RWMutex
+	keys                map[string]*ecdsa.PublicKey
 	lastOnDemandRefetch time.Time
 
 	sfGroup singleflight.Group
@@ -77,7 +78,7 @@ type KeyCache struct {
 func New(opts Options) *KeyCache {
 	client := opts.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+		client = &http.Client{Timeout: 5 * time.Second, Transport: observability.Transport("client-api", nil)}
 	}
 
 	refreshInterval := opts.RefreshInterval

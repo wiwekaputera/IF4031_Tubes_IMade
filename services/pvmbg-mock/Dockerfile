@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS builder
 WORKDIR /app
+COPY observability /observability
 COPY services/pvmbg-mock/go.mod services/pvmbg-mock/go.sum ./
 RUN go mod download
 COPY services/pvmbg-mock/. .

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 )
 
 // Client defines the interface for interacting with upstream Aggregator.
@@ -72,7 +73,7 @@ func NewClient(opts Options) *AggregatorClient {
 		}
 		httpClient = &http.Client{
 			Timeout:   timeout,
-			Transport: transport,
+			Transport: observability.Transport("client-api", transport),
 		}
 	}
 
@@ -118,7 +119,7 @@ func (c *AggregatorClient) GetEvents(ctx context.Context, rawQuery, correlationI
 			msg = "aggregator request timed out"
 		}
 
-		c.logger.Error().
+		c.logger.Error().Ctx(ctx).
 			Err(err).
 			Str("service", "client-api").
 			Str("upstream", "aggregator").
@@ -135,7 +136,7 @@ func (c *AggregatorClient) GetEvents(ctx context.Context, rawQuery, correlationI
 	}
 	defer resp.Body.Close()
 
-	c.logger.Info().
+	c.logger.Info().Ctx(ctx).
 		Str("service", "client-api").
 		Str("upstream", "aggregator").
 		Str("correlation_id", correlationID).
@@ -166,7 +167,7 @@ func (c *AggregatorClient) GetEvents(ctx context.Context, rawQuery, correlationI
 
 	var eventsResp EventsResponse
 	if err := json.Unmarshal(bodyBytes, &eventsResp); err != nil {
-		c.logger.Error().
+		c.logger.Error().Ctx(ctx).
 			Err(err).
 			Str("service", "client-api").
 			Str("upstream", "aggregator").

@@ -3,6 +3,7 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 COPY services/aggregator/go.mod services/aggregator/go.sum ./
 COPY contracts /contracts
+COPY observability /observability
 RUN go mod download
 COPY services/aggregator/. .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bin/service ./cmd/main

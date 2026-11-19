@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/admin"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/pvmbg-mock/internal/generator"
@@ -24,7 +25,18 @@ func main() {
 	logger := zerolog.New(os.Stdout).With().
 		Timestamp().
 		Str("service", "pvmbg-mock").
-		Logger()
+		Logger().
+		Hook(observability.LogHook{})
+
+	shutdownTracing, err := observability.Init(context.Background(), "pvmbg-mock")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("pvmbg-mock: failed to set up tracing")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 
 	cfg, err := config.Load()
 	if err != nil {

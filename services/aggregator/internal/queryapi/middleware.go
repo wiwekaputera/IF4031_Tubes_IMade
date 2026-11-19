@@ -72,6 +72,7 @@ func LoggingMiddleware(logger zerolog.Logger, next http.Handler) http.Handler {
 		}
 
 		event.
+			Ctx(r.Context()).
 			Str("service", "aggregator").
 			Str("correlation_id", corrID).
 			Str("method", r.Method).

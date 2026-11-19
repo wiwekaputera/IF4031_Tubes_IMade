@@ -16,6 +16,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 )
 
 const maxNotifyBody = 1 << 20
@@ -45,7 +46,8 @@ func (s *sink) routes() http.Handler {
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("POST /notify", s.notify)
 	mux.HandleFunc("GET /received", s.received)
-	return mux
+	mux.Handle("GET /metrics", observability.MetricsHandler())
+	return observability.Middleware("stub-sink", mux)
 }
 
 func (s *sink) health(w http.ResponseWriter, r *http.Request) {
@@ -134,7 +136,17 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func main() {
 	zerolog.TimeFieldFormat = time.RFC3339Nano
-	logger := zerolog.New(os.Stdout).With().Timestamp().Str("service", "stub-sink").Logger()
+	logger := zerolog.New(os.Stdout).With().Timestamp().Str("service", "stub-sink").Logger().Hook(observability.LogHook{})
+
+	shutdownTracing, err := observability.Init(context.Background(), "stub-sink")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("stub-sink: failed to set up tracing")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8085"
