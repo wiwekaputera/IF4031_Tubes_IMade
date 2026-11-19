@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Grafana dashboards and provisioning files are not copied here: the ConfigMaps
+# grafana-dashboards and grafana-provisioning are built from monitoring/ by
+# scripts/k8s/up.sh, so Compose and Kubernetes share one copy of each file.
+resources:
+  - prometheus.yaml
+  - jaeger.yaml
+  - grafana.yaml
