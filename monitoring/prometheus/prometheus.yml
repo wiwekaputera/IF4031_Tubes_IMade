@@ -39,5 +39,7 @@ scrape_configs:
         labels: { role: consumer }
       - targets: ["audit-consumer:8087"]
         labels: { role: consumer }
+      - targets: ["field-report-consumer:8088"]
+        labels: { role: consumer }
       - targets: ["satellite-ingestor:9090"]
         labels: { role: consumer }

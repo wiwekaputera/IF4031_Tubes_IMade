@@ -38,6 +38,7 @@ volumes:
   nats_data:
   notification_bbolt_data:
   audit_bbolt_data:
+  field_report_bbolt_data:
   satellite_store_data:
   prometheus_data:
   grafana_data:
@@ -310,6 +311,8 @@ services:
       TOKEN_AUDIENCE: ${TOKEN_AUDIENCE:-bnpb-client-api}
       RPS_LIMIT: ${CLIENT_API_RPS_LIMIT:-100}
       BURST: ${CLIENT_API_BURST:-20}
+      NATS_URL: ${NATS_URL:-nats://nats-jetstream:4222}
+      FIELD_REPORT_PUBLISH_TIMEOUT_MS: ${CLIENT_API_FIELD_REPORT_PUBLISH_TIMEOUT_MS:-2000}
       PORT: ${CLIENT_API_PORT:-8080}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       HEALTHCHECK_URL: http://localhost:8080/health
@@ -318,11 +321,14 @@ services:
         condition: service_healthy
       token-service:
         condition: service_healthy
+      nats-jetstream:
+        condition: service_healthy
     ports:
       - "${CLIENT_API_PORT:-8080}:8080"
     networks:
       - edge_net
       - internal_api_net
+      - bus_net         # stores accepted field reports in JetStream
     healthcheck:
       test: ["CMD", "/healthcheck"]
       interval: 10s
@@ -392,6 +398,33 @@ services:
       aggregator:
         condition: service_healthy
       nats-jetstream:
+        condition: service_healthy
+    networks:
+      - bus_net
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  field-report-consumer:
+    build:
+      context: .
+      dockerfile: services/field-report-consumer/Dockerfile
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      NATS_URL: ${NATS_URL:-nats://nats-jetstream:4222}
+      STUB_SINK_URL: ${FIELD_REPORT_CONSUMER_STUB_SINK_URL:-http://stub-sink:8085}
+      BBOLT_PATH: ${FIELD_REPORT_CONSUMER_BBOLT_PATH:-/data/field-reports.db}
+      PORT: "8088"
+      HEALTHCHECK_URL: http://localhost:8088/health
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - field_report_bbolt_data:/data
+    depends_on:
+      nats-jetstream:
+        condition: service_healthy
+      stub-sink:
         condition: service_healthy
     networks:
       - bus_net
