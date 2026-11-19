@@ -13,6 +13,7 @@ import (
 
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/auth"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/config"
+	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/fieldreports"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/httpapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/jwks"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/ratelimit"
@@ -52,6 +53,7 @@ func main() {
 		Str("jwks_url", cfg.JWKSURL).
 		Float64("rps_limit", cfg.RPSLimit).
 		Int("burst", cfg.Burst).
+		Str("nats_url", cfg.NATSURL).
 		Msg("client-api: starting up")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -98,10 +100,25 @@ func main() {
 		Logger:  logger,
 	})
 
+	// Field reports are stored in JetStream. The connection is retried in the
+	// background so reads keep working while the broker is unreachable.
+	reportPublisher, err := fieldreports.NewNATSPublisher(cfg.NATSURL)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("client-api: failed to set up field report publisher")
+	}
+	defer reportPublisher.Close()
+	fieldReports := httpapi.FieldReportsHandler(httpapi.FieldReportsOptions{
+		Publisher:      reportPublisher,
+		PublishTimeout: cfg.FieldReportPublishTimeout,
+		Logger:         logger,
+	})
+
 	// Setup HTTP routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.HealthHandler())
 	mux.HandleFunc("GET /v1/events", httpapi.EventsHandler(aggClient))
+	mux.HandleFunc("POST /field-reports", fieldReports)
+	mux.HandleFunc("POST /v1/field-reports", fieldReports)
 
 	// Chain middlewares: CorrelationID -> Logging -> Auth -> Rate limit -> Handler
 	handler := httpapi.CorrelationIDMiddleware(
