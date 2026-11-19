@@ -12,6 +12,8 @@ AGGREGATOR_URL="${AGGREGATOR_URL:-http://localhost:8090}"
 TOKEN="${AUDIT_TOKEN:-${AGGREGATOR_AUDIT_TOKEN:-}}"
 DOCKER_NET="${DOCKER_NET:-if4031-tubes-imade_internal_api_net}"
 RANGE="${RANGE:-7d}"
+AUDIT_LIMIT="${AUDIT_LIMIT:-500}"
+CURL_HELPER_CONTAINER="${CURL_HELPER_CONTAINER:-}"
 
 if [[ -z "$TOKEN" ]]; then
   echo "ERROR: AUDIT_TOKEN / AGGREGATOR_AUDIT_TOKEN is required to query /internal/audit/events." >&2
@@ -29,6 +31,10 @@ http_get() {
   if curl "${curl_args[@]}" "${AGGREGATOR_URL}${path}" 2>/dev/null; then
     return 0
   fi
+  if [[ -n "${CURL_HELPER_CONTAINER}" ]]; then
+    docker exec "${CURL_HELPER_CONTAINER}" curl "${curl_args[@]}" "http://aggregator:8090${path}"
+    return $?
+  fi
   if docker network inspect "${DOCKER_NET}" >/dev/null 2>&1; then
     docker run --rm --network "${DOCKER_NET}" curlimages/curl:8.10.1 \
       "${curl_args[@]}" "http://aggregator:8090${path}"
@@ -39,7 +45,7 @@ http_get() {
 
 SUMMARY_JSON=$(http_get "/internal/analytics/summary?range=${RANGE}")
 
-python3 - "$SUMMARY_JSON" "$AGGREGATOR_URL" "$TOKEN" "$DOCKER_NET" <<'PY'
+python3 - "$SUMMARY_JSON" "$AGGREGATOR_URL" "$TOKEN" "$DOCKER_NET" "$AUDIT_LIMIT" "$CURL_HELPER_CONTAINER" <<'PY'
 import datetime
 import json
 import subprocess
@@ -51,6 +57,8 @@ summary = json.loads(sys.argv[1])
 base_url = sys.argv[2].rstrip("/")
 token = sys.argv[3]
 docker_net = sys.argv[4]
+audit_limit = sys.argv[5]
+curl_helper = sys.argv[6]
 
 if summary.get("partial"):
     print(f"WARN: analytics summary is partial; unavailable_units={summary.get('unavailable_units', [])}", file=sys.stderr)
@@ -66,7 +74,7 @@ win_from = parse_ts(summary.get("from", ""))
 win_to = parse_ts(summary.get("to", ""))
 
 def fetch_audit_page(cursor):
-    qs = {"limit": "1000"}
+    qs = {"limit": str(audit_limit)}
     if cursor:
         qs["cursor"] = cursor
     path = "/internal/audit/events?" + urllib.parse.urlencode(qs)
@@ -78,15 +86,20 @@ def fetch_audit_page(cursor):
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception:
-        out = subprocess.check_output(
-            [
+        if curl_helper:
+            cmd = [
+                "docker", "exec", curl_helper, "curl", "-fsS", "--max-time", "10",
+                "-H", f"Authorization: Bearer {token}",
+                f"http://aggregator:8090{path}",
+            ]
+        else:
+            cmd = [
                 "docker", "run", "--rm", "--network", docker_net,
                 "curlimages/curl:8.10.1", "-fsS", "--max-time", "10",
                 "-H", f"Authorization: Bearer {token}",
                 f"http://aggregator:8090{path}",
-            ],
-            text=True,
-        )
+            ]
+        out = subprocess.check_output(cmd, text=True)
         return json.loads(out)
 
 cats = ["SEISMIC", "TSUNAMI", "VOLCANIC", "WILDFIRE", "COASTAL"]

@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aggregator-loader
+  namespace: sistem-informasi-kebencanaan-bnpb
+  labels:
+    app: aggregator
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: aggregator
+        role: aggregator
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: loader
+          image: bnpb/aggregator:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/loader"]
+          args:
+            - "--file"
+            - "/data/catalog.csv"
+            - "--concurrency"
+            - "4"
+            - "--batch-size"
+            - "500"
+          env:
+            - name: DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: aggregator-secrets
+                  key: DB_DSN
+          resources:
+            requests:
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: catalog-data
+              mountPath: /data
+              readOnly: true
+      volumes:
+        # For small datasets, you can swap this for a ConfigMap volume.
+        - name: catalog-data
+          hostPath:
+            path: /var/lib/bnpb/catalog
+            type: DirectoryOrCreate

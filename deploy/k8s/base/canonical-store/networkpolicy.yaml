@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: canonical-store-ingress
+  labels:
+    app: canonical-store
+spec:
+  podSelector:
+    matchLabels:
+      app: canonical-store
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: aggregator
+        - podSelector:
+            matchLabels:
+              app: canonical-store
+        - podSelector:
+            matchLabels:
+              app: canonical-store-init
+      ports:
+        - protocol: TCP
+          port: 26257
+        - protocol: TCP
+          port: 8080

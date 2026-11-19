@@ -90,6 +90,7 @@ services:
   canonical-store-0:
     image: cockroachdb/cockroach:v24.1.6
     command: start --insecure --join=canonical-store-0,canonical-store-1,canonical-store-2,canonical-store-3 --locality=node=canonical-store-0 --cache=.25 --max-sql-memory=.25
+    mem_limit: 768m
     volumes:
       - canonical_store_0_data:/cockroach/cockroach-data
     networks:
@@ -103,6 +104,7 @@ services:
   canonical-store-1:
     image: cockroachdb/cockroach:v24.1.6
     command: start --insecure --join=canonical-store-0,canonical-store-1,canonical-store-2,canonical-store-3 --locality=node=canonical-store-1 --cache=.25 --max-sql-memory=.25
+    mem_limit: 768m
     volumes:
       - canonical_store_1_data:/cockroach/cockroach-data
     networks:
@@ -116,6 +118,7 @@ services:
   canonical-store-2:
     image: cockroachdb/cockroach:v24.1.6
     command: start --insecure --join=canonical-store-0,canonical-store-1,canonical-store-2,canonical-store-3 --locality=node=canonical-store-2 --cache=.25 --max-sql-memory=.25
+    mem_limit: 768m
     volumes:
       - canonical_store_2_data:/cockroach/cockroach-data
     networks:
@@ -129,6 +132,7 @@ services:
   canonical-store-3:
     image: cockroachdb/cockroach:v24.1.6
     command: start --insecure --join=canonical-store-0,canonical-store-1,canonical-store-2,canonical-store-3 --locality=node=canonical-store-3 --cache=.25 --max-sql-memory=.25
+    mem_limit: 768m
     volumes:
       - canonical_store_3_data:/cockroach/cockroach-data
     networks:

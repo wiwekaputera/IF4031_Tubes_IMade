@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: canonical-store-init
+  labels:
+    app: canonical-store-init
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: canonical-store-init
+        role: store
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: cockroachdb/cockroach:v24.1.6
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              echo "Initializing CockroachDB cluster..."
+              until /cockroach/cockroach init --insecure --host=canonical-store-0.canonical-store:26257 2>&1 | tee /tmp/init.out; do
+                if grep -qiE "already been initialized|already initialized" /tmp/init.out; then
+                  echo "Cluster already initialized."
+                  break
+                fi
+                echo "Waiting for canonical-store-0..."
+                sleep 3
+              done
+              echo "Waiting for SQL endpoint..."
+              until /cockroach/cockroach sql --insecure --host=canonical-store-0.canonical-store:26257 -e "SELECT 1" >/dev/null 2>&1; do
+                sleep 2
+              done
+              echo "Applying 001_init.sql..."
+              /cockroach/cockroach sql --insecure --host=canonical-store-0.canonical-store:26257 -f /migrations/001_init.sql
+              echo "Cluster initialization complete."
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+      volumes:
+        - name: migrations
+          configMap:
+            name: canonical-store-migrations
