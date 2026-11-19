@@ -18,7 +18,7 @@
 | Field reports (P3) | — | `POST /field-reports`, accepted with 202, never lost or duplicated | Fayadh | 🚧 In progress |
 | Satellite fire feed (P4) | — | New `satellite-ingestor`: SSE feed → fires → WILDFIRE hazard events | Theo | 🟢 Done |
 | Coastal sensors (P5) | — | Sensor Pantai poller, circuit breaker, prioritised critical alerts | Fayadh | 🚧 In progress |
-| Observability | JSON logs + `X-Correlation-ID` | Prometheus, Grafana dashboards, distributed tracing | Theo | 🚧 In progress |
+| Observability | JSON logs + `X-Correlation-ID` | Prometheus, Grafana dashboards, OpenTelemetry tracing to Jaeger, `trace_id` in logs | Theo | 🚧 In progress: working in Compose; cluster manifests, leader and Sensor Pantai panels pending |
 
 ---
 
@@ -41,6 +41,9 @@ Docker Compose still runs the whole system on one machine for development. The K
 | `client-api` | `8080` | `edge_net`, `internal_api_net` | 🟢 Operational | Edge gateway with scope projection and rate limiting |
 | `satellite-store` | *internal* | `satellite_net` | 🟢 Operational | PostgreSQL owned by `satellite-ingestor` only: detections, fires, offset, outbox, dead letters |
 | `satellite-ingestor` | `9091` (metrics) | `agency_net`, `satellite_net`, `bus_net` | 🟢 Operational | Satellite feed client, fire clustering, publishes WILDFIRE events to `hazard.ingest.SATELIT` |
+| `prometheus` | `9090` | `observability_net` + app networks | 🟢 Operational | Scrapes `/metrics` from every Go service every 5 s |
+| `grafana` | `3000` | `observability_net` | 🟢 Operational | Provisioned dashboards (BNPB folder); anonymous read-only access |
+| `jaeger` | `16686` (UI) | `observability_net` + app networks | 🟢 Operational | Receives OpenTelemetry traces over OTLP/HTTP (`4318`), in-memory storage |
 
 ---
 
@@ -71,6 +74,7 @@ Then set these in `.env`:
 | `INTERNAL_OPS_TOKEN` | Any random string, e.g. `openssl rand -hex 32` |
 | `SATELLITE_FEED_TOKEN` | The group token from the course assistants. Keep it only in `.env` |
 | `SATELLITE_STORE_POSTGRES_PASSWORD` | Any password for the satellite store |
+| `GRAFANA_ADMIN_PASSWORD` | Any password for the Grafana `admin` user |
 
 `bash scripts/demo/up.sh` still does the `.env` copy and key generation on first run.
 
@@ -122,26 +126,93 @@ Values the satellite ingestor needs in the cluster:
 
 ## Observability
 
-All services write structured JSON logs to `stdout`. `X-Correlation-ID` is propagated client-api → aggregator as in Milestone 1.
+Every Go service uses the shared module [`observability/`](observability), so metrics, traces and logs look the same everywhere.
 
-```bash
-docker compose logs -f aggregator satellite-ingestor
-```
+| Signal | How | Where to look |
+| :--- | :--- | :--- |
+| Metrics | Prometheus client in every service, `/metrics` endpoint | Grafana http://localhost:3000, Prometheus http://localhost:9090 |
+| Traces | OpenTelemetry SDK, W3C `traceparent` propagated over HTTP and NATS headers, exported over OTLP/HTTP | Jaeger http://localhost:16686 |
+| Logs | Zerolog JSON with `correlation_id` and `trace_id` / `span_id` | `docker compose logs <service>` |
 
-**Satellite ingestor metrics** (`http://localhost:9091/metrics`):
+### What the shared module does
+
+| Piece | Effect |
+| :--- | :--- |
+| `observability.Init(ctx, service)` | Sets up the tracer. Exports to `OTEL_EXPORTER_OTLP_ENDPOINT`; when that is empty, trace context is still passed between services but nothing is exported. Sampling follows the standard `OTEL_TRACES_SAMPLER` variables (default: everything). |
+| `observability.Middleware(service, handler)` | Wraps a service's HTTP handler: continues the caller's trace, keeps or creates `X-Correlation-ID`, records `http_requests_total`, `http_request_duration_seconds`, `http_requests_in_flight`. The route label is the path; 404s are grouped as `unmatched`. |
+| `observability.Transport(service, base)` | Wraps an HTTP client: client span, passes `traceparent` and `X-Correlation-ID`, records `http_client_requests_total` and `http_client_request_duration_seconds`. |
+| `observability.StartPublish` / `StartConsume` | Producer and consumer spans for NATS; the trace travels in the message headers. Records `messaging_messages_total{outcome}` and `messaging_process_duration_seconds`. |
+| `pgxtrace.Tracer` | One span per SQL query and `db_query_duration_seconds{operation,result}`. |
+| `observability.LogHook` | Adds `trace_id` and `span_id` to zerolog lines logged with `.Ctx(ctx)`. |
+
+client-api and token-service serve `/metrics` on an internal port (`9090`) that is not published, so metrics are not exposed on the public edge. The other services serve it on their normal port.
+
+### Dashboards (Grafana → BNPB folder)
+
+| Dashboard | Panels |
+| :--- | :--- |
+| **Services overview** | Targets up, throughput, 5xx error rate, p50/p95/p99 latency per service and route, status codes (429 shown separately), in-flight requests, outgoing call latency and failures, database query p95 and errors, message rates by outcome. Filter by service at the top. |
+| **Aggregator, sources and DLQ** | Leader instances, BMKG/PVMBG status (OUTAGE = circuit breaker open), time since last stored event, dead letters by status, outbox backlog, polls to the agencies. |
+| **Satellite fire feed** | Lag in events and in feed time, ingest latency p50/p95/p99, messages by outcome, running totals (late, low confidence, duplicate, unknown key, invalid), dead letters, outbox backlog, WILDFIRE events published. |
+
+### Service-specific metrics
 
 | Metric | Meaning |
 | :--- | :--- |
-| `satellite_ingest_latency_seconds` | Histogram: event read from the feed → result committed |
-| `satellite_feed_lag_offsets` | Events the feed has published that are not committed yet |
-| `satellite_event_time_lag_seconds` | Feed virtual time minus the newest committed detection time |
-| `satellite_next_offset` | Next offset to read; everything before it is committed |
-| `satellite_feed_messages_total{type,outcome}` | Messages by type and outcome (`processed`, `low_confidence`, `late`, `duplicate`, `unknown_key`, `dead_lettered`) |
+| `aggregator_source_status{source,status}` | 1 for the current status of BMKG / PVMBG (`UP`, `DOWN`, `OUTAGE`) |
+| `aggregator_source_last_sync_age_seconds{source}` | Seconds since the newest stored event from the source |
+| `aggregator_dead_letters{status}` | DLQ rows by status (`retrying`, `parked`, `resolved`) |
+| `aggregator_outbox_backlog` | Events committed but not yet acknowledged by JetStream |
+| `aggregator_leader` | 1 while this instance is the polling leader (fixed at 1 until leader election sets it) |
+| `satellite_ingest_latency_seconds` | Feed event read → result committed |
+| `satellite_feed_lag_offsets` / `satellite_event_time_lag_seconds` | How far behind the feed the ingestor is, in events and in feed time |
+| `satellite_feed_messages_total{type,outcome}` | Feed messages by outcome |
 | `satellite_durable_count{kind}` | Running totals kept in the database, so they survive restarts |
-| `satellite_outbox_backlog` | Hazard messages committed but not yet acknowledged by JetStream |
-| `satellite_dead_letters` | Parked feed events |
+| `satellite_outbox_backlog`, `satellite_dead_letters` | Waiting WILDFIRE messages, parked feed events |
 
-> 🚧 **Owner: Theo.** To be completed: Prometheus and Grafana in the cluster, per-service dashboards (latency, error rate, throughput, satellite lag, DLQ size, leader status, circuit breaker state), OpenTelemetry tracing to Jaeger/Tempo, and the shared metrics/tracing middleware package.
+### Checking it end to end
+
+```bash
+docker compose up -d --build
+set -a; source .env; set +a      # load .env into this shell for the commands below
+TOK=$(curl -s -X POST http://localhost:8083/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=$CLIENT_INTERNAL_OPS_ID&client_secret=$CLIENT_INTERNAL_OPS_SECRET" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+# Some traffic for the dashboards (200s and 401s)
+for i in $(seq 1 100); do
+  curl -s -o /dev/null -H "Authorization: Bearer $TOK" "http://localhost:8080/v1/events?limit=5"
+  curl -s -o /dev/null http://localhost:8080/v1/events
+  sleep 0.2
+done
+
+# One request to follow across services
+curl -s -o /dev/null -H "Authorization: Bearer $TOK" -H "X-Correlation-ID: demo-trace-1" "http://localhost:8080/v1/events?limit=3"
+docker compose logs client-api aggregator | grep demo-trace-1     # same trace_id in both services
+```
+
+1. **Prometheus targets:** http://localhost:9090/targets: every target in the `services` job is UP.
+2. **Dashboards:** Grafana → BNPB → Services overview. Panels fill within a minute.
+3. **Distributed trace:** Jaeger → service `client-api` → Tags `correlation_id=demo-trace-1` → Find Traces. The trace shows `client-api GET /v1/events` → `client-api GET aggregator:8090/internal/events` → `aggregator GET /internal/events` → `aggregator db SELECT`, with the duration of each step.
+4. **Event fan-out:** Jaeger → service `aggregator`, operation `publish bnpb.events.hazard`: the publish, both consumers, and notification-consumer → stub-sink in one trace.
+5. **Satellite:** Jaeger → service `satellite-ingestor`: one feed message with its database queries nested under it. Only 5% of satellite traces are kept (`SATELLITE_TRACE_SAMPLE_RATIO`), because it handles hundreds of messages per second while catching up.
+
+| Trigger a failure | What changes |
+| :--- | :--- |
+| `curl -s -X POST http://localhost:8082/admin/outage` | Aggregator dashboard: PVMBG → OUTAGE, circuit breaker panel → 1 after ~15 s. Call again to restore. |
+| `curl -s -X POST "http://localhost:8082/admin/schema-version?mode=incompatible"` | Aggregator dashboard: parked dead letters climb. Call again to switch back. |
+| `docker compose stop aggregator` | Services overview: targets up drops, client-api shows 5xx and failed outgoing calls. `docker compose start aggregator` to recover. |
+| `docker compose restart satellite-ingestor` | Satellite dashboard: lag jumps, then returns to 0. |
+
+### Limits and pending work
+
+- **Kubernetes:** Prometheus, Grafana and Jaeger run in Compose. Their cluster manifests (`role=other`) follow the platform layout once it is on `main`. In the cluster, Prometheus discovers pods instead of using the static target list.
+- **Jaeger storage is in memory** (last 50,000 traces); traces are lost when Jaeger restarts. Metrics in Prometheus are kept for 7 days.
+- **Load tests:** every request is traced by default. For the 10,000-VU test, set `OTEL_TRACES_SAMPLER=parentbased_traceidratio` and `OTEL_TRACES_SAMPLER_ARG=0.01` on client-api so tracing does not distort the results.
+- **Log correlation:** request and message logs carry `trace_id`. Log lines written outside a request (for example the aggregator's poll loop) carry only what they already had.
+- **Leader status** is fixed at 1 until leader election sets `aggregator_leader`. The Sensor Pantai circuit breaker and the SLO panel are added with P5.
+- Loki is not used; `trace_id` in the logs links them to Jaeger.
 
 ---
 
@@ -342,5 +413,10 @@ All variables are in [.env.example](.env.example). Milestone 1 variables are unc
 | `SATELLITE_METRICS_PORT` | `9091` | `satellite-ingestor` | Host port for `/metrics` and `/healthz` |
 | `SATELLITE_STORE_POSTGRES_USER` / `_PASSWORD` / `_DB` | `satellite` / *(required)* / `satellite` | `satellite-store` | PostgreSQL bootstrap credentials |
 | `NATS_URL` | `nats://nats-jetstream:4222` | `satellite-ingestor` | Broker for `hazard.ingest.SATELIT` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://jaeger:4318` | all Go services | Where traces are sent (OTLP/HTTP). Empty turns export off |
+| `SATELLITE_TRACE_SAMPLE_RATIO` | `0.05` | `satellite-ingestor` | Share of satellite traces kept |
+| `METRICS_ADDR` | `:9090` | `client-api`, `token-service`, `satellite-ingestor` | Internal port for `/metrics` |
+| `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / *(required)* | `grafana` | Grafana admin login; dashboards are also viewable without logging in |
+| `GRAFANA_PORT` / `PROMETHEUS_PORT` / `JAEGER_UI_PORT` | `3000` / `9090` / `16686` | observability | Host ports for the three UIs |
 
 The satellite ingestor exits at startup if `DATABASE_URL` or `SATELLITE_FEED_TOKEN` is empty, and applies its own schema on start, so `satellite-store` needs no init script.

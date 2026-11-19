@@ -119,7 +119,7 @@ func (c *AggregatorClient) GetEvents(ctx context.Context, rawQuery, correlationI
 			msg = "aggregator request timed out"
 		}
 
-		c.logger.Error().
+		c.logger.Error().Ctx(ctx).
 			Err(err).
 			Str("service", "client-api").
 			Str("upstream", "aggregator").
@@ -136,7 +136,7 @@ func (c *AggregatorClient) GetEvents(ctx context.Context, rawQuery, correlationI
 	}
 	defer resp.Body.Close()
 
-	c.logger.Info().
+	c.logger.Info().Ctx(ctx).
 		Str("service", "client-api").
 		Str("upstream", "aggregator").
 		Str("correlation_id", correlationID).
@@ -167,7 +167,7 @@ func (c *AggregatorClient) GetEvents(ctx context.Context, rawQuery, correlationI
 
 	var eventsResp EventsResponse
 	if err := json.Unmarshal(bodyBytes, &eventsResp); err != nil {
-		c.logger.Error().
+		c.logger.Error().Ctx(ctx).
 			Err(err).
 			Str("service", "client-api").
 			Str("upstream", "aggregator").
