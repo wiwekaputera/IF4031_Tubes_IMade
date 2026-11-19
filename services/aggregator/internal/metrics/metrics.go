@@ -33,8 +33,8 @@ var (
 		Help: "Committed events not yet acknowledged by JetStream.",
 	})
 
-	// Leader is 1 while this instance holds the polling lease. It stays 1 for
-	// a single instance; the leader-election code sets it once it exists.
+	// Leader is 1 while this instance holds the polling lease. The leader
+	// elector's promote and demote hooks set it.
 	Leader = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "aggregator_leader",
 		Help: "1 while this instance is the leader that polls the agencies, else 0.",

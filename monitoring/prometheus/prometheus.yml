@@ -10,10 +10,21 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
+  # The aggregator can run as several replicas (docker compose up --scale
+  # aggregator=3). Docker's DNS returns every replica's address, so each one is
+  # scraped separately and the leader panel can tell them apart.
+  - job_name: aggregator
+    dns_sd_configs:
+      - names: ["aggregator"]
+        type: A
+        port: 8090
+        refresh_interval: 10s
+    relabel_configs:
+      - target_label: role
+        replacement: aggregator
+
   - job_name: services
     static_configs:
-      - targets: ["aggregator:8090"]
-        labels: { role: aggregator }
       - targets: ["client-api:9090"]
         labels: { role: api }
       - targets: ["token-service:9090"]

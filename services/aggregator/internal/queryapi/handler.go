@@ -1,12 +1,17 @@
 package queryapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/analytics"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/auditapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
@@ -17,6 +22,8 @@ type Handler struct {
 	repo             store.CanonicalRepo
 	logger           zerolog.Logger
 	sourceHealthFunc SourceHealthFunc
+	instanceID       string
+	ready            atomic.Bool
 }
 
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -50,6 +57,63 @@ func New(repo store.CanonicalRepo, logger zerolog.Logger, healthFn SourceHealthF
 	}
 }
 
+// WithInstanceID sets the instance identity reported by /internal/leader.
+func (h *Handler) WithInstanceID(id string) *Handler {
+	h.instanceID = id
+	return h
+}
+
+// SetReady toggles readiness for /internal/ready (200 when true, 503 when false).
+func (h *Handler) SetReady(ready bool) {
+	h.ready.Store(ready)
+}
+
+func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.ready.Load() {
+		h.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "DRAINING",
+		})
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]string{
+		"status": "READY",
+	})
+}
+
+type leaderResponse struct {
+	InstanceID     string `json:"instance_id"`
+	IsLeader       bool   `json:"is_leader"`
+	FencingToken   int64  `json:"fencing_token"`
+	LeaseExpiresAt string `json:"lease_expires_at"`
+}
+
+func (h *Handler) Leader(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	info, err := h.repo.GetLease(ctx, store.DefaultLeaseName)
+	if err != nil {
+		h.logger.Error().Err(err).Msg("failed to query leader lease")
+		h.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to query leader lease"})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, leaderResponse{
+		InstanceID:     h.instanceID,
+		IsLeader:       h.instanceID != "" && info.Holder == h.instanceID && info.IsActive,
+		FencingToken:   info.FencingToken,
+		LeaseExpiresAt: info.ExpiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -68,9 +132,11 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filter := store.EventFilter{}
+	filter := store.ListFilter{}
 	filter.HazardType = r.URL.Query().Get("type")
 	filter.HazardID = r.URL.Query().Get("hazard_id")
+	filter.Source = r.URL.Query().Get("source")
+	filter.Cursor = r.URL.Query().Get("cursor")
 	filter.Limit = 20
 	if limStr := r.URL.Query().Get("limit"); limStr != "" {
 		if lim, err := strconv.Atoi(limStr); err == nil && lim > 0 && lim <= 100 {
@@ -89,14 +155,21 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		filter.Since = sinceTime
 	}
 
-	ctx := r.Context()
-	events, err := h.repo.GetEvents(ctx, filter)
+	ctx := store.WithCorrelationID(r.Context(), correlationIDFromContext(r.Context()))
+	res, err := h.repo.ListEvents(ctx, filter)
 	if err != nil {
+		if errors.Is(err, store.ErrInvalidCursor) {
+			h.writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid pagination cursor",
+			})
+			return
+		}
 		h.logger.Error().Err(err).Msg("failed to fetch events")
 		h.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 		return
 	}
 
+	events := res.Events
 	if events == nil {
 		events = make([]hazard.HazardEvent, 0)
 	}
@@ -104,7 +177,10 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	resp := hazard.EventsResponse{
 		Data: events,
 		Meta: hazard.EventsMeta{
-			Count: len(events),
+			Count:            len(events),
+			Partial:          res.Partial,
+			UnavailableUnits: res.UnavailableUnits,
+			NextCursor:       res.NextCursor,
 		},
 	}
 
@@ -141,10 +217,19 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, resp)
 }
 
-func Routes(h *Handler) http.Handler {
+func Routes(h *Handler, auditHandlers ...*auditapi.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/internal/health", h.Health)
+	mux.HandleFunc("/internal/ready", h.Ready)
+	mux.HandleFunc("/internal/leader", h.Leader)
 	mux.HandleFunc("/internal/events", h.GetEvents)
+	mux.HandleFunc("/internal/analytics/summary", h.GetAnalyticsSummary)
+	analytics.New().RegisterRoutes(mux)
+	for _, ah := range auditHandlers {
+		if ah != nil {
+			ah.RegisterRoutes(mux)
+		}
+	}
 
 	var handler http.Handler = mux
 	handler = LoggingMiddleware(h.logger, handler)

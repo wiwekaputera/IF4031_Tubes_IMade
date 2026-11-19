@@ -75,7 +75,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(up{job=\"services\"})",
+          "expr": "sum(up{job!=\"prometheus\"})",
           "legendFormat": "up",
           "refId": "A",
           "instant": true
@@ -85,7 +85,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "count(up{job=\"services\"})",
+          "expr": "count(up{job!=\"prometheus\"})",
           "legendFormat": "total",
           "refId": "B",
           "instant": true

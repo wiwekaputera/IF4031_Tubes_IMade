@@ -11,7 +11,8 @@ cd "$PROJECT_ROOT"
 # Every service in docker-compose.yml, so all problem demos (P1–P5) work.
 SERVICES=(
   bmkg-mock pvmbg-mock
-  canonical-store nats-jetstream aggregator
+  canonical-store-0 canonical-store-1 canonical-store-2 canonical-store-3 canonical-store-init
+  nats-jetstream aggregator
   stub-sink notification-consumer audit-consumer
   token-db token-service client-api
 )
@@ -82,6 +83,9 @@ docker compose up -d --build --wait "${SERVICES[@]}" 2>/dev/null || \
   docker compose up -d --build "${SERVICES[@]}"
 
 for svc in "${SERVICES[@]}"; do
+  if [[ "$svc" == "canonical-store-init" ]]; then
+    continue
+  fi
   wait_healthy "$svc"
 done
 

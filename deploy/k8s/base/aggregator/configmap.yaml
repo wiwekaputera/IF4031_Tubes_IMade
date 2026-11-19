@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aggregator-config
+  labels:
+    app: aggregator
+data:
+  PORT: "8090"
+  BMKG_BASE_URL: "http://bmkg-mock:8081"
+  BMKG_TIMEOUT_MS: "1000"
+  PVMBG_BASE_URL: "http://pvmbg-mock:8082"
+  PVMBG_TIMEOUT_MS: "4000"
+  PVMBG_CB_THRESHOLD: "3"
+  PVMBG_CB_PROBE_INTERVAL: "30"
+  POLL_INTERVAL_S: "3"
+  NATS_URL: "nats://nats-jetstream:4222"
+  OUTBOX_POLL_INTERVAL_MS: "500"
+  OUTBOX_BATCH_SIZE: "100"
+  SHARD_QUERY_TIMEOUT_MS: "800"
+  LEASE_TTL_S: "15"
+  LEASE_RENEW_INTERVAL_S: "5"
+  SHUTDOWN_DRAIN_S: "5"
+  LOG_LEVEL: "info"

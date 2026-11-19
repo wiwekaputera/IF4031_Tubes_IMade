@@ -1,0 +1,11 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: canonical-store-pdb
+  labels:
+    app: canonical-store
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: canonical-store

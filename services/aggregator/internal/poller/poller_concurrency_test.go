@@ -15,13 +15,19 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/store"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/audit"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
 type fakeRepo struct {
-	mu          sync.Mutex
-	upserts     int
-	latestTimes map[string]time.Time
+	mu               sync.Mutex
+	upserts          int
+	latestTimes      map[string]time.Time
+	watermarks       map[string]time.Time
+	fencedErr        error
+	fencedBatches    int
+	lastFence        store.Fence
+	lastBatchSources []string
 }
 
 func (f *fakeRepo) HealthCheck(context.Context) error { return nil }
@@ -31,8 +37,31 @@ func (f *fakeRepo) UpsertEvent(_ context.Context, rec store.UpsertRequest) (stri
 	f.upserts++
 	return "id-" + rec.HazardID, nil
 }
+func (f *fakeRepo) UpsertFencedBatch(_ context.Context, fence store.Fence, source string, watermark time.Time, recs []store.UpsertRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fencedErr != nil {
+		return f.fencedErr
+	}
+	f.fencedBatches++
+	f.lastFence = fence
+	f.lastBatchSources = append(f.lastBatchSources, source)
+	f.upserts += len(recs)
+	if !watermark.IsZero() {
+		if f.watermarks == nil {
+			f.watermarks = make(map[string]time.Time)
+		}
+		if watermark.After(f.watermarks[source]) {
+			f.watermarks[source] = watermark
+		}
+	}
+	return nil
+}
 func (f *fakeRepo) GetEvents(context.Context, store.EventFilter) ([]hazard.HazardEvent, error) {
 	return nil, nil
+}
+func (f *fakeRepo) ListEvents(context.Context, store.ListFilter) (store.ListResult, error) {
+	return store.ListResult{}, nil
 }
 func (f *fakeRepo) GetVolcanoReferences(context.Context) (map[string]store.VolcanoReference, error) {
 	return nil, nil
@@ -44,6 +73,35 @@ func (f *fakeRepo) GetLatestEventTime(_ context.Context, source string) (time.Ti
 		return f.latestTimes[source], nil
 	}
 	return time.Time{}, nil
+}
+func (f *fakeRepo) GetPollerWatermark(_ context.Context, source string) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.watermarks != nil {
+		return f.watermarks[source], nil
+	}
+	return time.Time{}, nil
+}
+func (f *fakeRepo) GetLease(context.Context, string) (store.LeaseInfo, error) {
+	return store.LeaseInfo{}, nil
+}
+func (f *fakeRepo) ListAuditEvents(context.Context, store.AuditEventsFilter) (audit.EventsPage, error) {
+	return audit.EventsPage{}, nil
+}
+func (f *fakeRepo) ListUnprocessed(context.Context, store.UnprocessedFilter) (audit.UnprocessedPage, error) {
+	return audit.UnprocessedPage{}, nil
+}
+func (f *fakeRepo) ComputeChecksum(context.Context, string) (audit.Checksum, error) {
+	return audit.Checksum{}, nil
+}
+func (f *fakeRepo) LocateEvent(context.Context, string) (audit.LocationResponse, error) {
+	return audit.LocationResponse{}, nil
+}
+func (f *fakeRepo) GetDistribution(context.Context) (store.DistributionReport, error) {
+	return store.DistributionReport{}, nil
+}
+func (f *fakeRepo) GetAnalyticsSummary(context.Context, store.AnalyticsFilter) (store.AnalyticsSummary, error) {
+	return store.AnalyticsSummary{}, nil
 }
 
 func fastBMKGServer(t *testing.T, called *atomic.Int32) *httptest.Server {

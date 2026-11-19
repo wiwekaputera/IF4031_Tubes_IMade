@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -8,6 +9,13 @@ import (
 )
 
 func main() {
+	sleepDur := flag.Duration("sleep", 0, "if > 0, sleep for this duration and exit 0 (for distroless preStop hooks)")
+	flag.Parse()
+	if *sleepDur > 0 {
+		time.Sleep(*sleepDur)
+		os.Exit(0)
+	}
+
 	url := os.Getenv("HEALTHCHECK_URL")
 	if url == "" {
 		url = "http://localhost:8080/health"

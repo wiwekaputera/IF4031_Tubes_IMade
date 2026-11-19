@@ -98,8 +98,8 @@
     },
     {
       "type": "stat",
-      "title": "Source status",
-      "description": "OUTAGE means the circuit breaker is open and the last stored data is served.",
+      "title": "Source status (leader's view)",
+      "description": "Status reported by the leader, the instance that polls. OUTAGE means the circuit breaker is open and the last stored data is served.",
       "id": 3,
       "datasource": {
         "type": "prometheus",
@@ -117,7 +117,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "aggregator_source_status == 1",
+          "expr": "max by (source, status) (aggregator_source_status * on (instance) group_left aggregator_leader) == 1",
           "legendFormat": "{{source}}: {{status}}",
           "refId": "A",
           "instant": true
@@ -175,7 +175,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "aggregator_dead_letters{status=\"parked\"}",
+          "expr": "max(aggregator_dead_letters{status=\"parked\"})",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -237,7 +237,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "aggregator_source_status{status=\"OUTAGE\"}",
+          "expr": "max by (source) (aggregator_source_status{status=\"OUTAGE\"} * on (instance) group_left aggregator_leader)",
           "legendFormat": "{{source}}",
           "refId": "A"
         }
@@ -289,7 +289,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "aggregator_source_last_sync_age_seconds",
+          "expr": "min by (source) (aggregator_source_last_sync_age_seconds)",
           "legendFormat": "{{source}}",
           "refId": "A"
         }
@@ -392,7 +392,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "aggregator_outbox_backlog",
+          "expr": "max(aggregator_outbox_backlog)",
           "legendFormat": "unpublished",
           "refId": "A"
         }
@@ -438,7 +438,7 @@
     {
       "type": "timeseries",
       "title": "Dead letters by status",
-      "description": "",
+      "description": "Every replica reads the same table, so the highest value is shown once.",
       "id": 10,
       "datasource": {
         "type": "prometheus",
@@ -456,7 +456,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "aggregator_dead_letters",
+          "expr": "max by (status) (aggregator_dead_letters)",
           "legendFormat": "{{status}}",
           "refId": "A"
         }

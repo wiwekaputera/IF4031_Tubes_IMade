@@ -7,6 +7,7 @@ COPY observability /observability
 RUN go mod download
 COPY services/aggregator/. .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bin/service ./cmd/main
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bin/loader ./cmd/loader
 
 COPY scripts/healthcheck /build/healthcheck
 WORKDIR /build/healthcheck
@@ -14,6 +15,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bin/healthc
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /bin/service /service
+COPY --from=builder /bin/loader /loader
 COPY --from=builder /bin/healthcheck /healthcheck
 USER nonroot:nonroot
 ENTRYPOINT ["/service"]
