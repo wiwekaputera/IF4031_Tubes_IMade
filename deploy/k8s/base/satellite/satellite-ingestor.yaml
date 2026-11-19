@@ -1,0 +1,74 @@
+# Satellite feed client: SSE feed -> fires -> WILDFIRE events on
+# hazard.ingest.SATELIT. One replica, and Recreate so two ingestors never read
+# the feed at the same time; the offset is in satellite-store, so a new pod
+# resumes exactly where the old one stopped.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: satellite-ingestor-config
+  labels:
+    app: satellite-ingestor
+data:
+  SATELLITE_FEED_URL: "https://satellite.naufarrel.dev"
+  NATS_URL: "nats://nats-jetstream:4222"
+  METRICS_ADDR: ":9090"
+  HEALTHCHECK_URL: "http://localhost:9090/healthz"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  # About 400 feed messages per second while catching up: keep 5% of traces.
+  OTEL_TRACES_SAMPLER: "parentbased_traceidratio"
+  OTEL_TRACES_SAMPLER_ARG: "0.05"
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: satellite-ingestor
+  labels:
+    app: satellite-ingestor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: satellite-ingestor
+  template:
+    metadata:
+      labels:
+        app: satellite-ingestor
+        role: consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+    spec:
+      containers:
+        - name: satellite-ingestor
+          image: bnpb/satellite-ingestor:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: satellite-ingestor-config
+            - secretRef:
+                name: satellite-ingestor-secrets
+          # Same memory class as the broker: it holds fire clusters in memory.
+          resources:
+            requests:
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9090
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9090
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6

@@ -1,0 +1,71 @@
+# token-db: PostgreSQL owned by token-service only.
+# Data lives on the disk of the node the pod runs on (hostPath), so losing a
+# node really loses that copy of the data. It is pinned to the
+# control-plane node, which node-kill scenarios never target, so the single
+# instance keeps its data when the worker node is lost.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: token-db
+  labels:
+    app: token-db
+spec:
+  serviceName: token-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: token-db
+  template:
+    metadata:
+      labels:
+        app: token-db
+        role: store
+    spec:
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          envFrom:
+            - secretRef:
+                name: token-db-secrets
+          resources:
+            requests:
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: migrations
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/bnpb/token-db
+            type: DirectoryOrCreate
+        - name: migrations
+          configMap:
+            name: token-db-migrations

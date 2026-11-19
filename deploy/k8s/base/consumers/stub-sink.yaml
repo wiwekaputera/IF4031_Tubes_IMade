@@ -1,0 +1,75 @@
+# Notification target standing in for the Tim Lapangan receiver.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stub-sink-config
+  labels:
+    app: stub-sink
+data:
+  PORT: "8085"
+  HEALTHCHECK_URL: "http://localhost:8085/health"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stub-sink
+  labels:
+    app: stub-sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stub-sink
+  template:
+    metadata:
+      labels:
+        app: stub-sink
+        role: other
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8085"
+        prometheus.io/path: /metrics
+    spec:
+      containers:
+        - name: stub-sink
+          image: bnpb/stub-sink:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8085
+          envFrom:
+            - configMapRef:
+                name: stub-sink-config
+          resources:
+            requests:
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8085
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8085
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stub-sink
+  labels:
+    app: stub-sink
+spec:
+  type: ClusterIP
+  selector:
+    app: stub-sink
+  ports:
+    - name: http
+      port: 8085
+      targetPort: 8085

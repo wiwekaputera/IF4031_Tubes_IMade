@@ -1,0 +1,78 @@
+# satellite-store: PostgreSQL owned by satellite-ingestor only (detections,
+# fires, feed offset, outbox, dead letters). hostPath on the control-plane
+# node, like token-db. The ingestor creates its own schema on start.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: satellite-store
+  labels:
+    app: satellite-store
+spec:
+  serviceName: satellite-store
+  replicas: 1
+  selector:
+    matchLabels:
+      app: satellite-store
+  template:
+    metadata:
+      labels:
+        app: satellite-store
+        role: store
+    spec:
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          envFrom:
+            - secretRef:
+                name: satellite-store-secrets
+          resources:
+            requests:
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/bnpb/satellite-store
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: satellite-store
+  labels:
+    app: satellite-store
+spec:
+  type: ClusterIP
+  selector:
+    app: satellite-store
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432

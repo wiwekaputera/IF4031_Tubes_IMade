@@ -1,0 +1,21 @@
+# Only satellite-ingestor may connect to satellite-store.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: satellite-store-ingress
+  labels:
+    app: satellite-store
+spec:
+  podSelector:
+    matchLabels:
+      app: satellite-store
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: satellite-ingestor
+      ports:
+        - protocol: TCP
+          port: 5432
