@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/auditapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/config"
+	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/dlq"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/ingest"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/lease"
 	"github.com/wiwekaputera/if4031-tubes-imade/aggregator/internal/normalizer"
@@ -148,17 +149,24 @@ func main() {
 	h.SetReady(true)
 	auditH := auditapi.New(repo, cfg.AuditToken, logger)
 
-	// 7. Start leader election, background polling loop, transactional outbox relay, and ingest consumer.
+	retryHandler := p.PVMBGRetryHandler()
+	dlqHandler, err := dlq.NewHTTPHandler(repo, retryHandler, cfg.InternalOpsToken)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to build DLQ routes")
+	}
+
+	// 7. Start leader election, background polling loop, DLQ retry worker, transactional outbox relay, and ingest consumer.
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	wg.Add(4)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		elector.Run(ctx)
 	}()
 	go poller.StartPolling(ctx, &wg, p, cfg, logger)
+	go poller.RunDLQWorker(ctx, &wg, repo, retryHandler, 5*time.Second, logger)
 	go func() {
 		defer wg.Done()
 		relay.Run(ctx)
@@ -173,7 +181,11 @@ func main() {
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
 	}
-	httpServer := queryapi.Server(queryapi.Routes(h, auditH), addr)
+	mux := http.NewServeMux()
+	mux.Handle("/internal/dlq", dlqHandler)
+	mux.Handle("/internal/dlq/", dlqHandler)
+	mux.Handle("/", queryapi.Routes(h, auditH))
+	httpServer := queryapi.Server(mux, addr)
 
 	serverErrChan := make(chan error, 1)
 	go func() {

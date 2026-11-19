@@ -300,6 +300,8 @@ func TestHealthAndRepoError(t *testing.T) {
 	}
 }
 
+func (f *fakeQueryRepo) InsertDeadLetter(context.Context, store.DeadLetter) error { return nil }
+
 func TestGetEvents_ScatterMetaAndCursor(t *testing.T) {
 	nextCur := "eyJ0IjoiMjAyNi0wOS0yMVQxMDowMDowMFoiLCJpZCI6IkUtMDAxIn0"
 	repo := &fakeQueryRepo{

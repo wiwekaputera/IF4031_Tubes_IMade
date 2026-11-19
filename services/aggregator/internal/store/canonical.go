@@ -40,6 +40,7 @@ type CanonicalRepo interface {
 	GetLatestEventTime(ctx context.Context, source string) (time.Time, error)
 	GetPollerWatermark(ctx context.Context, source string) (time.Time, error)
 	GetLease(ctx context.Context, leaseName string) (LeaseInfo, error)
+	InsertDeadLetter(ctx context.Context, dl DeadLetter) error
 }
 
 type UpsertRequest struct {
