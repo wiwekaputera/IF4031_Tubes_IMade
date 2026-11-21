@@ -1,0 +1,22 @@
+# "Storage is owned by exactly one service": only token-service pods may open
+# a connection to token-db. Every other pod is refused at the network layer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: token-db-ingress
+  labels:
+    app: token-db
+spec:
+  podSelector:
+    matchLabels:
+      app: token-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: token-service
+      ports:
+        - protocol: TCP
+          port: 5432

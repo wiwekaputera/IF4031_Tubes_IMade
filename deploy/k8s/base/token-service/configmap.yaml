@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: token-service-config
+  labels:
+    app: token-service
+data:
+  PORT: "8083"
+  METRICS_ADDR: ":9090"
+  TOKEN_ISSUER: "bnpb-token-service"
+  TOKEN_AUDIENCE: "bnpb-client-api"
+  ACCESS_TOKEN_TTL: "60"
+  REFRESH_TOKEN_TTL_DAYS: "7"
+  HEALTHCHECK_URL: "http://localhost:8083/health"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  LOG_LEVEL: "info"

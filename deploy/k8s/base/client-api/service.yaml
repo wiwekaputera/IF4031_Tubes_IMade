@@ -1,0 +1,16 @@
+# Public entry point for clients and for k6 (which runs outside the cluster).
+apiVersion: v1
+kind: Service
+metadata:
+  name: client-api
+  labels:
+    app: client-api
+spec:
+  type: NodePort
+  selector:
+    app: client-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080

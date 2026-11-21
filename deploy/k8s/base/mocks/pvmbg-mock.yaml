@@ -1,0 +1,84 @@
+# PVMBG mock. One replica only: /admin/requests counts the calls it received,
+# which shows whether the upstream received duplicate polls.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pvmbg-mock-config
+  labels:
+    app: pvmbg-mock
+data:
+  PORT: "8082"
+  PVMBG_DELAY_MIN_MS: "500"
+  PVMBG_DELAY_MAX_MS: "3000"
+  PVMBG_EVENT_INTERVAL_S: "10"
+  HEALTHCHECK_URL: "http://localhost:8082/health"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pvmbg-mock
+  labels:
+    app: pvmbg-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pvmbg-mock
+  template:
+    metadata:
+      labels:
+        app: pvmbg-mock
+        role: mock
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8082"
+        prometheus.io/path: /metrics
+    spec:
+      containers:
+        - name: pvmbg-mock
+          image: bnpb/pvmbg-mock:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8082
+          envFrom:
+            - configMapRef:
+                name: pvmbg-mock-config
+            - secretRef:
+                name: pvmbg-mock-secrets
+          resources:
+            requests:
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+# NodePort so the admin endpoints (/admin/outage, /admin/schema-version, ...)
+# can be called from outside the cluster during demos.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pvmbg-mock
+  labels:
+    app: pvmbg-mock
+spec:
+  type: NodePort
+  selector:
+    app: pvmbg-mock
+  ports:
+    - name: http
+      port: 8082
+      targetPort: 8082
+      nodePort: 30082

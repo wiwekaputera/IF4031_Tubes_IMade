@@ -7,3 +7,11 @@ resources:
   - namespace.yaml
   - canonical-store
   - aggregator
+  - mocks
+  - token-db
+  - token-service
+  - client-api
+  - nats-jetstream
+  - consumers
+  - satellite
+  - observability

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: client-api-config
+  labels:
+    app: client-api
+data:
+  PORT: "8080"
+  METRICS_ADDR: ":9090"
+  AGGREGATOR_BASE_URL: "http://aggregator:8090"
+  JWKS_URL: "http://token-service:8083/.well-known/jwks.json"
+  TOKEN_ISSUER: "bnpb-token-service"
+  TOKEN_AUDIENCE: "bnpb-client-api"
+  RPS_LIMIT: "100"
+  BURST: "20"
+  HEALTHCHECK_URL: "http://localhost:8080/health"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  # Trace every request by default. For the 10,000-VU load test switch to
+  # parentbased_traceidratio with 0.01 so tracing does not distort results.
+  OTEL_TRACES_SAMPLER: "parentbased_always_on"
+  OTEL_TRACES_SAMPLER_ARG: "1"
+  LOG_LEVEL: "info"

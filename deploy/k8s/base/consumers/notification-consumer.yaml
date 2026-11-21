@@ -1,0 +1,83 @@
+# Durable JetStream consumer that forwards hazard events to stub-sink.
+# Its bbolt dedup database lives on the node's disk (hostPath) and the pod is
+# pinned to the control-plane node, so a restart keeps the set of event IDs
+# already handled and redelivered messages are not processed twice.
+# Recreate: bbolt holds a file lock, two pods must never share the file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notification-consumer-config
+  labels:
+    app: notification-consumer
+data:
+  PORT: "8086"
+  NATS_URL: "nats://nats-jetstream:4222"
+  STUB_SINK_URL: "http://stub-sink:8085"
+  BBOLT_PATH: "/data/notification.db"
+  HEALTHCHECK_URL: "http://localhost:8086/health"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-consumer
+  labels:
+    app: notification-consumer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: notification-consumer
+  template:
+    metadata:
+      labels:
+        app: notification-consumer
+        role: consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8086"
+        prometheus.io/path: /metrics
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: notification-consumer
+          image: bnpb/notification-consumer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8086
+          envFrom:
+            - configMapRef:
+                name: notification-consumer-config
+          resources:
+            requests:
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8086
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8086
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/bnpb/notification-consumer
+            type: DirectoryOrCreate

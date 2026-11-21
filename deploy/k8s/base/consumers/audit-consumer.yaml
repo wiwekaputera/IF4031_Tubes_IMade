@@ -1,0 +1,82 @@
+# Durable JetStream consumer that keeps the event history.
+# Its bbolt dedup database lives on the node's disk (hostPath) and the pod is
+# pinned to the control-plane node, so a restart keeps the set of event IDs
+# already handled and redelivered messages are not processed twice.
+# Recreate: bbolt holds a file lock, two pods must never share the file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-consumer-config
+  labels:
+    app: audit-consumer
+data:
+  PORT: "8087"
+  NATS_URL: "nats://nats-jetstream:4222"
+  BBOLT_PATH: "/data/audit.db"
+  HEALTHCHECK_URL: "http://localhost:8087/health"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-consumer
+  labels:
+    app: audit-consumer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: audit-consumer
+  template:
+    metadata:
+      labels:
+        app: audit-consumer
+        role: consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8087"
+        prometheus.io/path: /metrics
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: audit-consumer
+          image: bnpb/audit-consumer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8087
+          envFrom:
+            - configMapRef:
+                name: audit-consumer-config
+          resources:
+            requests:
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8087
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8087
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/bnpb/audit-consumer
+            type: DirectoryOrCreate
