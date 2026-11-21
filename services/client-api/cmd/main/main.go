@@ -16,7 +16,9 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/fieldreports"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/httpapi"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/jwks"
+	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/loadshed"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/ratelimit"
+	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/sensorstatus"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/upstream"
 	"github.com/wiwekaputera/if4031-tubes-imade/observability"
 )
@@ -54,6 +56,8 @@ func main() {
 		Float64("rps_limit", cfg.RPSLimit).
 		Int("burst", cfg.Burst).
 		Str("nats_url", cfg.NATSURL).
+		Int("max_inflight", cfg.MaxInflight).
+		Float64("media_inflight_share", cfg.MediaInflightShare).
 		Msg("client-api: starting up")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -129,15 +133,26 @@ func main() {
 	// Setup HTTP routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.HealthHandler())
-	mux.HandleFunc("GET /v1/events", httpapi.EventsHandler(aggClient))
+	coastal := sensorstatus.New(sensorstatus.FromJetStream(reportPublisher.JetStream()), time.Second, 30*time.Second)
+	mux.HandleFunc("GET /v1/events", httpapi.EventsHandler(aggClient, httpapi.WithSensorStatus(coastal.Meta)))
 	mux.HandleFunc("POST /field-reports", fieldReports)
 	mux.HandleFunc("POST /v1/field-reports", fieldReports)
 
-	// Chain middlewares: CorrelationID -> Logging -> Auth -> Rate limit -> Handler
+	// Prioritised load shedding: under overload media is refused first and the
+	// field team keeps its reserved share of capacity.
+	shedder := loadshed.New(loadshed.Config{
+		MaxInflight: cfg.MaxInflight,
+		MediaShare:  cfg.MediaInflightShare,
+		SkipPaths:   []string{"/health"},
+	})
+
+	// Chain middlewares: CorrelationID -> Logging -> Auth -> Load shedding -> Rate limit -> Handler
 	handler := httpapi.CorrelationIDMiddleware(
 		httpapi.LoggingMiddleware(logger,
 			authMiddleware(
-				limiter.Middleware(mux),
+				shedder.Middleware(
+					limiter.Middleware(mux),
+				),
 			),
 		),
 	)

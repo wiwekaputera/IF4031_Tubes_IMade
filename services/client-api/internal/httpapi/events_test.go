@@ -10,6 +10,7 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/auth"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/upstream"
 	contractsauth "github.com/wiwekaputera/if4031-tubes-imade/contracts/auth"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
 type mockAggregatorClient struct {
@@ -285,5 +286,36 @@ func TestEventsHandler_InvalidQueryParams_Returns400(t *testing.T) {
 				t.Fatalf("expected error invalid_request, got %q", errResp.Error)
 			}
 		})
+	}
+}
+
+func TestEventsHandler_AddsSensorPantaiStatus(t *testing.T) {
+	mockClient := &mockAggregatorClient{
+		getEventsFunc: func(ctx context.Context, rawQuery, correlationID string) (*upstream.EventsResponse, error) {
+			return &upstream.EventsResponse{
+				Data: sampleRawEvents(),
+				Meta: map[string]interface{}{"sources": map[string]interface{}{"bmkg": map[string]interface{}{"status": "UP"}}},
+			}, nil
+		},
+	}
+	stale := "2026-11-20T01:00:00Z"
+	handler := EventsHandler(mockClient, WithSensorStatus(func() *hazard.SourceHealthMeta {
+		return &hazard.SourceHealthMeta{Status: "OUTAGE", StaleSince: &stale}
+	}))
+	req := withAuthScope(httptest.NewRequest(http.MethodGet, "/v1/events", nil), contractsauth.ScopeFieldTeam)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var body struct {
+		Meta struct {
+			Sources map[string]map[string]interface{} `json:"sources"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Meta.Sources["bmkg"]["status"] != "UP" || body.Meta.Sources["sensor_pantai"]["status"] != "OUTAGE" ||
+		body.Meta.Sources["sensor_pantai"]["stale_since"] != stale {
+		t.Fatalf("sources %v", body.Meta.Sources)
 	}
 }

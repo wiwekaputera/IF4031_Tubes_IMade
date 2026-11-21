@@ -25,6 +25,11 @@ type Config struct {
 	// FieldReportPublishTimeout bounds the wait for the JetStream ack before
 	// answering 503 instead of 202.
 	FieldReportPublishTimeout time.Duration
+
+	// MaxInflight is the number of requests served at once before load
+	// shedding starts; MediaInflightShare is the part media may use.
+	MaxInflight        int
+	MediaInflightShare float64
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -91,6 +96,23 @@ func Load() (*Config, error) {
 		publishTimeout = time.Duration(ms) * time.Millisecond
 	}
 
+	maxInflight := 256
+	if v := os.Getenv("MAX_INFLIGHT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("invalid MAX_INFLIGHT %q: must be positive integer", v)
+		}
+		maxInflight = n
+	}
+	mediaShare := 0.6
+	if v := os.Getenv("MEDIA_INFLIGHT_SHARE"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 || f > 1 {
+			return nil, fmt.Errorf("invalid MEDIA_INFLIGHT_SHARE %q: must be in (0, 1]", v)
+		}
+		mediaShare = f
+	}
+
 	return &Config{
 		Port:              port,
 		AggregatorBaseURL: aggregatorBaseURL,
@@ -103,5 +125,7 @@ func Load() (*Config, error) {
 
 		NATSURL:                   natsURL,
 		FieldReportPublishTimeout: publishTimeout,
+		MaxInflight:               maxInflight,
+		MediaInflightShare:        mediaShare,
 	}, nil
 }
