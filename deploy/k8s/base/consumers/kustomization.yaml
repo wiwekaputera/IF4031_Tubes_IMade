@@ -5,3 +5,4 @@ resources:
   - stub-sink.yaml
   - notification-consumer.yaml
   - audit-consumer.yaml
+  - field-report-consumer.yaml

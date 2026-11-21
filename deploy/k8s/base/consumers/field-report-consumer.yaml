@@ -1,0 +1,83 @@
+# Durable JetStream consumer that delivers field reports to stub-sink.
+# Its bbolt dedup database lives on the node's disk (hostPath) and the pod is
+# pinned to the control-plane node, so a restart keeps the set of report IDs
+# already handled and redelivered messages are not processed twice.
+# Recreate: bbolt holds a file lock, two pods must never share the file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: field-report-consumer-config
+  labels:
+    app: field-report-consumer
+data:
+  PORT: "8088"
+  NATS_URL: "nats://nats-jetstream:4222"
+  STUB_SINK_URL: "http://stub-sink:8085"
+  BBOLT_PATH: "/data/field-reports.db"
+  HEALTHCHECK_URL: "http://localhost:8088/health"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: field-report-consumer
+  labels:
+    app: field-report-consumer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: field-report-consumer
+  template:
+    metadata:
+      labels:
+        app: field-report-consumer
+        role: consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8088"
+        prometheus.io/path: /metrics
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: field-report-consumer
+          image: bnpb/field-report-consumer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8088
+          envFrom:
+            - configMapRef:
+                name: field-report-consumer-config
+          resources:
+            requests:
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8088
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8088
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/bnpb/field-report-consumer
+            type: DirectoryOrCreate

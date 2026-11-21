@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	contractsauth "github.com/wiwekaputera/if4031-tubes-imade/contracts/auth"
 )
@@ -18,6 +19,12 @@ type Config struct {
 	TokenIssuer       string
 	TokenAudience     string
 	LogLevel          string
+
+	// NATSURL is the JetStream broker that stores accepted field reports.
+	NATSURL string
+	// FieldReportPublishTimeout bounds the wait for the JetStream ack before
+	// answering 503 instead of 202.
+	FieldReportPublishTimeout time.Duration
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -70,6 +77,20 @@ func Load() (*Config, error) {
 		logLevel = "info"
 	}
 
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		natsURL = "nats://nats-jetstream:4222"
+	}
+
+	publishTimeout := 2 * time.Second
+	if v := os.Getenv("FIELD_REPORT_PUBLISH_TIMEOUT_MS"); v != "" {
+		ms, err := strconv.Atoi(v)
+		if err != nil || ms <= 0 {
+			return nil, fmt.Errorf("invalid FIELD_REPORT_PUBLISH_TIMEOUT_MS %q: must be positive integer", v)
+		}
+		publishTimeout = time.Duration(ms) * time.Millisecond
+	}
+
 	return &Config{
 		Port:              port,
 		AggregatorBaseURL: aggregatorBaseURL,
@@ -79,5 +100,8 @@ func Load() (*Config, error) {
 		TokenIssuer:       tokenIssuer,
 		TokenAudience:     tokenAudience,
 		LogLevel:          logLevel,
+
+		NATSURL:                   natsURL,
+		FieldReportPublishTimeout: publishTimeout,
 	}, nil
 }

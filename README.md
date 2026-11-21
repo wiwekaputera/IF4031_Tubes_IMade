@@ -15,7 +15,7 @@
 | Canonical store (P1) | One PostgreSQL instance | 4-node CockroachDB (`RF=3`), 8 logical hash shards, Audit API, analytics dashboard | Made | 🟢 Done |
 | Aggregator (P2) | One instance, every instance polls | ≥3 instances, DB-backed leader election + fencing token (core done; 10k-VU k6 pending) | Made, Fayadh | 🚧 In progress |
 | Schema changes (P3) | Additive changes only | Incompatible changes rejected into a dead-letter queue, retry and replay | Theo | 🟢 Done |
-| Field reports (P3) | — | `POST /field-reports`, accepted with 202, never lost or duplicated | Fayadh | 🚧 In progress |
+| Field reports (P3) | — | `POST /field-reports`: 202 only after the JetStream ack, `Idempotency-Key` dedup, new `field-report-consumer` with bbolt dedup | Fayadh | 🟢 Done |
 | Satellite fire feed (P4) | — | New `satellite-ingestor`: SSE feed → fires → WILDFIRE hazard events | Theo | 🟢 Done |
 | Coastal sensors (P5) | — | Sensor Pantai poller, circuit breaker, prioritised critical alerts | Fayadh | 🚧 In progress |
 | Observability | JSON logs + `X-Correlation-ID` | Prometheus, Grafana dashboards, OpenTelemetry tracing to Jaeger, `trace_id` in logs | Theo | 🚧 In progress: working in Compose; cluster manifests and the Sensor Pantai panel pending |
@@ -36,9 +36,10 @@ Docker Compose still runs the whole system on one machine for development. The K
 | `stub-sink` | *internal* (`8085`) | `bus_net` | 🟢 Operational | Notification target with idempotency check |
 | `notification-consumer` | *internal* (`8086`) | `bus_net` | 🟢 Operational | Durable consumer with bbolt dedup, forwards to stub sink |
 | `audit-consumer` | *internal* (`8087`) | `bus_net` | 🟢 Operational | Durable consumer keeping event history in bbolt |
+| `field-report-consumer` | *internal* (`8088`) | `bus_net` | 🟢 Operational | Durable consumer of `FIELD_REPORTS`, bbolt dedup, delivers each report once to stub sink |
 | `token-db` | *internal* | `token_net` | 🟢 Operational | Refresh tokens and reuse detection |
 | `token-service` | `8083` | `edge_net`, `token_net` | 🟢 Operational | OAuth 2.0 token service, ES256, JWKS |
-| `client-api` | `8080` | `edge_net`, `internal_api_net` | 🟢 Operational | Edge gateway with scope projection and rate limiting |
+| `client-api` | `8080` | `edge_net`, `internal_api_net`, `bus_net` | 🟢 Operational | Edge gateway with scope projection and rate limiting; `POST /field-reports` stores reports in JetStream |
 | `satellite-store` | *internal* | `satellite_net` | 🟢 Operational | PostgreSQL owned by `satellite-ingestor` only: detections, fires, offset, outbox, dead letters |
 | `satellite-ingestor` | `9091` (metrics) | `agency_net`, `satellite_net`, `bus_net` | 🟢 Operational | Satellite feed client, fire clustering, publishes WILDFIRE events to `hazard.ingest.SATELIT` |
 | `prometheus` | `9090` | `observability_net` + app networks | 🟢 Operational | Scrapes `/metrics` from every Go service every 5 s |
@@ -395,7 +396,35 @@ The DLQ is the `dead_letters` table. It keeps the raw message byte for byte with
 
 **Field reports (`POST /field-reports`)**
 
-> 🚧 **Owner: Fayadh.** To be completed: 202 only after the JetStream ack, `Idempotency-Key` dedup, idempotent consumer, kill-after-202 test, field-team write scope.
+Delivery guarantee: **a report answered 202 is never lost and is processed exactly once in effect** (at-least-once delivery from JetStream + deduplication by message ID at every hop).
+
+| Step | What happens | Why nothing is lost or doubled |
+| :--- | :--- | :--- |
+| 1. `client-api` | Checks scope (`field_team` or `internal_ops`; Media gets 403), body ≤ 64 KB, strict JSON, required fields. Publishes to JetStream stream `FIELD_REPORTS` (file storage) with `Nats-Msg-Id = <client_id>/<Idempotency-Key>` and **waits for the PubAck before answering 202**. No ack within `FIELD_REPORT_PUBLISH_TIMEOUT_MS` (2 s) → **503 + `Retry-After`**, never a 202 | After 202 the report is on the broker's disk; client-api can die at any moment. Only NATS is awaited, so a slow or dead consumer does not slow the answer |
+| 2. Client retry | Same `Idempotency-Key` → JetStream drops the copy within its 2 h duplicate window; the client still gets 202 with `"duplicate": true` | A phone that lost the 202 can safely send again |
+| 3. `field-report-consumer` | Durable pull consumer, unlimited redeliveries with exponential back-off (1 s → 30 s). Sends the report to the receiver with `Idempotency-Key`, records the ID in bbolt, **then** acks | A crash before the ack means redelivery; the bbolt record turns it into an ack without resending |
+| 4. Receiver (`stub-sink`) | `POST /field-reports` keeps each message ID once and counts ignored repeats (`GET /field-reports`) | Covers a crash between the receiver's answer and the bbolt write |
+
+```bash
+TEAM_TOKEN=$(tok "$CLIENT_FIELD_TEAM_ID" "$CLIENT_FIELD_TEAM_SECRET")
+curl -s -X POST http://localhost:8080/field-reports \
+  -H "Authorization: Bearer $TEAM_TOKEN" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: palu-2026-11-20-001" \
+  -d '{"category":"DAMAGE","severity":"HIGH","area_name":"Palu, Sulawesi Tengah","latitude":-0.9,"longitude":119.87,"description":"Jembatan utama putus","reported_at":"2026-11-20T02:55:00Z"}'
+# -> 202 {"report_id":"palu-2026-11-20-001","status":"accepted","duplicate":false}
+```
+
+Fields: `category` (`DAMAGE`, `CASUALTY`, `EVACUATION`, `LOGISTICS`, `HAZARD`, `OTHER`), `severity` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), `area_name`, `latitude`, `longitude`, `description`, `reported_at` (RFC 3339, not in the future, at most 7 days old), optional `report_id` (must equal the header when both are sent). Errors: 400 malformed/missing key, 413 body too large, 415 not JSON, 422 invalid fields, 403 wrong scope, 503 not stored.
+
+**End-to-end check** (`MODE=k8s` or `MODE=compose`):
+```bash
+MODE=k8s N=200 bash scripts/demo/m2/field-reports/field-reports.sh
+```
+1. Stops `field-report-consumer` and sends 20 reports: all 202, in milliseconds.
+2. Sends N reports, SIGKILLs every `client-api` pod at N/3 and the consumer at 2N/3; each report is retried with its key until 202 and then sent once more.
+3. Compares the accepted keys with the receiver: missing must be 0 and processed-twice must be 0. Evidence goes to `evidence/field-reports/<run>/`.
+
+Result on the development cluster (N=150): 170/170 accepted reports delivered, 0 missing, 0 processed twice, 150/150 re-sends answered `duplicate: true`, 202 p95 of 20 ms with the consumer stopped. With the broker stopped, the endpoint answered 503 in 8 ms and accepted the same key once the broker was back.
 
 ---
 
@@ -523,7 +552,10 @@ All variables are in [.env.example](.env.example). Milestone 1 variables are unc
 | `SATELLITE_FEED_TOKEN` | *(required)* | `satellite-ingestor` | Group token from the assistants. Keep it in `.env` / a Secret only |
 | `SATELLITE_METRICS_PORT` | `9091` | `satellite-ingestor` | Host port for `/metrics` and `/healthz` |
 | `SATELLITE_STORE_POSTGRES_USER` / `_PASSWORD` / `_DB` | `satellite` / *(required)* / `satellite` | `satellite-store` | PostgreSQL bootstrap credentials |
-| `NATS_URL` | `nats://nats-jetstream:4222` | `satellite-ingestor` | Broker for `hazard.ingest.SATELIT` |
+| `NATS_URL` | `nats://nats-jetstream:4222` | `satellite-ingestor`, `client-api`, `field-report-consumer` | Broker for `hazard.ingest.SATELIT` and the `FIELD_REPORTS` stream |
+| `CLIENT_API_FIELD_REPORT_PUBLISH_TIMEOUT_MS` | `2000` | `client-api` | How long `POST /field-reports` waits for the JetStream ack before answering 503 |
+| `FIELD_REPORT_CONSUMER_STUB_SINK_URL` | `http://stub-sink:8085` | `field-report-consumer` | Receiver of delivered field reports |
+| `FIELD_REPORT_CONSUMER_BBOLT_PATH` | `/data/field-reports.db` | `field-report-consumer` | bbolt file holding the IDs of delivered reports |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://jaeger:4318` | all Go services | Where traces are sent (OTLP/HTTP). Empty turns export off |
 | `SATELLITE_TRACE_SAMPLE_RATIO` | `0.05` | `satellite-ingestor` | Share of satellite traces kept |
 | `METRICS_ADDR` | `:9090` | `client-api`, `token-service`, `satellite-ingestor` | Internal port for `/metrics` |

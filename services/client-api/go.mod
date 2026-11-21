@@ -24,6 +24,8 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/nats-io/nkeys v0.4.7 // indirect
+	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/prometheus/client_golang v1.20.5 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
@@ -35,6 +37,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.31.0 // indirect
 	go.opentelemetry.io/otel/trace v1.31.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.3.1 // indirect
+	golang.org/x/crypto v0.28.0 // indirect
 	golang.org/x/net v0.30.0 // indirect
 	golang.org/x/sys v0.29.0 // indirect
 	golang.org/x/text v0.19.0 // indirect
@@ -44,6 +47,9 @@ require (
 	google.golang.org/protobuf v1.35.1 // indirect
 )
 
-require github.com/wiwekaputera/if4031-tubes-imade/observability v0.0.0
+require (
+	github.com/nats-io/nats.go v1.36.0
+	github.com/wiwekaputera/if4031-tubes-imade/observability v0.0.0
+)
 
 replace github.com/wiwekaputera/if4031-tubes-imade/observability => ../../observability

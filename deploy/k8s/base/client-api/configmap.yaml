@@ -13,6 +13,8 @@ data:
   TOKEN_AUDIENCE: "bnpb-client-api"
   RPS_LIMIT: "100"
   BURST: "20"
+  NATS_URL: "nats://nats-jetstream:4222"
+  FIELD_REPORT_PUBLISH_TIMEOUT_MS: "2000"
   HEALTHCHECK_URL: "http://localhost:8080/health"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
   # Trace every request by default. For the 10,000-VU load test switch to
