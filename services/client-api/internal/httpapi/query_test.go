@@ -188,3 +188,27 @@ func TestToUpstreamQuery(t *testing.T) {
 		t.Errorf("SECURITY/DESIGN VIOLATION: 'view' parameter should not be forwarded upstream, got %q", vals.Get("view"))
 	}
 }
+
+func TestValidateEventQueryMilestone2Values(t *testing.T) {
+	for _, typ := range []string{"SEISMIC", "VOLCANIC", "WILDFIRE", "COASTAL"} {
+		if _, err := ValidateEventQuery(url.Values{"type": {typ}}); err != nil {
+			t.Errorf("type %s rejected: %v", typ, err)
+		}
+	}
+	if _, err := ValidateEventQuery(url.Values{"type": {"FLOOD"}}); err == nil {
+		t.Error("unknown type accepted")
+	}
+	p, err := ValidateEventQuery(url.Values{"hazard_id": {"hz-be9407f9e6171162"}, "cursor": {"eyJvIjoxNzIwfQ"}})
+	if err != nil {
+		t.Fatalf("canonical id / cursor rejected: %v", err)
+	}
+	vals, _ := url.ParseQuery(p.ToUpstreamQuery())
+	if vals.Get("cursor") != "eyJvIjoxNzIwfQ" || vals.Get("hazard_id") != "hz-be9407f9e6171162" {
+		t.Fatalf("not forwarded: %s", p.ToUpstreamQuery())
+	}
+	for _, bad := range []url.Values{{"hazard_id": {"hz-XYZ"}}, {"cursor": {"a b"}}} {
+		if _, err := ValidateEventQuery(bad); err == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
+}
