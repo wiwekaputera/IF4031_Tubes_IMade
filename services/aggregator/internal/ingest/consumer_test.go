@@ -242,3 +242,34 @@ func TestConsumer_RecordsPoisonMessages(t *testing.T) {
 		t.Fatalf("unexpected second recorded poison message: %+v", st.recorded)
 	}
 }
+
+func TestConsumer_RejectIsRecordedNotApplied(t *testing.T) {
+	st := &recordingIngestStore{}
+	c := New(nil, st, zerolog.Nop())
+	raw := []byte(`{"observation_id":"obs-9","quality":"suspect"}`)
+	data, _ := json.Marshal(event.IngestMessage{
+		MessageID: "reject:obs-9", Op: event.IngestOpReject, Source: "SENSOR_PANTAI",
+		SourceRefID: "obs-9", Reason: "quality_not_ok: suspect", Raw: raw,
+	})
+	msg := &fakeMsg{subject: "hazard.ingest.SENSOR_PANTAI", msgID: "reject:obs-9", data: data}
+	c.ProcessMessage(context.Background(), msg)
+
+	if !msg.acked || msg.termed || msg.naked {
+		t.Fatalf("reject must be acked: acked=%v termed=%v naked=%v", msg.acked, msg.termed, msg.naked)
+	}
+	if len(st.calls) != 0 {
+		t.Fatal("rejected data must never be applied as a HazardEvent")
+	}
+	if len(st.recorded) != 1 || st.recorded[0].reason != "quality_not_ok: suspect" ||
+		st.recorded[0].sourceRefID != "obs-9" || string(st.recorded[0].raw) != string(raw) {
+		t.Fatalf("unexpected record: %+v", st.recorded)
+	}
+
+	// Database down: redeliver instead of losing the record.
+	st.recErr = errors.New("db unavailable")
+	retry := &fakeMsg{subject: "hazard.ingest.SENSOR_PANTAI", msgID: "reject:obs-9", data: data}
+	c.ProcessMessage(context.Background(), retry)
+	if !retry.naked || retry.acked {
+		t.Fatalf("expected nak on store failure: acked=%v naked=%v", retry.acked, retry.naked)
+	}
+}

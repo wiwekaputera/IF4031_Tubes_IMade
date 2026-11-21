@@ -241,6 +241,11 @@ func (c *Consumer) ProcessMessage(ctx context.Context, msg Msg) {
 		return
 	}
 
+	if ingestMsg.Op == event.IngestOpReject {
+		c.recordRejected(ctx, msg, ingestMsg)
+		return
+	}
+
 	applied, err := c.store.ApplyIngest(ctx, ingestMsg)
 	if err != nil {
 		c.logger.Error().
@@ -285,6 +290,34 @@ func (c *Consumer) ProcessMessage(ctx context.Context, msg Msg) {
 			Int64("source_version", ingestMsg.SourceVersion).
 			Msg("ignored stale or duplicate ingest message")
 	}
+}
+
+// recordRejected stores data a source poller set aside as breaking the source
+// contract. It is kept as a parked unprocessed message, visible through
+// /internal/audit/unprocessed, and never becomes a HazardEvent. If the
+// database is unavailable the message is redelivered.
+func (c *Consumer) recordRejected(ctx context.Context, msg Msg, m event.IngestMessage) {
+	rec, ok := c.store.(UnprocessedRecorder)
+	if !ok {
+		_ = msg.Ack()
+		return
+	}
+	if err := rec.RecordUnprocessed(ctx, string(m.Source), m.SourceRefID, m.Raw, m.Reason); err != nil {
+		c.logger.Error().Err(err).
+			Str("source", string(m.Source)).Str("source_ref_id", m.SourceRefID).
+			Msg("failed recording rejected source data; naking with delay")
+		if nakErr := msg.NakWithDelay(c.nakDelay); nakErr != nil {
+			c.logger.Error().Err(nakErr).Str("subject", msg.Subject()).Msg("failed naking rejected source data")
+		}
+		return
+	}
+	if err := msg.Ack(); err != nil {
+		c.logger.Error().Err(err).Str("subject", msg.Subject()).Msg("failed acknowledging rejected source data")
+		return
+	}
+	c.logger.Info().
+		Str("source", string(m.Source)).Str("source_ref_id", m.SourceRefID).Str("reason", m.Reason).
+		Msg("recorded rejected source data as unprocessed")
 }
 
 func (c *Consumer) recordParked(ctx context.Context, msg Msg, source, sourceRefID, reason string) {
