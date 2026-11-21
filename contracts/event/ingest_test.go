@@ -65,3 +65,30 @@ func TestIngestMessage_Validate(t *testing.T) {
 		}
 	}
 }
+
+func TestIngestRejectValidation(t *testing.T) {
+	ok := IngestMessage{
+		MessageID: "reject:obs-1", Op: IngestOpReject, Source: hazard.SourceSensorPantai,
+		SourceRefID: "obs-1", Reason: "expired", Raw: []byte(`{"observation_id":"obs-1"}`),
+	}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid reject rejected: %v", err)
+	}
+	noRef := ok
+	noRef.SourceRefID = ""
+	if err := noRef.Validate(); err != nil {
+		t.Fatalf("a reject without source_ref_id (unparseable data) must be allowed: %v", err)
+	}
+	for name, mutate := range map[string]func(*IngestMessage){
+		"no reason":  func(m *IngestMessage) { m.Reason = "" },
+		"no raw":     func(m *IngestMessage) { m.Raw = nil },
+		"no id":      func(m *IngestMessage) { m.MessageID = "" },
+		"bad source": func(m *IngestMessage) { m.Source = "X" },
+	} {
+		m := ok
+		mutate(&m)
+		if err := m.Validate(); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

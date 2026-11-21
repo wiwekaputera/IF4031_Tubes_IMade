@@ -1,0 +1,88 @@
+# Reads the coastal sensor behind its own circuit breaker, connection pool and
+# timeouts, and publishes to JetStream (coastal HazardEvents, critical alerts,
+# rejected data). One replica with Recreate so two pollers never read at the
+# same time; the cursor lives in JetStream, so a new pod resumes from it, and
+# message IDs make a re-read page harmless.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sensor-pantai-poller-config
+  labels:
+    app: sensor-pantai-poller
+data:
+  PORT: "8089"
+  SENSOR_PANTAI_URL: "http://sensor-pantai:8080"
+  NATS_URL: "nats://nats-jetstream:4222"
+  SENSOR_POLL_INTERVAL_MS: "1000"
+  SENSOR_REQUEST_TIMEOUT_MS: "2000"
+  SENSOR_PAGE_LIMIT: "200"
+  SENSOR_MAX_PAGES_PER_CYCLE: "20"
+  SENSOR_MAX_CONNS: "2"
+  SENSOR_RETRY_BASE_MS: "500"
+  SENSOR_RETRY_MAX_MS: "8000"
+  SENSOR_BREAKER_FAILURES: "3"
+  SENSOR_BREAKER_OPEN_MS: "5000"
+  SENSOR_BREAKER_MAX_OPEN_MS: "30000"
+  SENSOR_STALL_AFTER_MS: "15000"
+  SENSOR_SILENCE_AFTER: "10m"
+  SENSOR_STATION_UPDATE_EVERY: "5m"
+  SENSOR_MAX_OBSERVATION_AGE: "2h"
+  HEALTHCHECK_URL: "http://localhost:8089/health"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sensor-pantai-poller
+  labels:
+    app: sensor-pantai-poller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sensor-pantai-poller
+  template:
+    metadata:
+      labels:
+        app: sensor-pantai-poller
+        role: consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8089"
+        prometheus.io/path: /metrics
+    spec:
+      containers:
+        - name: sensor-pantai-poller
+          image: bnpb/sensor-pantai-poller:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8089
+          envFrom:
+            - configMapRef:
+                name: sensor-pantai-poller-config
+          env:
+            - name: PANTAI_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pantai-token
+                  key: token
+          resources:
+            requests:
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8089
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8089
+            initialDelaySeconds: 10
+            periodSeconds: 10

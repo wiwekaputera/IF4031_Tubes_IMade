@@ -26,7 +26,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nats-io/nkeys v0.4.7 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
-	github.com/prometheus/client_golang v1.20.5 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
@@ -49,6 +48,7 @@ require (
 
 require (
 	github.com/nats-io/nats.go v1.36.0
+	github.com/prometheus/client_golang v1.20.5
 	github.com/wiwekaputera/if4031-tubes-imade/observability v0.0.0
 )
 

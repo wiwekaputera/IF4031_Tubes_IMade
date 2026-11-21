@@ -11,6 +11,9 @@ type SourceHealthMeta struct {
 type SourcesMeta struct {
 	BMKG  SourceHealthMeta `json:"bmkg"`
 	PVMBG SourceHealthMeta `json:"pvmbg"`
+	// SensorPantai is added by client-api from the coastal sensor poller's
+	// published status, so clients see when coastal data is not current.
+	SensorPantai *SourceHealthMeta `json:"sensor_pantai,omitempty"`
 }
 
 // EventsMeta contains query count and optional upstream agency health/staleness metadata.

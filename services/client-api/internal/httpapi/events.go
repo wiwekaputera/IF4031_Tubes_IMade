@@ -9,11 +9,30 @@ import (
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/projection"
 	"github.com/wiwekaputera/if4031-tubes-imade/client-api/internal/upstream"
 	contractsauth "github.com/wiwekaputera/if4031-tubes-imade/contracts/auth"
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
+
+// EventsOption configures EventsHandler.
+type EventsOption func(*eventsOptions)
+
+type eventsOptions struct {
+	sensorStatus func() *hazard.SourceHealthMeta
+}
+
+// WithSensorStatus adds meta.sources.sensor_pantai to every response, so a
+// client sees at once whether coastal data is current. The status comes from
+// the sensor poller; client-api never waits on the sensor itself.
+func WithSensorStatus(fn func() *hazard.SourceHealthMeta) EventsOption {
+	return func(o *eventsOptions) { o.sensorStatus = fn }
+}
 
 // EventsHandler handles GET /v1/events by validating view permissions, proxying to Aggregator,
 // and applying server-side field projection based on client scope.
-func EventsHandler(aggClient upstream.Client) http.HandlerFunc {
+func EventsHandler(aggClient upstream.Client, opts ...EventsOption) http.HandlerFunc {
+	var o eventsOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -97,6 +116,20 @@ func EventsHandler(aggClient upstream.Client) http.HandlerFunc {
 
 		// Apply server-side projection per client scope
 		resp.Data = projection.ProjectEvents(resp.Data, scope, view)
+
+		if o.sensorStatus != nil {
+			if meta := o.sensorStatus(); meta != nil {
+				if resp.Meta == nil {
+					resp.Meta = map[string]interface{}{}
+				}
+				sources, _ := resp.Meta["sources"].(map[string]interface{})
+				if sources == nil {
+					sources = map[string]interface{}{}
+				}
+				sources["sensor_pantai"] = meta
+				resp.Meta["sources"] = sources
+			}
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

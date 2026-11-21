@@ -82,6 +82,11 @@ func NewNATSPublisher(url string) (*NATSPublisher, error) {
 	return p, nil
 }
 
+// JetStream returns the JetStream context, shared with other readers.
+func (p *NATSPublisher) JetStream() nats.JetStreamContext {
+	return p.js
+}
+
 // Close drains the connection.
 func (p *NATSPublisher) Close() {
 	_ = p.conn.Drain()

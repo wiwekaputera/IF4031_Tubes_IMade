@@ -1,6 +1,7 @@
 package event
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -26,6 +27,10 @@ type IngestOp string
 const (
 	IngestOpUpsert IngestOp = "upsert"
 	IngestOpDelete IngestOp = "delete"
+	// IngestOpReject records source data that broke the source's contract.
+	// The aggregator keeps it, with the reason, as a parked unprocessed
+	// message (never as a HazardEvent).
+	IngestOpReject IngestOp = "reject"
 )
 
 // IngestMessage is published to hazard.ingest.<source> by source pollers/ingestors
@@ -37,6 +42,8 @@ const (
 //     stale or duplicate deliveries are no-ops.
 //   - Soft delete: op="delete" marks the canonical event as deleted (deleted_at)
 //     when source_version > stored source_version.
+//   - Reject: op="reject" stores Raw and Reason as an unprocessed message for
+//     inspection through the Audit API.
 type IngestMessage struct {
 	MessageID     string            `json:"message_id"`
 	Op            IngestOp          `json:"op"`
@@ -51,6 +58,9 @@ type IngestMessage struct {
 	OccurredAt    string            `json:"occurred_at,omitempty"`
 	Attributes    map[string]any    `json:"attributes,omitempty"`
 	TraceID       string            `json:"trace_id,omitempty"`
+	// Reason and Raw are set only for op=reject.
+	Reason string          `json:"reason,omitempty"`
+	Raw    json.RawMessage `json:"raw,omitempty"`
 }
 
 // Validate checks that the IngestMessage has all required fields and valid values.
@@ -58,6 +68,18 @@ type IngestMessage struct {
 func (m IngestMessage) Validate() error {
 	if !m.Source.Valid() {
 		return fmt.Errorf("invalid source %q", m.Source)
+	}
+	if m.Op == IngestOpReject {
+		if m.MessageID == "" {
+			return errors.New("message_id is required")
+		}
+		if m.Reason == "" {
+			return errors.New("reason is required for op=reject")
+		}
+		if len(m.Raw) == 0 {
+			return errors.New("raw is required for op=reject")
+		}
+		return nil
 	}
 	if m.SourceRefID == "" {
 		return errors.New("source_ref_id is required")

@@ -58,7 +58,8 @@ require BMKG_API_KEY PVMBG_BEARER_TOKEN INTERNAL_OPS_TOKEN AUDIT_TOKEN \
   TOKEN_DB_POSTGRES_PASSWORD ES256_PRIVATE_KEY_B64 \
   CLIENT_MEDIA_ID CLIENT_MEDIA_SECRET CLIENT_FIELD_TEAM_ID CLIENT_FIELD_TEAM_SECRET \
   CLIENT_INTERNAL_OPS_ID CLIENT_INTERNAL_OPS_SECRET \
-  SATELLITE_STORE_POSTGRES_PASSWORD SATELLITE_FEED_TOKEN GRAFANA_ADMIN_PASSWORD
+  SATELLITE_STORE_POSTGRES_PASSWORD SATELLITE_FEED_TOKEN GRAFANA_ADMIN_PASSWORD \
+  PANTAI_AUTH_TOKEN
 
 # The aggregator connects to every CockroachDB node; the driver fails over
 # between the hosts listed here.
@@ -103,6 +104,9 @@ apply_secret satellite-store-secrets \
 apply_secret satellite-ingestor-secrets \
   DATABASE_URL="$SATELLITE_DATABASE_URL" \
   SATELLITE_FEED_TOKEN="$SATELLITE_FEED_TOKEN"
+
+# Name and key fixed by the coastal sensor's example manifest.
+apply_secret pantai-token token="$PANTAI_AUTH_TOKEN"
 
 apply_secret grafana-secrets \
   GF_SECURITY_ADMIN_USER="$GRAFANA_ADMIN_USER" \

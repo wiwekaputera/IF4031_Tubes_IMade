@@ -17,7 +17,7 @@
 | Schema changes (P3) | Additive changes only | Incompatible changes rejected into a dead-letter queue, retry and replay | Theo | 🟢 Done |
 | Field reports (P3) | — | `POST /field-reports`: 202 only after the JetStream ack, `Idempotency-Key` dedup, new `field-report-consumer` with bbolt dedup | Fayadh | 🟢 Done |
 | Satellite fire feed (P4) | — | New `satellite-ingestor`: SSE feed → fires → WILDFIRE hazard events | Theo | 🟢 Done |
-| Coastal sensors (P5) | — | Sensor Pantai poller, circuit breaker, prioritised critical alerts | Fayadh | 🚧 In progress |
+| Coastal sensors (P5) | — | `sensor-pantai-poller`: contract validation, circuit breaker, priority alert path, sensor status in `/v1/events`, prioritised load shedding in client-api | Fayadh | 🚧 Core done; SLO panel, k6 shedding run and game day pending |
 | Observability | JSON logs + `X-Correlation-ID` | Prometheus, Grafana dashboards, OpenTelemetry tracing to Jaeger, `trace_id` in logs | Theo | 🚧 In progress: working in Compose; cluster manifests and the Sensor Pantai panel pending |
 
 ---
@@ -346,7 +346,15 @@ Non-aggregator sources (`SATELIT`, `SENSOR_PANTAI`) publish `event.IngestMessage
 
 - **Core HA (Made — 🟢 Done):** Aggregator runs `≥ 3` replicas behind one Service (`aggregator:8090`), with DB-backed leader election (`leader_leases` using CockroachDB HLC `now()`), monotonic `fencing_token` checked in `SERIALIZABLE` write transactions (`UpsertFencedBatch`), renew-before-poll, durable `poller_watermarks`, `GET /internal/leader`, `GET /internal/ready` (`503 DRAINING` on `SIGTERM`), and graceful shutdown drain (`SHUTDOWN_DRAIN_S=5`).
   - Automated P2 scenario scripts (`c1`–`c5`, `MODE=compose|k8s`): [scripts/demo/m2/p2/README.md](scripts/demo/m2/p2/README.md).
-- **Load testing, scaling & rolling update (Fayadh — 🚧 In progress):** k6 `≥ 10,000 VU × ≥ 120 s` with scaling `3→5→2`, throughput `3 vs 1` replicas, and zero-error rolling update.
+- **Load testing, scaling & rolling update (Fayadh — 🚧 scripts ready, results from the demo cluster pending):** `tests/load/k6_m2.js` run from outside the cluster by the scripts in `scripts/demo/m2/load/`. Evidence goes to `evidence/load/<run>/`.
+
+  | Script | What it does | Pass condition |
+  | :--- | :--- | :--- |
+  | `VUS=10000 bash scripts/demo/m2/load/scale-and-rollout.sh` | 10,000 VUs, 30 s ramp, 150 s hold; aggregator 3 → 5 (t=20 s) → 2 (t=60 s) → rolling update (t=95 s, `NEW_IMAGE=bnpb/aggregator:v2` or a new pod template revision); replica timeline every 2 s | unexpected errors (not 200/429/503) < 1 % overall and 0 during the rolling update, counted per phase |
+  | `VUS=600 bash scripts/demo/m2/load/throughput.sh` | Same load against 1 and then 3 aggregator replicas (client-api at 4 replicas) | served/s with 3 replicas ≥ 2.0 × 1 replica |
+  | `MEDIA_VUS=3000 FIELD_VUS=50 bash scripts/demo/m2/load/shedding.sh` | Media and field-team clients at once, beyond capacity | field team ≥ 99 % served, media refused with 503, no other errors |
+
+  For each run the scripts lift the per-client rate limit (one client is used for all VUs), give tokens a 15-minute lifetime (one token per client instead of 10,000 token requests), set trace sampling to 1 %, and restore everything afterwards. Run k6 from a machine on the nodes' network: on Windows, Docker Desktop's port forwarding refuses connections at a few hundred concurrent clients.
 
 ---
 
@@ -511,7 +519,50 @@ Result on the practice feed (181,467 events): 36 random kills, all tables and 12
 
 ### P5 — Coastal Sensors (Sensor Pantai)
 
-> 🚧 **Owner: Fayadh.** To be completed: sensor deployment, poller with validation, critical alert path (p95 ≤5 s, no loss), circuit breaker, bulkhead, retry with jitter, prioritised load shedding, SLO and error budget, game day.
+The sensor image runs unmodified (`sustuna/sensor-pantai@sha256:51fbd90d…`, the assistants' example manifest in `deploy/k8s/base/sensor/`). A separate service, `sensor-pantai-poller`, is the only component that talks to it.
+
+```
+sensor-pantai ──HTTP (own pool, 2 s timeout, breaker)──► sensor-pantai-poller
+                                                          │ validate each item
+        ┌─────────────────────────────────────────────────┼──────────────────────────────┐
+        ▼ critical first                                  ▼                              ▼
+  BNPB_ALERTS (priority)                     hazard.ingest.SENSOR_PANTAI      hazard.ingest.SENSOR_PANTAI
+        │                                      op=upsert (COASTAL)              op=reject (+reason, raw)
+        ▼                                             │                              │
+  notification-consumer ──► stub-sink          aggregator → canonical store   aggregator → dead_letters
+  (separate durable)        (field team)       → BNPB_EVENTS → notification   → /internal/audit/unprocessed
+```
+
+| Mechanism | Where | Configuration | Why |
+| :--- | :--- | :--- | :--- |
+| Contract validation | poller (`internal/validate`) | required fields and types, known `station_id`, `observed_at` ≤ 2 h older and ≤ 1 min newer than the sensor's own `generated_at`, `|sea_level_anomaly_m|` ≤ 15 m, `0 ≤ wave_height_m` ≤ 30 m, `quality == "ok"` | Bad data is sent as `op=reject` and stored as a parked unprocessed message with its reason, never as a HazardEvent. Times are compared with the sensor's clock, which runs on its own (accelerated) time |
+| Duplicate handling | poller | key = `observation_id@observed_at`, in-page and 50 000 recent keys; JetStream `Nats-Msg-Id` | The sensor repeats items within and across pages |
+| Priority path | poller → `BNPB_ALERTS` → `notification-consumer-alerts` | critical alerts published before anything else on the page; separate stream and durable consumer, unlimited redelivery | A backlog of regular events can never delay a critical alert. `EventID` = canonical `hazard_id`, so the regular path does not deliver it twice |
+| Circuit breaker | poller (`internal/breaker`) | opens after 3 consecutive failures (timeout, network, 5xx, 429, bad body, frozen clock); open 5 s, doubling to 30 s, ±20 % jitter; half-open lets one probe through | A sick sensor gets fewer and fewer requests; recovery is automatic |
+| Retry with back-off + jitter | poller | 0.5 s doubling to 8 s, 50–100 % jitter, while the breaker is still closed | No synchronised retry storms |
+| Timeouts | poller | 2 s per request | The sensor sometimes takes 8 s |
+| Bulkhead | separate process, own connection pool (max 2 connections), own NATS connection | — | The aggregator's BMKG/PVMBG polling shares nothing with the sensor |
+| Graceful degradation | client-api `meta.sources.sensor_pantai` | status `UP` / `DEGRADED` / `OUTAGE` / `DOWN`, `last_synced_at`, `stale_since`, read from the poller's JetStream KV (1 s cache) | Clients get the last stored data at once plus an explicit status; client-api never calls the sensor |
+| Silence / frozen-clock detection | poller | `DEGRADED` when the newest observation is > 10 min behind the sensor clock; failure when `generated_at` stops for 15 s | The sensor sometimes answers 200 but stops observing |
+| Sensor restart | poller | cursor saved with the sensor time; clock going back or a 4xx on the cursor → read again from the start | The sensor's `emptyDir` restarts its data when the pod is deleted |
+| Prioritised load shedding | client-api (`internal/loadshed`) | `MAX_INFLIGHT=256`; media may use 60 %; field team and internal ops all of it; refused requests get 503 + `Retry-After: 1` immediately | Under overload media is refused first while the field team keeps its reserved share |
+| Station condition | poller | one HazardEvent per station (`source_ref_id=station:<id>`), republished on severity change or every 5 min of sensor time; severity `AWAS` if critical, `SIAGA` ≥ 1.0 m / 4.0 m waves, `WASPADA` ≥ 0.5 m / 2.5 m, else `NORMAL` | Keeps the ingest rate below what the aggregator writes; critical observations also get their own AWAS event |
+
+**Sensor behaviour found** (practice profile, recorded for ~17 min ≈ 17 h of sensor time): `/v1/observations` answering 503 while `/healthz` stays 200; `/healthz` itself failing at times; responses taking up to 7.9 s; identical observations repeated in the same page and across pages; `quality: "suspect"` items (~1.3 %); long silences (200 with no new data for ~70 sensor-minutes) followed by bursts of 18–200 items; data restarting from 00:00 when the pod is recreated.
+
+**Results on the development cluster:**
+
+| Check | Result |
+| :--- | :--- |
+| Critical alerts delivered after the sensor pod was deleted | 3/3 (`obs-000120`, `000362`, `000601`), detection → field-team receiver 13 ms on average; restart detected 4 s after the pod was deleted |
+| Sensor scaled to 0 for 65 s | 5 requests reached it (probes at +4, +10, +20, +36, +66 s) instead of ~65; `/v1/events` answered in 0.3 s with `sensor_pantai.status=OUTAGE` and `stale_since`; back to `UP` 16 s after the sensor returned, no intervention |
+| Rejected data | `quality_not_ok`, `expired` … visible in `GET /internal/audit/unprocessed?source=SENSOR_PANTAI` as `parked`, never in `/v1/events` |
+
+Metrics (Prometheus): `sensor_pantai_requests_total{outcome}`, `sensor_pantai_breaker_state`, `sensor_pantai_observations_total{result}`, `sensor_pantai_rejected_total{reason}`, `sensor_pantai_critical_published_total`, `sensor_pantai_data_lag_seconds`, `notification_delivery_latency_seconds{path,severity}`, `client_api_shed_total{scope}`, `client_api_inflight_requests`.
+
+**Dashboard and SLO.** Grafana "BNPB — Coastal sensor and alert SLO" (`monitoring/grafana/dashboards/bnpb-coastal.json`): breaker state, requests sent vs short-circuited, request latency, data lag, rejected data by reason, and the alert path. SLO: **99 % of critical alerts reach the field-team receiver within 5 s** per 1-hour window. SLI = alerts delivered within 5 s on the priority path ÷ alerts published by the poller (an alert never delivered counts as a miss); error budget remaining = `1 − (1 − SLI) / 0.01`, plus a 15-minute burn rate.
+
+**Game day.** `bash scripts/demo/m2/gameday/gameday.sh` injects, on a fixed schedule and with background media + field-team load: PVMBG outage (t=30 s), coastal sensor pod deleted (t=60 s), network partition isolating the sensor (t=90–150 s), optionally a Tester Agent practice scenario (`TESTER_SCENARIO=<name>`, t=120 s), PVMBG back (t=180 s), then a recovery window with no action (`RECOVERY_S`, default 180 s). It saves the timeline, before/during/after metric snapshots (SLI, error budget, breaker, shedding) and the k6 summary under `evidence/gameday/<run>/` for the post-mortem.
 
 ---
 

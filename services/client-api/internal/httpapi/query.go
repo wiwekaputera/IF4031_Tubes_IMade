@@ -6,9 +6,17 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/wiwekaputera/if4031-tubes-imade/contracts/hazard"
 )
 
-var uuidRegex = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+var (
+	uuidRegex = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	// canonicalIDRegex matches hazard.ID: "hz-" and 16 hex characters.
+	canonicalIDRegex = regexp.MustCompile(`^hz-[0-9a-f]{16}$`)
+	// cursorRegex: the aggregator's opaque pagination cursor (base64url).
+	cursorRegex = regexp.MustCompile(`^[A-Za-z0-9_=.-]{1,512}$`)
+)
 
 // EventQueryParams holds validated query parameters for GET /v1/events.
 type EventQueryParams struct {
@@ -17,6 +25,7 @@ type EventQueryParams struct {
 	Since    string
 	HazardID string
 	View     string
+	Cursor   string
 }
 
 // ValidateEventQuery validates query parameters
@@ -24,8 +33,8 @@ func ValidateEventQuery(query url.Values) (*EventQueryParams, error) {
 	// 1. Validate 'type'
 	hazardType := query.Get("type")
 	if hazardType != "" {
-		if hazardType != "SEISMIC" && hazardType != "VOLCANIC" {
-			return nil, fmt.Errorf("invalid type parameter %q: must be 'SEISMIC' or 'VOLCANIC'", hazardType)
+		if !hazard.HazardType(hazardType).Valid() {
+			return nil, fmt.Errorf("invalid type parameter %q: must be SEISMIC, VOLCANIC, WILDFIRE or COASTAL", hazardType)
 		}
 	}
 
@@ -49,12 +58,18 @@ func ValidateEventQuery(query url.Values) (*EventQueryParams, error) {
 		}
 	}
 
-	// 4. Validate 'hazard_id' (canonical UUID format)
+	// 4. Validate 'hazard_id' (canonical "hz-…" ID, or a UUID from older data)
 	hazardID := query.Get("hazard_id")
 	if hazardID != "" {
-		if !uuidRegex.MatchString(hazardID) {
-			return nil, fmt.Errorf("invalid hazard_id parameter %q: must be a valid UUID", hazardID)
+		if !canonicalIDRegex.MatchString(hazardID) && !uuidRegex.MatchString(hazardID) {
+			return nil, fmt.Errorf("invalid hazard_id parameter %q: must be a canonical hz-… ID", hazardID)
 		}
+	}
+
+	// 4b. Validate 'cursor' (opaque pagination cursor from a previous response)
+	cursor := query.Get("cursor")
+	if cursor != "" && !cursorRegex.MatchString(cursor) {
+		return nil, fmt.Errorf("invalid cursor parameter: use next_cursor from a previous response")
 	}
 
 	// 5. Validate 'view'
@@ -69,6 +84,7 @@ func ValidateEventQuery(query url.Values) (*EventQueryParams, error) {
 		Since:    since,
 		HazardID: hazardID,
 		View:     view,
+		Cursor:   cursor,
 	}, nil
 }
 
@@ -86,6 +102,9 @@ func (p *EventQueryParams) ToUpstreamQuery() string {
 	}
 	if p.HazardID != "" {
 		vals.Set("hazard_id", p.HazardID)
+	}
+	if p.Cursor != "" {
+		vals.Set("cursor", p.Cursor)
 	}
 	return vals.Encode()
 }
