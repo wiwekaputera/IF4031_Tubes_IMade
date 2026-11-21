@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 TAG="${TAG:-latest}"
-ALL_SERVICES="bmkg-mock pvmbg-mock aggregator token-service client-api stub-sink notification-consumer audit-consumer field-report-consumer satellite-ingestor"
+ALL_SERVICES="bmkg-mock pvmbg-mock aggregator token-service client-api stub-sink notification-consumer audit-consumer field-report-consumer satellite-ingestor sensor-pantai-poller"
 SERVICES="${SERVICES:-$ALL_SERVICES}"
 
 images=()

@@ -313,6 +313,8 @@ services:
       BURST: ${CLIENT_API_BURST:-20}
       NATS_URL: ${NATS_URL:-nats://nats-jetstream:4222}
       FIELD_REPORT_PUBLISH_TIMEOUT_MS: ${CLIENT_API_FIELD_REPORT_PUBLISH_TIMEOUT_MS:-2000}
+      MAX_INFLIGHT: ${CLIENT_API_MAX_INFLIGHT:-256}
+      MEDIA_INFLIGHT_SHARE: ${CLIENT_API_MEDIA_INFLIGHT_SHARE:-0.6}
       PORT: ${CLIENT_API_PORT:-8080}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       HEALTHCHECK_URL: http://localhost:8080/health
@@ -428,6 +430,51 @@ services:
         condition: service_healthy
     networks:
       - bus_net
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Coastal sensor ───────────────────────────────────────────
+
+  sensor-pantai:
+    image: sustuna/sensor-pantai@sha256:51fbd90d3891ad6e9f5768ad330ffb65205644cb29e50da65c7538f2e0b4397d
+    environment:
+      PANTAI_PROFILE: ${PANTAI_PROFILE:-practice}
+      PANTAI_SEED: ${PANTAI_SEED:-42}
+      PANTAI_SPEED: ${PANTAI_SPEED:-60}
+      PANTAI_AUTH_TOKEN: ${PANTAI_AUTH_TOKEN}
+    networks:
+      - agency_net
+
+  sensor-pantai-poller:
+    build:
+      context: .
+      dockerfile: services/sensor-pantai-poller/Dockerfile
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      SENSOR_PANTAI_URL: http://sensor-pantai:8080
+      PANTAI_AUTH_TOKEN: ${PANTAI_AUTH_TOKEN}
+      NATS_URL: ${NATS_URL:-nats://nats-jetstream:4222}
+      SENSOR_POLL_INTERVAL_MS: ${SENSOR_POLL_INTERVAL_MS:-1000}
+      SENSOR_REQUEST_TIMEOUT_MS: ${SENSOR_REQUEST_TIMEOUT_MS:-2000}
+      SENSOR_BREAKER_FAILURES: ${SENSOR_BREAKER_FAILURES:-3}
+      SENSOR_BREAKER_OPEN_MS: ${SENSOR_BREAKER_OPEN_MS:-5000}
+      SENSOR_BREAKER_MAX_OPEN_MS: ${SENSOR_BREAKER_MAX_OPEN_MS:-30000}
+      SENSOR_MAX_OBSERVATION_AGE: ${SENSOR_MAX_OBSERVATION_AGE:-2h}
+      SENSOR_STATION_UPDATE_EVERY: ${SENSOR_STATION_UPDATE_EVERY:-5m}
+      PORT: "8089"
+      HEALTHCHECK_URL: http://localhost:8089/health
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      nats-jetstream:
+        condition: service_healthy
+      sensor-pantai:
+        condition: service_started
+    networks:
+      - agency_net      # reaches the sensor
+      - bus_net         # publishes to JetStream
     healthcheck:
       test: ["CMD", "/healthcheck"]
       interval: 10s
