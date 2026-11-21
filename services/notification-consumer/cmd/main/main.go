@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/rs/zerolog"
 	"github.com/wiwekaputera/if4031-tubes-imade/contracts/event"
 	"github.com/wiwekaputera/if4031-tubes-imade/observability"
@@ -25,16 +27,28 @@ import (
 
 const (
 	consumerDurable = "notification-consumer"
-	defaultNATSURL  = "nats://nats-jetstream:4222"
-	defaultSinkURL  = "http://stub-sink:8085"
-	defaultDBPath   = "/data/notification.db"
-	healthPort      = "8086"
-	ackWait         = 30 * time.Second
-	fetchWait       = time.Second
-	sinkTimeout     = 5 * time.Second
+	// alertDurable reads the priority alert stream. It is a separate durable
+	// consumer with its own loop, so a backlog of regular events never delays
+	// a critical alert.
+	alertDurable   = "notification-consumer-alerts"
+	defaultNATSURL = "nats://nats-jetstream:4222"
+	defaultSinkURL = "http://stub-sink:8085"
+	defaultDBPath  = "/data/notification.db"
+	healthPort     = "8086"
+	ackWait        = 30 * time.Second
+	fetchWait      = time.Second
+	sinkTimeout    = 5 * time.Second
 )
 
 var processedBucket = []byte("processed_versions")
+
+// alertLatency measures, for events carrying the detected_at attribute, the
+// time from BNPB first reading the observation to the receiver accepting it.
+var alertLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "notification_delivery_latency_seconds",
+	Help:    "Time from detection (detected_at attribute) to the field team receiver accepting the notification, by path and severity.",
+	Buckets: []float64{.1, .25, .5, 1, 2, 3, 4, 5, 7.5, 10, 30},
+}, []string{"path", "severity"})
 
 type stateStore struct {
 	db *bolt.DB
@@ -84,6 +98,8 @@ func (s *stateStore) markProcessed(eventID string, version int64) error {
 }
 
 type notificationConsumer struct {
+	// path labels metrics: "regular" (BNPB_EVENTS) or "priority" (BNPB_ALERTS).
+	path       string
 	state      *stateStore
 	sinkURL    string
 	httpClient *http.Client
@@ -161,7 +177,12 @@ func (c *notificationConsumer) handle(parent context.Context, msg *nats.Msg) str
 		c.logger.Error().Err(err).Str("event_key", key).Msg("failed acknowledging notification")
 		return "ack_failed"
 	}
-	c.logger.Info().Ctx(ctx).Str("event_key", key).Str("correlation_id", envelope.TraceID).Dur("latency", latency).Msg("notification delivered")
+	if detected, ok := envelope.Data.Attributes[event.AttrDetectedAt].(string); ok {
+		if t, err := time.Parse(time.RFC3339Nano, detected); err == nil {
+			alertLatency.WithLabelValues(c.path, string(envelope.Data.Severity)).Observe(time.Since(t).Seconds())
+		}
+	}
+	c.logger.Info().Ctx(ctx).Str("event_key", key).Str("path", c.path).Str("correlation_id", envelope.TraceID).Dur("latency", latency).Msg("notification delivered")
 	return "ok"
 }
 
@@ -249,12 +270,17 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed creating durable JetStream subscription after retries")
 	}
+	alertSub, err := subscribeAlerts(js, logger)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed creating durable subscription to the alert stream")
+	}
 	state, err := openState(dbPath)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed opening idempotency store")
 	}
 	defer state.db.Close()
 	consumer := &notificationConsumer{
+		path:  "regular",
 		state: state, sinkURL: sinkURL,
 		httpClient: &http.Client{Timeout: sinkTimeout, Transport: observability.Transport("notification-consumer", nil)},
 		logger:     logger,
@@ -271,10 +297,19 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	alertConsumer := *consumer
+	alertConsumer.path = "priority"
+	alertConsumer.httpClient = &http.Client{Timeout: sinkTimeout, Transport: observability.Transport("notification-consumer", nil)}
+
 	consumerDone := make(chan struct{})
 	go func() {
 		defer close(consumerDone)
 		runConsumer(ctx, sub, consumer, logger)
+	}()
+	alertDone := make(chan struct{})
+	go func() {
+		defer close(alertDone)
+		runConsumer(ctx, alertSub, &alertConsumer, logger)
 	}()
 
 	select {
@@ -285,14 +320,59 @@ func main() {
 		}
 	case <-consumerDone:
 		logger.Error().Msg("consumer loop exited unexpectedly")
+	case <-alertDone:
+		logger.Error().Msg("alert consumer loop exited unexpectedly")
 	}
 	stop()
 	<-consumerDone
+	<-alertDone
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error().Err(err).Msg("health server shutdown failed")
 	}
+}
+
+// subscribeAlerts binds the priority consumer, creating BNPB_ALERTS with the
+// same settings as the publisher if this service starts first. Alerts are
+// redelivered without limit: a critical alert must never be dropped.
+func subscribeAlerts(js nats.JetStreamContext, logger zerolog.Logger) (*nats.Subscription, error) {
+	var lastErr error
+	for retries := 0; retries < 30; retries++ {
+		if _, err := js.StreamInfo(event.AlertStreamName); errors.Is(err, nats.ErrStreamNotFound) {
+			_, err = js.AddStream(&nats.StreamConfig{
+				Name:       event.AlertStreamName,
+				Subjects:   []string{event.AlertSubjectFilter},
+				Storage:    nats.FileStorage,
+				Retention:  nats.LimitsPolicy,
+				MaxAge:     event.AlertMaxAge,
+				Duplicates: event.AlertDuplicateWindow,
+				Replicas:   1,
+			})
+			if err != nil && !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
+				lastErr = err
+				logger.Warn().Err(err).Msg("alert stream not ready yet, retrying in 1s...")
+				time.Sleep(time.Second)
+				continue
+			}
+		}
+		sub, err := js.PullSubscribe(
+			event.AlertSubjectFilter,
+			alertDurable,
+			nats.BindStream(event.AlertStreamName),
+			nats.AckExplicit(),
+			nats.AckWait(ackWait),
+			nats.MaxDeliver(-1),
+			nats.MaxAckPending(16),
+		)
+		if err == nil {
+			return sub, nil
+		}
+		lastErr = err
+		logger.Warn().Err(err).Msg("alert subscription not ready yet, retrying in 1s...")
+		time.Sleep(time.Second)
+	}
+	return nil, lastErr
 }
 
 // withMetrics serves /metrics beside the existing health handler.
