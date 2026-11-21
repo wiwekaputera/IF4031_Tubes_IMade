@@ -149,9 +149,14 @@ func (c *Consumer) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		msgs, err := c.sub.Fetch(c.batchSize, nats.MaxWait(c.fetchWait), nats.Context(ctx))
+		// nats.go rejects MaxWait together with Context, so the wait is a
+		// per-fetch deadline on a context derived from ctx.
+		fetchCtx, cancel := context.WithTimeout(ctx, c.fetchWait)
+		msgs, err := c.sub.Fetch(c.batchSize, nats.Context(fetchCtx))
+		cancel()
 		if err != nil {
-			if errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			if errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) ||
+				errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				continue
 			}
 			c.logger.Error().Err(err).Msg("ingest pull fetch failed")
