@@ -1,0 +1,64 @@
+\subsection{Problem 4: Atap Seng di Siang Bolong}
+\tinjau{oleh Theo: isi bagian ini disusun dari kode dan dokumentasi \kode{satellite-ingestor}}
+
+\subsubsection{Identifikasi Masalah}
+\begin{itemize}
+\item \textbf{Kriteria 2: \textit{event time vs processing time}, \textit{watermark} dan \textit{allowed lateness}.} Deteksi harus dikelompokkan berdasarkan waktu lintasan satelit, bukan waktu tiba; data yang terlambat harus diberi batas yang dinyatakan dan dihitung bila melewatinya (Akidau dkk., \textit{The Dataflow Model}; \textit{Streaming Systems}).
+\item \textbf{Kriteria 4: \textit{backpressure} dan \textit{consumer lag}} saat aliran dipercepat 60$\times$; latensi masuk $\rightarrow$ tersimpan harus terukur.
+\item \textbf{Kriteria 5: \textit{stateful stream processing} dengan \textit{checkpoint} dan \textit{exactly-once processing}.} Keadaan kebakaran yang sedang dibentuk dan posisi baca harus tersimpan secara atomik agar \textit{crash} tidak menghilangkan atau menggandakan kebakaran.
+\item \textbf{Kriteria 1 dan 3:} pengelompokan berantai (\textit{connected components}) dan \textit{stable identifiers} untuk kebakaran yang diperbarui, digabung, atau ditarik.
+\end{itemize}
+
+\subsubsection{Rancangan Solusi}
+
+\begin{longtable}{|p{3.5cm}|p{11.4cm}|}
+\hline
+\textbf{Aspek} & \textbf{Desain}\\ \hline \endhead
+Pengambilan data & \kode{GET /v1/stream} (SSE, token grup dari Secret); \textit{reconnect} dengan \kode{?from=<offset>}. 400/401 menghentikan service; 429/503 \textit{backoff} eksponensial (menghormati \kode{Retry-After}); 45 s tanpa \textit{byte} memicu \textit{reconnect}.\\ \hline
+Lanjut setelah \textit{restart} & \textit{Offset} berikutnya disimpan di PostgreSQL \textbf{dalam transaksi yang sama} dengan perubahan kebakaran.\\ \hline
+Definisi kebakaran & Dedup \kode{satellite|acq\_date|acq\_time|lat|lon}; buang \textit{confidence} rendah; hubungkan deteksi $\le$ 1 km dan $\le$ 360 menit secara berantai; $\ge$ 2 deteksi = kebakaran; deteksi tunggal dihitung.\\ \hline
+Waktu & Seluruh logika memakai waktu akuisisi deteksi (UTC), bukan waktu tiba.\\ \hline
+Keterlambatan & Deteksi yang lebih tua 2 jam dari deteksi terbaru yang pernah dilihat dihitung sebagai \textit{late} dan tidak dikelompokkan (\kode{satellite\_durable\_count\{kind="late"\}}).\\ \hline
+\textit{Update}/\textit{retract} & Mengubah deteksi tersimpan dan mengelompokkan ulang hanya kebakaran terkait; deteksi yang ditarik tetap disimpan dengan tanda.\\ \hline
+ID stabil & \kode{source\_ref\_id} diawali hash kunci deteksi paling awal, lalu dibawa ke kebakaran hasil hitung ulang yang beririsan. Saat digabung, kebakaran lama mempertahankan ID dan yang lain dikirim sebagai \textit{delete}.\\ \hline
+Pemetaan & WILDFIRE/SATELIT; centroid; \kode{occurred\_at} deteksi paling awal; provinsi terdekat (tabel statis 38 provinsi); \textit{severity} AWAS ($\ge$ 20 deteksi atau $\ge$ 100 MW), SIAGA ($\ge$ 6 atau $\ge$ 30 MW), WASPADA; \kode{attributes}: \kode{detection\_count}, \kode{satellites}, \kode{max\_confidence}, \kode{total\_frp\_mw}, \kode{detection\_keys}.\\ \hline
+Pengiriman ke Aggregator & \textit{Outbox} dalam transaksi yang sama, dipublikasikan ke \kode{hazard.ingest.SATELIT} dengan \kode{Nats-Msg-Id}; \kode{source\_version} = \textit{offset} feed sehingga keadaan terbaru selalu menang.\\ \hline
+Event rusak & Disimpan di \kode{satellite\_dead\_letters} beserta \textit{byte} mentahnya.\\ \hline
+\end{longtable}
+
+\subsubsection{Alasan Keputusan}
+\begin{itemize}
+\item \textbf{SSE + \textit{offset} vs \textit{polling} M1:} \tinjau{oleh Theo} Aliran berbasis \textit{offset} monoton memberi posisi baca yang tepat untuk dilanjutkan, tanpa \textit{watermark} waktu yang bisa melewatkan atau mengulang data seperti pada \textit{polling} berbasis \kode{since}.
+\item \textbf{Keadaan di PostgreSQL milik ingestor vs JetStream KV:} \textit{offset}, deteksi, kebakaran, dan \textit{outbox} perlu diperbarui atomik; satu transaksi PostgreSQL memberikannya tanpa protokol dua fase. \tinjau{oleh Theo}
+\item \textbf{Batas keterlambatan 2 jam:} \isi{alasan nilai menurut Theo}
+\end{itemize}
+
+\subsubsection{Batasan yang Disadari}
+\begin{itemize}
+\item \kode{satellite-ingestor} berjalan satu replika (\textit{Recreate}); dua replika bersamaan akan membaca feed dua kali.
+\item Pemetaan provinsi memakai jarak ke ibu kota provinsi, sehingga titik dekat perbatasan dapat dinamai provinsi tetangga.
+\item \isi{batasan lain menurut Theo}
+\end{itemize}
+
+\subsubsection{Bukti Penyelesaian}
+
+\begin{longtable}{|p{4.2cm}|p{10.7cm}|}
+\hline
+\textbf{Kriteria} & \textbf{Bukti}\\ \hline \endhead
+1. WILDFIRE & \isi{contoh kebakaran dari \kode{satellite\_fires} dan HazardEvent di Audit API}\\ \hline
+2. Waktu deteksi, keterlambatan & \isi{jumlah \kode{late} dan panel dashboard Satellite}\\ \hline
+3. \textit{Update}/\textit{retract} & \isi{contoh kebakaran yang diperbarui/ditarik dengan \kode{source\_ref\_id} tetap}\\ \hline
+4. 60$\times$, p95 latensi & \isi{\kode{scripts/satellite/report.py}: p95 latensi masuk $\rightarrow$ tersimpan, waktu kembali mutakhir}\\ \hline
+5. Pemroses mati & Uji \kode{internal/e2e} pada feed latihan (181.467 event): 36 kali dimatikan acak (sebagian di tengah transaksi), seluruh tabel dan 120.809 pesan ke Aggregator identik dengan pemrosesan tanpa gangguan; 2.845 kebakaran sama dengan pengelompokan ulang penuh; $\pm$385 event/s. \isi{ulang di klaster demo bila perlu}\\ \hline
+6. Selisih dengan referensi & \isi{perbandingan \kode{SATELLITE\_TEST\_EXPORT} dengan hasil referensi asisten dan penyebab selisih}\\ \hline
+7. Feed \textit{live} & \isi{tangkapan layar saat demo}\\ \hline
+8. Putus-sambung & \isi{log \kode{resume\_offset} setelah \kode{kubectl delete pod}}\\ \hline
+\end{longtable}
+
+\subsubsection{Jawaban atas Butir ``Di Laporan''}
+\begin{enumerate}
+\item \textbf{Persoalan:} kriteria 2 \textit{event time vs processing time}, \textit{watermark}, \textit{allowed lateness}; kriteria 4 \textit{consumer lag / backpressure}; kriteria 5 \textit{stateful processing} dengan \textit{atomic checkpoint} (\textit{exactly-once processing}).
+\item \textbf{Pola M1:} \textit{polling} ditinggalkan untuk sumber ini dan diganti konsumsi aliran SSE dengan \textit{offset}. \tinjau{oleh Theo}
+\item \textbf{Kapan kebakaran ``selesai dikenali'', keterlambatan, dan keadaan sementara:} kebakaran tidak ditutup pada jendela tetap; setiap deteksi baru, \textit{update}, atau \textit{retract} memperbarui kebakaran yang bersangkutan dan dipublikasikan sebagai versi baru. Deteksi yang lebih tua 2 jam dari deteksi terbaru dihitung sebagai \textit{late}. Keadaan (deteksi, kebakaran, \textit{offset}, \textit{outbox}) tersimpan di \kode{satellite-store} dalam satu transaksi. \tinjau{oleh Theo}
+\item \textbf{Jaminan pemrosesan:} \textit{exactly-once} secara efektif: \textit{offset} dan keadaan dikomit atomik, \textit{outbox} + \kode{Nats-Msg-Id} + \textit{version guard} di Aggregator mencegah duplikat. Bukti: uji \textit{kill-and-restart} pada kriteria 5.
+\end{enumerate}

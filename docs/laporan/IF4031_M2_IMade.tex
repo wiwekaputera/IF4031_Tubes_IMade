@@ -1,0 +1,109 @@
+% Laporan Milestone 2 — IF4031 Arsitektur Aplikasi Terdistribusi — Kelompok IMade
+% Kompilasi: latexmk -pdf IF4031_M2_IMade.tex   (atau pdflatex dua kali)
+% Penanda \isi{...} (merah) = bagian yang masih harus diisi; \tinjau{...} (oranye) = perlu ditinjau pemilik bagian.
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[a4paper,top=2.5cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{newtxtext,newtxmath}
+\usepackage[indonesian]{babel}
+\usepackage{setspace}
+\usepackage{array,tabularx,longtable,multirow}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{listings}
+\usepackage{titlesec}
+\usepackage{fancyvrb}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+\def\UrlBreaks{\do\/\do-\do\_\do.}
+\sloppy
+
+\setstretch{1.15}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+\renewcommand{\arraystretch}{1.25}
+\setlength{\tabcolsep}{4pt}
+\setlist{itemsep=2pt,topsep=4pt}
+
+% ── Penanda isian ────────────────────────────────────────────
+\newcommand{\isi}[1]{\textcolor{red}{\textbf{[ISI: #1]}}}
+\newcommand{\tinjau}[1]{\textcolor{orange!80!black}{\textit{[Perlu ditinjau #1]}}}
+\newcommand{\kode}[1]{\texttt{\small #1}}
+\newcommand{\gambarplaceholder}[2]{%
+  \begin{figure}[H]\centering
+  \fbox{\parbox[c][#2][c]{0.85\textwidth}{\centering\textcolor{red}{\textbf{[GAMBAR: #1]}}}}
+  \caption{#1}\end{figure}}
+
+% ── Kode / perintah ──────────────────────────────────────────
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,columns=fullflexible,
+  frame=single,framesep=4pt,xleftmargin=6pt,xrightmargin=6pt,showstringspaces=false,
+  backgroundcolor=\color{gray!6},literate={≤}{{$\le$}}1 {≥}{{$\ge$}}1 {→}{{$\rightarrow$}}1 {—}{{---}}1}
+
+% ── Judul bab seperti laporan M1: "BAB I" + judul, di tengah ──
+\titleformat{\section}[display]{\centering\bfseries\Large}{}{0pt}{}
+\titleformat{\subsection}{\bfseries\normalsize}{\thesubsection.}{0.5em}{}
+\titleformat{\subsubsection}{\bfseries\normalsize}{\thesubsubsection.}{0.5em}{}
+\renewcommand{\thesubsection}{\arabic{subsection}}
+\renewcommand{\thesubsubsection}{\alph{subsubsection}}
+\newcommand{\bab}[2]{\clearpage\section*{#1\\#2}\addcontentsline{toc}{section}{#1 #2}\setcounter{subsection}{0}}
+\newcommand{\bagian}[1]{\clearpage\section*{#1}\addcontentsline{toc}{section}{#1}}
+
+% Daftar isi seperti laporan M1: entri bab tebal dengan titik pemandu
+\makeatletter
+\renewcommand{\l@section}[2]{\@dottedtocline{1}{0em}{0em}{\bfseries #1}{\bfseries #2}}
+\renewcommand{\l@subsection}{\@dottedtocline{2}{1.5em}{1.8em}}
+\makeatother
+\renewcommand{\contentsname}{DAFTAR ISI}
+
+\begin{document}
+
+% ════════════════════════════ SAMPUL ════════════════════════════
+\begin{titlepage}
+\centering
+\vspace*{4cm}
+{\LARGE\bfseries LAPORAN MILESTONE 2\par}
+{\LARGE\bfseries IF4031 Arsitektur Aplikasi Terdistribusi\par}
+{\LARGE\bfseries IMade\par}
+\vspace{2.5cm}
+Disusun Oleh:\par\vspace{0.6cm}
+Kelompok IMade\par\vspace{0.6cm}
+\begin{tabular}{@{}ll@{}}
+Theo Kurniady & (13523154)\\
+Hasri Fayadh Muqaffa & (13523156)\\
+I Made Wiweka Putera & (13523160)\\
+\end{tabular}
+\par\vspace{1cm}
+SEKOLAH TEKNIK ELEKTRO DAN INFORMATIKA\par
+INSTITUT TEKNOLOGI BANDUNG\par
+SEMESTER 1 TAHUN 2026/2027\par
+\end{titlepage}
+
+% ════════════════════════════ DAFTAR ISI ════════════════════════
+\begin{center}{\Large\bfseries DAFTAR ISI}\end{center}
+\renewcommand{\contentsname}{}
+\vspace{-1.5cm}
+\tableofcontents
+
+% ════════════════════════════ LAMPIRAN ══════════════════════════
+\input{bab/lampiran}
+
+% ════════════════════════════ BAB I ═════════════════════════════
+\input{bab/bab1-umum}
+
+% ════════════════════════════ BAB II ════════════════════════════
+\bab{BAB II}{Problem}
+\input{bab/p1}
+\input{bab/p2}
+\input{bab/p3}
+\input{bab/p4}
+\input{bab/p5}
+
+% ════════════════════════════ REFERENSI ═════════════════════════
+\input{bab/referensi}
+
+\end{document}
