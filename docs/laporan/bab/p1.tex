@@ -1,47 +1,56 @@
 \subsection{Problem 1: Yang Pulang Membawa Laptopnya}
-\tinjau{oleh Made: isi bagian ini disusun dari kode dan dokumentasi di repositori}
 
 \subsubsection{Identifikasi Masalah}
 
-Satu tempat penyimpanan tidak lagi cukup, dan pemecahan data ke beberapa node memunculkan beberapa persoalan:
+Satu tempat penyimpanan tidak lagi cukup menampung data dan trafik tulis yang besar. Memecah data ke beberapa mesin memunculkan lima persoalan klasik sistem terdistribusi:
 \begin{itemize}
-\item \textbf{\textit{Partitioning / sharding}}: data harus dibagi ke beberapa node agar tidak ada satu node pun yang menyimpan seluruh data atau menanggung seluruh beban tulis.
-\item \textbf{\textit{Data skew / hot spot}}: gempa terkonsentrasi di jalur tertentu, sehingga partisi berdasarkan wilayah akan membuat satu node bekerja keras sementara node lain menganggur.
-\item \textbf{\textit{Replication} dan \textit{fault tolerance}}: data yang hanya punya satu salinan ikut hilang bersama node-nya (``laptop dibawa pulang'').
-\item \textbf{\textit{Rebalancing}}: node baru harus ikut menanggung data tanpa menghentikan baca/tulis.
-\item \textbf{\textit{Scatter-gather query} dan \textit{partial results / graceful degradation}}: pembacaan lintas partisi harus menghasilkan urutan yang benar dan tetap menjawab (dengan penanda) ketika sebagian partisi tidak terjangkau.
+\item \textbf{\textit{Partitioning / sharding}}: data dibagi ke beberapa unit penyimpanan agar tidak ada satu unit pun yang memuat seluruh data dan beban tulis tersebar ke lebih dari satu node.
+\item \textbf{\textit{Data skew / hot spot}}: gempa terkonsentrasi di jalur geologis tertentu, sehingga partisi berdasarkan wilayah membuat satu partisi bekerja keras sementara partisi lain menganggur.
+\item \textbf{\textit{Replication} dan \textit{fault tolerance}}: data yang hanya punya satu salinan akan ikut hilang bersama node-nya (``laptop dibawa pulang''). Replikasi berbasis konsensus (\textit{Raft quorum}) memastikan data tetap utuh saat satu node beserta disk-nya hilang permanen.
+\item \textbf{\textit{Dynamic membership} dan \textit{rebalancing}}: kluster harus memulihkan jumlah replika setelah node hilang (\textit{up-replication}) dan membagi beban ke node baru tanpa menghentikan baca maupun tulis.
+\item \textbf{\textit{Scatter-gather query} dan \textit{Harvest vs.\ Yield} (\textit{graceful degradation})}: pembacaan lintas partisi membutuhkan penggabungan terurut global dengan \textit{cursor pagination}. Saat sebagian partisi tidak terjangkau, sistem mempertahankan \textit{yield} (tetap menjawab HTTP 200 secara cepat) dengan menandai \textit{harvest} yang berkurang secara eksplisit (\kode{partial: true}), bukan error 500 atau permintaan yang menggantung.
 \end{itemize}
 
 \subsubsection{Rancangan Solusi}
 
 \begin{enumerate}
-\item \textbf{CockroachDB 4 node, \textit{RF}=3.} \kode{canonical-store} adalah StatefulSet CockroachDB v24.1.6 dengan data di disk node (\kode{hostPath}). Setiap \textit{range} direplikasi ke 3 node melalui Raft; \kode{server.time\_until\_store\_dead = 1m15s} menentukan kapan replika di node yang hilang dibuat ulang di node lain.
-\item \textbf{Kunci partisi tahan \textit{skew}.} \kode{hazard\_id = "hz-" + sha256(source | source\_ref\_id)[:16]} bersifat deterministik, dan kolom terhitung \kode{shard = crc32(hazard\_id) mod 8} menjadi awalan \textit{primary key}. Tabel dan indeks di-\textit{pre-split} pada 8 nilai \textit{shard}, sehingga data dari satu wilayah yang padat tetap tersebar merata ke 8 \textit{range}.
-\item \textbf{Penempatan dan perubahan node.} Penempatan replika diputuskan oleh \textit{allocator} CockroachDB berdasarkan jumlah replika dan beban per \textit{store}. Saat node baru bergabung, \textit{range} dan \textit{lease} dipindahkan otomatis ke node tersebut; saat node hilang lebih dari 1m15s, replikanya dibuat ulang dari dua salinan yang tersisa. Pada topologi 2 node, \textit{zone config} menyematkan 2 dari 3 replika ke node \textit{control plane} agar kuorum tetap ada saat node worker mati.
-\item \textbf{\textit{Scatter-gather} dengan \textit{partial answer}.} Pembacaan (\kode{/internal/events}, Audit API, \kode{/internal/analytics/summary}) menjalankan query per \textit{shard} secara paralel dengan \textit{timeout} 800 ms, menggabungkan hasilnya dengan urutan \kode{(occurred\_at, hazard\_id)} dan \textit{keyset cursor}. \textit{Shard} yang gagal atau melewati batas waktu dicantumkan di \kode{unavailable\_units}, dan respons ditandai \kode{partial: true}; tidak pernah HTTP 500 atau permintaan yang menggantung.
-\item \textbf{Loader katalog historis.} \kode{/loader} memuat CSV/JSON secara idempoten (\kode{ON CONFLICT DO NOTHING}); \kode{GET /internal/admin/distribution} melaporkan sebaran baris per \textit{shard} dan per node.
-\item \textbf{Audit API} (\kode{/internal/audit/events}, \kode{/checksum}, \kode{/location}, \kode{/unprocessed}) dengan token audit dari Secret.
-\item \textbf{Dashboard analitik} \kode{/analytics/} (Chart.js tertanam) di atas \kode{/internal/analytics/summary}: jumlah per jenis bahaya terhadap waktu, per \textit{severity}, dan per \kode{area\_name}. Gempa dengan \kode{tsunami\_warning} dihitung sebagai TSUNAMI.
+\item \textbf{CockroachDB 4 instans, \textit{RF}=3.} \kode{canonical-store} dijalankan sebagai StatefulSet CockroachDB \kode{v24.1.6} dengan penyimpanan lokal node (\kode{hostPath} per pod) dan label \kode{--locality=node=\$(NODE\_NAME)}. Setiap \textit{range} direplikasi ke 3 instans lewat Raft (kuorum mayoritas 2 dari 3). Pengaturan \kode{server.time\_until\_store\_dead = 1m15s} mempercepat deteksi kematian node dari bawaan 5 menit agar pemulihan replika segera berjalan.
+\item \textbf{Kunci partisi tahan \textit{skew} (8 \textit{shard} logis).} Setiap event diberi kunci deterministik \kode{hazard\_id = "hz-" + sha256(source | source\_ref\_id)[:16]}. Kolom terhitung \kode{shard = mod(crc32ieee(hazard\_id), 8)} menjadi awalan \textit{primary key} \kode{(shard, hazard\_id)} dan seluruh indeks sekunder. Tabel dan indeks di-\textit{pre-split} pada nilai 1--7 sehingga membentuk 8 unit logis (\kode{shard-0}--\kode{shard-7}) pada \textit{range} Raft terpisah. Karena hash ID tidak bergantung pada wilayah, lonjakan gempa di satu wilayah tetap tersebar merata ke 8 \textit{shard}.
+\item \textbf{Penempatan data serta perubahan saat node pergi/datang.} Saat normal, \textit{allocator} CockroachDB menyebar 3 replika dan peran \textit{leaseholder} (\textit{primary}) tiap \textit{shard} berdasarkan \textit{locality}, jumlah replika, dan beban. Pada topologi 2 node, \textit{zone config} menyematkan 2 dari 3 replika ke node \textit{control plane} dan 1 replika ke node worker, sementara peran \textit{leaseholder} tetap tersebar ke kedua node sehingga kriteria 1 (pembagian per unit \textit{shard} dan sebaran \textit{primary}) dan kriteria 4 (setiap unit punya replika lintas node dan kuorum bertahan saat worker mati) terpenuhi bersamaan. Saat node hilang, dua replika tersisa memilih \textit{leaseholder} baru dalam hitungan detik; setelah 1m15s, \textit{allocator} menyalin ulang replika yang hilang ke node sehat. Saat node baru bergabung dengan disk kosong, \textit{allocator} memindahkan sebagian replika dan \textit{leaseholder} secara \textit{online} tanpa memutus layanan.
+\item \textbf{\textit{Scatter-gather}, \textit{keyset pagination}, dan \textit{partial answer}.} Endpoint baca lintas \textit{shard} (\kode{/internal/events}, Audit API, \kode{/internal/analytics/summary}) menjalankan 8 goroutine paralel per \textit{shard} dengan \textit{timeout} \kode{SHARD\_QUERY\_TIMEOUT\_MS = 800 ms}. Hasil digabung dan diurutkan ulang di Aggregator dengan \textit{keyset cursor} base64 (\kode{occurred\_at DESC, hazard\_id DESC} untuk query umum; \kode{ingested\_at ASC, hazard\_id ASC} untuk Audit API). Jika ada \textit{shard} yang gagal atau melewati 800 ms (misalnya saat perpindahan \textit{leaseholder} atau kehilangan kuorum), respons tetap HTTP 200 dengan \kode{partial: true} dan daftar \kode{unavailable\_units}.
+\item \textbf{Loader katalog historis dan laporan sebaran.} CLI \kode{/loader} memuat katalog CSV/JSON dalam batch paralel secara idempoten (\kode{ON CONFLICT (shard, hazard\_id) DO NOTHING}). Endpoint \kode{GET /internal/admin/distribution} melaporkan jumlah baris, \textit{leaseholder}, dan lokasi replika per \textit{shard} serta per node.
+\item \textbf{Audit API} (\kode{/internal/audit/events}, \kode{/checksum}, \kode{/location}, \kode{/unprocessed}) dilindungi Bearer \kode{AUDIT\_TOKEN}. \kode{/location} membaca \kode{SHOW RANGE FROM TABLE canonical\_events FOR ROW} untuk melaporkan node \textit{primary} (\textit{leaseholder}) dan \textit{replica}.
+\item \textbf{Dashboard analitik} \kode{/analytics/} (Chart.js tertanam lewat \kode{go:embed}, tanpa CDN eksternal) mengambil agregat dari \kode{/internal/analytics/summary} dan menampilkan grafik garis per jenis bahaya terhadap waktu (pilihan rentang), jumlah per \textit{severity}, serta jumlah per \kode{area\_name}.
 \end{enumerate}
 
 \subsubsection{Alasan Keputusan}
 
-\begin{longtable}{|p{3cm}|p{6cm}|p{5.9cm}|}
+Pemilihan desain diuji terhadap kondisi \textit{skew} nyata pada dataset uji (55.392 baris, di mana Sulawesi Tengah menyumbang 80,06\% baris):
+
+\begin{longtable}{|p{3.1cm}|p{5.8cm}|p{6.0cm}|}
 \hline
-\textbf{Alternatif} & \textbf{Konsekuensi terhadap sebaran data (kriteria 2)} & \textbf{Keputusan}\\ \hline \endhead
-Partisi berdasarkan wilayah (\kode{area\_name}) & Data dan beban tulis terkonsentrasi di partisi wilayah yang padat gempa (\textit{hot spot}) & Tidak dipilih\\ \hline
-Citus / PostgreSQL \textit{hash-shard} manual & Sebaran merata, tetapi replikasi, \textit{failover}, dan \textit{rebalancing} harus dioperasikan sendiri & Tidak dipilih: beban operasional tinggi\\ \hline
-\textit{Consistent hashing} di aplikasi & Sebaran merata dan perpindahan data minimal saat node berubah, tetapi replikasi dan konsistensi harus dibangun sendiri & Tidak dipilih\\ \hline
-CockroachDB + \textit{hash shard} (dipilih) & Hash pada \kode{hazard\_id} menyebarkan data wilayah padat secara merata; \textit{range} dipecah dan dipindahkan otomatis berdasarkan ukuran dan beban & Dipilih\\ \hline
+\textbf{Alternatif} & \textbf{Konsekuensi terhadap sebaran data (kriteria 2)} & \textbf{Keputusan dan alasan}\\ \hline \endhead
+Partisi berdasarkan wilayah (\kode{area\_name}) & Sangat timpang: simulasi \kode{hash(area\_name) mod 4} menumpuk 80,11\% baris ke 1 node (rasio maks/min 6.339$\times$); lonjakan di Sulawesi Tengah menghantam satu node (\textit{hot spot}) & Ditolak: gagal total pada kriteria 2\\ \hline
+Citus / PostgreSQL \textit{hash-shard} manual & Sebaran baris merata jika memakai hash ID, tetapi \textit{failover}, replikasi per \textit{shard}, dan \textit{rebalancing} node baru harus dikelola terpisah (misalnya Patroni + migrasi manual) & Ditolak: beban operasional terlalu tinggi untuk skenario node hilang dan join otomatis\\ \hline
+\textit{Consistent hashing} di aplikasi & Sebaran merata dan perpindahan kunci minimal saat node berubah, tetapi transaksi lintas \textit{shard}, replikasi, dan konsistensi harus dibangun sendiri & Ditolak: berisiko tinggi dan mempersulit transaksi atomik P2\\ \hline
+CockroachDB + \textit{hash shard} \kode{crc32(hazard\_id) mod 8} & Sebaran merata lintas 8 \textit{shard} (rasio maks/min 1,03$\times$, CV 1,14\%); lonjakan 300 gempa di Sulawesi Tengah menyebar ke seluruh node & \textbf{Dipilih}: replikasi Raft \textit{RF}=3, \textit{rebalancing} otomatis, dan transaksi \textit{serializable} bawaan\\ \hline
 \end{longtable}
 
-\tinjau{oleh Made: tambahkan trade-off yang dianggap penting (misalnya biaya \textit{scatter-gather} 8 \textit{shard} untuk setiap query).}
+\textbf{Trade-off yang diterima:}
+\begin{itemize}
+\item \textbf{Biaya \textit{scatter-gather}:} setiap permintaan global mengeksekusi 8 query paralel (satu per \textit{shard}) lalu menggabungkannya di memori Aggregator. Ini menaikkan latensi dasar dibanding tabel tunggal, tetapi memberi isolasi kegagalan per \textit{shard} dan jawaban parsial yang pasti selesai di bawah 800 ms.
+\item \textbf{Jejak memori store:} CockroachDB membutuhkan memori lebih besar per pod (512 MiB request / 1 GiB limit, dengan \kode{--cache=.25 --max-sql-memory=.25}) dibanding PostgreSQL tunggal karena menjalankan mesin Raft dan RocksDB.
+\item \textbf{Pemilihan versi \kode{v24.1.6}:} rilis CockroachDB \kode{v24.3+} memberlakukan batas lisensi setelah masa tenggang 7 hari tanpa kunci berbayar. Mengunci image pada \kode{v24.1.6} menjamin kluster demo berjalan stabil tanpa pembatasan lisensi.
+\end{itemize}
 
 \subsubsection{Batasan yang Disadari}
 \begin{itemize}
-\item Pada topologi 2 node, node \textit{control plane} menyimpan salinan setiap \textit{range}; kehilangan node \textit{control plane} tidak termasuk skenario yang ditangani.
-\item Pembacaan \textit{scatter-gather} dijalankan sebagai query terpisah per \textit{shard}, sehingga hasil gabungan bukan satu \textit{snapshot} atomik lintas \textit{shard}.
-\item \isi{batasan lain menurut Made}
+\item \textbf{Topologi 2 node:} pada kluster 2 node, \textit{zone config} menaruh 2 dari 3 replika di node \textit{control plane} agar kuorum tetap hidup bila node worker mati. Kehilangan node \textit{control plane} di luar cakupan yang ditangani (sesuai ketentuan platform untuk kluster 2 node).
+\item \textbf{Bukan \textit{snapshot} lintas \textit{shard}:} pembacaan \textit{scatter-gather} menjalankan 8 query terpisah, sehingga event yang baru masuk di tengah-tengah eksekusi bisa terbaca di satu \textit{shard} tetapi belum di \textit{shard} lain.
+\item \textbf{Mode \kode{--insecure} tanpa mTLS:} komunikasi internal CockroachDB tidak memakai TLS demi kesederhanaan kluster tugas besar. Mitigasinya adalah Kubernetes \kode{NetworkPolicy} yang membatasi akses port \kode{26257}/\kode{8080} hanya dari pod \kode{aggregator} dan \kode{canonical-store}.
+\item \textbf{Batas pergeseran jam store (\kode{--max-offset = 500 ms}):} jika jam OS pada node store bergeser melebihi 500 ms, CockroachDB mematikan node store tersebut secara sadar untuk menjaga kebenaran HLC dan isolasi \textit{serializable}.
+\item \textbf{Memori \kode{/internal/audit/checksum}:} endpoint ini memuat seluruh \kode{source\_ref\_id} aktif ke memori Aggregator sebelum mengurutkan dan menghitung SHA-256. Ini cepat untuk puluhan hingga ratusan ribu baris, tetapi pada skala jutaan baris perlu diubah ke \textit{streaming merge-sort}.
+\item \textbf{Pemetaan kategori \kode{TSUNAMI} pada analitik:} skema kanonik hanya memiliki 4 \kode{hazard\_type} (\kode{SEISMIC}, \kode{VOLCANIC}, \kode{WILDFIRE}, \kode{COASTAL}). Untuk menampilkan 5 kategori pada kriteria 7, event \kode{SEISMIC} dengan \kode{attributes.tsunami\_warning} non-null dipetakan ke \kode{TSUNAMI} secara saling lepas dari \kode{SEISMIC}, sehingga total 5 kategori tetap sama persis dengan jumlah baris di Audit API.
 \end{itemize}
 
 \subsubsection{Bukti Penyelesaian}
@@ -51,7 +60,7 @@ Skrip skenario: \kode{scripts/demo/m2/p1/c1}--\kode{c7} (\kode{MODE=k8s}), bukti
 \begin{longtable}{|p{4.2cm}|p{10.7cm}|}
 \hline
 \textbf{Kriteria} & \textbf{Bukti}\\ \hline \endhead
-1. Dataset dimuat, tersebar & \isi{tabel sebaran per node dari \kode{c1-distribution.txt} untuk dataset asisten}\\ \hline
+1. Dataset dimuat, tersebar & \isi{tabel sebaran unit (primary dan replica) per node dari \kode{c1-distribution.txt} untuk dataset asisten}\\ \hline
 2. Ketidakmerataan & \isi{beban per node saat memuat dan saat lonjakan satu wilayah (\kode{c2-skew-summary.txt})}\\ \hline
 3. Baca lintas lokasi & \isi{50 event terbaru + \textit{pagination} (\kode{c3-verification.txt})}\\ \hline
 4. Node worker mati + data dihapus & \isi{checksum sebelum/sesudah (Audit API) dan \kode{c4-hammer.csv}: 0 HTTP 500, respons \kode{partial} selama pemulihan}\\ \hline
@@ -62,19 +71,19 @@ Skrip skenario: \kode{scripts/demo/m2/p1/c1}--\kode{c7} (\kode{MODE=k8s}), bukti
 
 \subsubsection{Jawaban atas Butir ``Di Laporan''}
 \begin{enumerate}
-\item \textbf{Persoalan dan konsep:} \textit{partitioning/sharding}, \textit{data skew / hot spot}, \textit{replication} (Raft), \textit{rebalancing}, \textit{scatter-gather} dan \textit{partial results} (lihat bagian a).
-\item \textbf{Mekanisme penempatan data:} \kode{shard = crc32(hazard\_id) mod 8} menentukan \textit{range} logis; \textit{allocator} CockroachDB menentukan node yang memegang tiga replika setiap \textit{range} dan memindahkannya saat node datang (\textit{rebalancing}) atau pergi (\textit{up-replication} setelah 1m15s).
-\item \textbf{Perbandingan alternatif:} lihat tabel pada bagian c.
-\item \textbf{Jaminan konsistensi per endpoint:} \tinjau{oleh Made}
-\begin{center}
-\begin{tabularx}{\textwidth}{|p{4cm}|X|X|}
+\item \textbf{Persoalan dan konsep:} \textit{horizontal partitioning / sharding}, \textit{data skew / write hot spot}, \textit{consensus-based replication} (Raft, \textit{quorum}), \textit{dynamic membership / live rebalancing}, \textit{distributed scatter-gather query} dengan \textit{keyset cursor pagination}, serta \textit{graceful degradation / Harvest vs.\ Yield} (Fox \& Brewer).
+\item \textbf{Mekanisme penempatan data:} \kode{shard = mod(crc32ieee(hazard\_id), 8)} memetakan setiap baris ke salah satu dari 8 \textit{range} logis. \textit{Allocator} CockroachDB menempatkan 3 replika Raft tiap \textit{range} lintas node berdasarkan \textit{locality} dan beban. Saat node pergi melebihi 1m15s, replika yang hilang dibuat ulang di node sehat; saat node baru bergabung, sebagian replika dan \textit{leaseholder} dipindahkan otomatis secara \textit{online}.
+\item \textbf{Perbandingan alternatif:} lihat tabel perbandingan dan konsekuensi \textit{skew} pada bagian Alasan Keputusan di atas.
+\item \textbf{Jaminan konsistensi per endpoint:}
+\begin{longtable}{|p{3.6cm}|p{5.0cm}|p{5.3cm}|}
 \hline
-\textbf{Endpoint} & \textbf{Kondisi normal} & \textbf{Node hilang}\\ \hline
-\kode{GET /v1/events}, \kode{/internal/events} & Setiap \textit{shard} dibaca konsisten dari \textit{leaseholder} (\textit{serializable}); hasil gabungan terurut, tetapi bukan satu \textit{snapshot} atomik lintas \textit{shard} & \textit{Shard} yang \textit{range}-nya sedang berpindah \textit{lease} dapat melewati batas 800 ms: data yang ada dikembalikan dengan \kode{partial: true} dan \kode{unavailable\_units} (ketersediaan diutamakan)\\ \hline
-Audit API \kode{events}/\kode{checksum} & Sama, dengan urutan \kode{(ingested\_at, hazard\_id)} & Sama; \textit{checksum} parsial ditandai sehingga tidak disalahartikan sebagai lengkap\\ \hline
-\kode{/internal/analytics/summary} & Agregasi per \textit{shard} lalu dijumlahkan & Angka ditampilkan dengan awalan $\ge$ dan banner ``belum lengkap''\\ \hline
-Penulisan (\textit{upsert}) & Transaksi \textit{serializable} dengan kuorum Raft & Tetap berhasil selama kuorum setiap \textit{range} terpenuhi\\ \hline
-\end{tabularx}
-\end{center}
-\item \textbf{Agregasi dashboard lintas lokasi:} setiap \textit{shard} menghitung agregat sendiri secara paralel, lalu Aggregator menjumlahkannya. \textit{Shard} yang tidak menjawab dalam 800 ms tidak dihitung, dicantumkan di \kode{unavailable\_units}, dan dashboard menampilkan banner serta awalan $\ge$ pada angka. Kesamaan dengan Audit API diverifikasi oleh \kode{scripts/p1/dashboard-vs-audit.sh}.
+\textbf{Endpoint} & \textbf{Kondisi normal} & \textbf{Selama node hilang}\\ \hline \endhead
+\kode{GET /v1/events}, \kode{/internal/events} & \textit{Per-shard linearizable / serializable} (dibaca dari \textit{leaseholder}); gabungan terurut secara global, tetapi bukan satu \textit{snapshot} atomik lintas \textit{shard}. Filter \kode{hazard\_id} tunggal membaca langsung 1 \textit{shard} secara konsisten. & \textit{Shard} yang masih berkuorum dijawab konsisten. \textit{Shard} yang sedang memindahkan \textit{leaseholder} atau kehilangan kuorum melewati \textit{timeout} 800 ms, sehingga respons mengembalikan data tersedia dengan \kode{partial: true} dan \kode{unavailable\_units} (mengutamakan ketersediaan daripada blokir/500).\\ \hline
+\kode{GET /internal/audit/}\newline\kode{events}, \kode{/checksum} & \textit{Per-shard serializable} dengan urutan \kode{(ingested\_at, hazard\_id)}; checksum SHA-256 mencakup seluruh \textit{shard}. & Tetap menjawab HTTP 200. Bila ada \textit{shard} melewati 800 ms, \kode{partial: true} dan \kode{unavailable\_units} diisi agar auditor tidak menyalahartikan checksum parsial sebagai lengkap.\\ \hline
+\kode{GET /internal/audit/}\newline\kode{location} & \textit{Strongly consistent} (\textit{serializable} ke 1 \textit{shard} target + metadata \kode{SHOW RANGE}). & Selama kuorum \textit{shard} target hidup, lokasi terbaru (setelah pindah \textit{leaseholder}) dikembalikan; bila \textit{shard} target tidak berkuorum, mengembalikan 503 terstruktur.\\ \hline
+\kode{GET /internal/audit/}\newline\kode{unprocessed} & \textit{Serializable} pada tabel \kode{dead\_letters} dengan urutan \kode{(received\_at, id)}. & Tetap tersedia selama kuorum \textit{range} tabel \kode{dead\_letters} terjaga (2 dari 3 replika).\\ \hline
+\kode{GET /internal/}\newline\kode{analytics/summary} & Agregasi \textit{per-shard serializable} lalu dijumlahkan di Aggregator; identik dengan penghitungan Audit API saat tidak ada penulisan berjalan. & \textit{Shard} yang tidak menjawab dalam 800 ms tidak dihitung dan dicantumkan di \kode{unavailable\_units}; UI menampilkan banner peringatan serta awalan $\ge$ pada seluruh angka.\\ \hline
+Penulisan (\textit{upsert} poller, ingest, loader) & Transaksi \textit{serializable} dengan kuorum Raft (2/3 replika) dan idempoten pada \kode{(shard, hazard\_id)}. & Tetap berhasil dan tahan hilang selama kuorum 2/3 replika pada \textit{range} tujuan masih hidup; ditolak tanpa data setengah tertulis bila kuorum hilang.\\ \hline
+\end{longtable}
+\item \textbf{Agregasi dashboard lintas lokasi:} \kode{/internal/analytics/summary} menjalankan 8 goroutine paralel; masing-masing menghitung agregat \kode{GROUP BY} (deret waktu per jenis bahaya, \textit{severity}, dan \kode{area\_name}) langsung di satu \textit{shard} dengan batas 800 ms, lalu Aggregator menjumlahkan hasilnya. Bila ada \textit{shard} yang gagal atau melewati 800 ms, \textit{shard} itu dicatat di \kode{unavailable\_units} dan \kode{partial: true} dikirim ke browser, sehingga halaman \kode{/analytics/} menampilkan banner ``Data belum lengkap'' berisi daftar \textit{shard} bermasalah dan memberi awalan $\ge$ pada semua angka agar pengguna tidak melihat total parsial sebagai angka penuh. Kesamaan angka dengan Audit API diverifikasi otomatis oleh \kode{scripts/p1/dashboard-vs-audit.sh}.
 \end{enumerate}

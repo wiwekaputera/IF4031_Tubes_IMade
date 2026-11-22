@@ -1,36 +1,46 @@
 \subsection{Problem 2: Dua Nakhoda, Satu Kapal}
-\tinjau{oleh Made untuk butir 1--3 (\textit{leader election} dan \textit{fencing})}
 
 \subsubsection{Identifikasi Masalah}
 \begin{itemize}
-\item \textbf{Kriteria 2: \textit{leader election} / \textit{mutual exclusion}.} Tiga instance yang sama-sama melakukan \textit{polling} menggandakan permintaan ke upstream dan event di penyimpanan. Dibutuhkan tepat satu pengambil data, sekaligus penulisan yang idempoten (\textit{exactly-once} secara efektif).
-\item \textbf{Kriteria 4: \textit{unreliable clocks / clock skew}.} \textit{Lease} yang dihitung dengan jam lokal node dapat berakhir terlalu cepat atau terlalu lambat bila jam bergeser, sehingga dua instance merasa sama-sama menjadi \textit{leader} (\textit{split-brain}).
-\item \textbf{Kriteria 5: \textit{process pause / zombie leader}.} \textit{Leader} yang dibekukan (\textit{suspend} VM) tidak tahu \textit{lease}-nya sudah berakhir dan tetap menulis setelah bangun. Konsep penanganannya: \textit{fencing token} (Kleppmann, \textit{Designing Data-Intensive Applications}, bab 8).
-\item \textbf{Kriteria 6--8:} \textit{horizontal scaling} di bawah beban, \textit{load balancing} dengan \textit{readiness}, dan \textit{rolling update} tanpa \textit{downtime}.
+\item \textbf{Kriteria 2 --- \textit{Leader election / mutual exclusion} dan \textit{effectively-once ingestion}:} tiga instance yang sama-sama melakukan \textit{polling} menggandakan permintaan ke upstream dan event di penyimpanan. Dibutuhkan tepat satu pemimpin aktif yang melakukan \textit{polling}, disertai penulisan idempoten agar pergantian pemimpin tidak menimbulkan duplikat maupun celah data.
+\item \textbf{Kriteria 4 --- \textit{Unreliable clocks / clock skew} dan \textit{split-brain}:} jam fisik (\textit{wall-clock}) antar mesin bisa bergeser maju maupun mundur (+45 s / $-$30 s). Jika keabsahan \textit{lease} dihitung memakai jam lokal node Aggregator, dua instance bisa sama-sama merasa menjadi \textit{leader} (\textit{split-brain}) dan menulis bersamaan.
+\item \textbf{Kriteria 5 --- \textit{Process pause / zombie leader} dan \textit{fencing token}:} \textit{leader} yang membeku (\textit{suspend} VM atau jeda GC panjang) melebihi batas waktu \textit{lease} tidak tahu bahwa kepemimpinannya sudah pindah ke instance lain. Ketika bangun kembali (\textit{zombie leader}), ia dapat menulis data basi ke penyimpanan. Penanganannya adalah \textit{fencing token} yang naik monoton dan diperiksa di sisi penyimpanan (Kleppmann, 2016; 2017, bab 8).
+\item \textbf{Kriteria 6--8:} \textit{horizontal scaling} di bawah beban, \textit{load balancing} berbasis \textit{readiness}, dan \textit{rolling update} tanpa \textit{downtime}.
 \end{itemize}
 
 \subsubsection{Rancangan Solusi}
 \begin{enumerate}
-\item \textbf{Titik masuk tunggal.} Deployment \kode{aggregator} 3 replika (\textit{soft anti-affinity} antar-node) di belakang Service \kode{aggregator:8090}. \textit{Readiness} \kode{/internal/ready} mengembalikan \kode{503 DRAINING} saat menerima SIGTERM, \kode{preStop} 5 s, dan \textit{rolling update} \kode{maxUnavailable: 0}, \kode{maxSurge: 1}.
-\item \textbf{\textit{Lease} di basis data.} Tabel \kode{leader\_leases} diperbarui melalui \kode{AcquireOrRenewLease}; seluruh perbandingan waktu memakai \kode{now()} HLC CockroachDB, bukan jam OS Aggregator. \textit{Lease} berlaku 15 s dan diperbarui setiap 5 s.
-\item \textbf{\textit{Fencing token}.} Setiap pergantian \textit{leader} menaikkan \kode{fencing\_token} secara monoton. Setiap penulisan hasil \textit{polling} (\kode{UpsertFencedBatch}) memverifikasi, di dalam transaksi \textit{serializable} yang sama, bahwa \textit{holder} dan \textit{token} masih berlaku; jika tidak, transaksi ditolak (\kode{ErrFenced}) dan instance menurunkan dirinya.
-\item \textbf{\textit{Watermark} durable.} \kode{poller\_watermarks} disimpan bersama penulisan, sehingga \textit{leader} baru melanjutkan dari posisi terakhir tanpa celah.
-\item \textbf{Idempotensi.} \textit{Upsert} berdasarkan \kode{(source, source\_ref\_id)} dan \kode{hazard\_id} deterministik; mock mencatat permintaan per instance (\kode{/admin/requests}) sebagai bukti tidak ada permintaan berlipat.
+\item \textbf{Titik masuk tunggal dan \textit{graceful drain}.} Deployment \kode{aggregator} berjalan dengan 3 replika (\textit{soft podAntiAffinity} dan \kode{topologySpreadConstraints} per host) di belakang Service \kode{aggregator:8090}. Saat menerima \kode{SIGTERM}, \kode{GET /internal/ready} segera mengembalikan \kode{503 DRAINING}, worker dihentikan, \textit{lease} dilepas secara sukarela, dan pod menunggu \kode{preStop} / \kode{SHUTDOWN\_DRAIN\_S} 5 s agar \kode{kube-proxy} memutus trafik baru sebelum server HTTP ditutup. Strategi \textit{rolling update} memakai \kode{maxUnavailable: 0}, \kode{maxSurge: 1}.
+\item \textbf{\textit{Lease} di CockroachDB (sumber kebenaran waktu = HLC \kode{now()}).} Tabel \kode{leader\_leases} diperbarui lewat \kode{AcquireOrRenewLease}. Seluruh perhitungan dan perbandingan kedaluwarsa (\kode{expires\_at > now()}) memakai \kode{now()} milik CockroachDB yang dijaga \textit{Hybrid Logical Clock} (HLC), tidak pernah memakai jam OS node Aggregator. Perpanjangan oleh pemegang sah mempertahankan \kode{fencing\_token}; pengambilalihan setelah kedaluwarsa selalu menaikkan \kode{fencing\_token + 1}.
+\item \textbf{\textit{Renew-before-poll}.} Sebelum mengirim permintaan ke BMKG/PVMBG pada setiap siklus, pemimpin memanggil \kode{elector.RenewNow()} secara sinkron ke DB. Jika \textit{zombie leader} baru bangun dari \textit{freeze}, panggilan ini langsung gagal dan instance mendemosi dirinya (\kode{leader\_lost}) tanpa menyentuh upstream.
+\item \textbf{\textit{Fencing token} pada transaksi tulis (\kode{UpsertFencedBatch}).} Jika pemimpin membeku \textit{setelah} membaca upstream namun \textit{sebelum} menulis ke DB, \kode{UpsertFencedBatch} memverifikasi \kode{holder}, \kode{fencing\_token}, dan \kode{expires\_at > now()} di dalam transaksi \textit{serializable} yang sama dengan \textit{upsert} event, \textit{outbox}, dan pemajuan \textit{watermark}. Bila token sudah usang, transaksi di-\textit{rollback} (\kode{ErrFenced}, 0 baris tertulis) dan instance mendemosi dirinya.
+\item \textbf{\textit{Watermark} durable dan idempotensi.} Tabel \kode{poller\_watermarks} menyimpan posisi terakhir secara atomik bersama batch tulis. Pemimpin baru memuat \textit{watermark} ini dengan mundur aman \kode{watermarkOverlap = 1 s} agar tidak ada event yang terlewat di batas detik, sementara kunci deterministik \kode{hazard\_id} (\kode{ON CONFLICT DO NOTHING/UPDATE}) mencegah duplikat. Mock mencatat permintaan per instance pada \kode{/admin/requests} untuk pembuktian.
 \item \textbf{Uji beban (Fayadh).} k6 dijalankan dari luar klaster dengan skrip \kode{scripts/demo/m2/load/} (konfigurasi pada butir ``Di Laporan'' 4).
 \end{enumerate}
 
 \subsubsection{Alasan Keputusan}
 \begin{itemize}
-\item \textbf{\textit{Lease} di CockroachDB vs Kubernetes \kode{Lease}:} \textit{fencing} harus diperiksa di tempat penulisan terjadi. Dengan \textit{lease} di basis data yang sama, pemeriksaan \textit{token} dan penulisan berada dalam satu transaksi, dan sumber waktunya adalah HLC CockroachDB yang selisihnya dibatasi \kode{max-offset} 500 ms. \kode{Lease} Kubernetes memakai jam client dan tidak dapat memagari penulisan ke basis data. \tinjau{oleh Made}
-\item \textbf{TTL 15 s / perpanjangan 5 s:} \textit{failover} terburuk $\approx$ 15 + 5 s (jauh di bawah 60 s); \textit{leader} mendapat 3 kesempatan perpanjangan sebelum \textit{lease} habis sehingga jeda GC atau gangguan jaringan singkat tidak memicu pergantian palsu. TTL lebih pendek menambah penulisan \textit{lease} dan \textit{failover} palsu; TTL lebih panjang (misal 45/15 s) mendorong \textit{failover} ke batas 60 s.
+\item \textbf{\textit{Lease} di CockroachDB vs.\ Kubernetes \kode{Lease}:} \textit{fencing} hanya aman jika diperiksa tepat di tempat penulisan terjadi. Dengan menaruh \kode{leader\_leases} di CockroachDB yang sama, pengecekan \kode{fencing\_token} dan penulisan data berjalan atomik dalam satu transaksi \textit{serializable}, serta memakai satu sumber waktu (HLC CockroachDB). Kubernetes \kode{Lease} tidak bisa memagari transaksi SQL di basis data dan rentan terhadap pergeseran jam klien.
+\item \textbf{Penetapan batas waktu dan \textit{trade-off}:} \kode{config.Load()} memvalidasi secara ketat bahwa \kode{LEASE\_TTL\_S > 2 * LEASE\_RENEW\_INTERVAL\_S}.
+\begin{center}
+\begin{tabularx}{\linewidth}{|p{4.3cm}|p{1.3cm}|X|}
+\hline
+\textbf{Parameter} & \textbf{Nilai} & \textbf{Fungsi dan \textit{trade-off}}\\ \hline
+\kode{LEASE\_TTL\_S} & 15 s & Masa berlaku \textit{lease}. \textit{Worst-case failover} $\approx$ 15 + 5 = 20 s (jauh di bawah batas 60 s). Nilai terlalu kecil (mis.\ 5 s) memicu \textit{false failover} saat jeda GC/jaringan singkat; nilai terlalu besar (mis.\ 45 s) mendesak \textit{failover} ke batas 60 s.\\ \hline
+\kode{LEASE\_RENEW\_INTERVAL\_S} & 5 s & Jeda perpanjangan \textit{lease}. Memberi 3 kali kesempatan perpanjangan dalam 15 s sehingga gangguan satu permintaan tidak menjatuhkan \textit{leader}, sambil menjaga beban tulis sangat rendah (0,2 \textit{writes}/s).\\ \hline
+\kode{safetyMargin} lokal & 2 s & Pemimpin lokal berhenti menganggap dirinya aktif pada 13 s tanpa perpanjangan sukses, sebagai rem konservatif sebelum \textit{lease} benar-benar habis di DB.\\ \hline
+\kode{SHUTDOWN\_DRAIN\_S} & 5 s & Waktu tunggu setelah \kode{/internal/ready} mengembalikan 503 agar \textit{load balancer} menghentikan trafik baru sebelum proses keluar, tanpa melewati batas terminasi pod 30 s.\\ \hline
+\kode{watermarkOverlap} & 1 s & Mundur 1 s saat \textit{polling} untuk mencegah celah di batas detik; memicu pembacaan ulang beberapa event terbaru namun aman karena \textit{upsert} idempoten.\\ \hline
+\end{tabularx}
+\end{center}
 \item \textbf{Uji beban dengan satu token per client:} 10.000 VU yang masing-masing meminta token akan menguji token-service, bukan jalur baca; karena itu TTL token dinaikkan selama uji dan \textit{rate limit} per client dibuka (semua VU memakai satu client).
 \end{itemize}
 
 \subsubsection{Batasan yang Disadari}
 \begin{itemize}
-\item Keselamatan bergantung pada batas \kode{max-offset} CockroachDB; node CockroachDB yang jamnya melewati 500 ms akan mematikan dirinya sendiri, yang mengurangi kapasitas penyimpanan sementara.
+\item Keselamatan waktu bergantung pada batas \kode{--max-offset = 500 ms} CockroachDB; jika jam OS pada sebuah node store melampaui 500 ms, node store tersebut mematikan dirinya sendiri untuk menjaga konsistensi HLC (mengurangi sementara kapasitas store).
+\item Jika pemimpin membeku \textit{setelah} mengirim HTTP GET ke upstream tetapi \textit{sebelum} menulis ke DB, satu panggilan baca upstream tidak dapat dibatalkan; namun \kode{UpsertFencedBatch} menjamin 0 baris basi ditulis ke basis data.
 \item Uji beban 10.000 VU dari satu mesin dibatasi CPU, \textit{port}, dan jaringan mesin penguji. \isi{batasan yang teramati di klaster demo}
-\item \isi{batasan lain menurut Made}
 \end{itemize}
 
 \subsubsection{Bukti Penyelesaian}
@@ -52,9 +62,9 @@ Skrip: \kode{scripts/demo/m2/p2/c1}--\kode{c5} (\kode{MODE=k8s}) dan \kode{scrip
 
 \subsubsection{Jawaban atas Butir ``Di Laporan''}
 \begin{enumerate}
-\item \textbf{Persoalan:} kriteria 2 \textit{leader election / mutual exclusion} dan \textit{exactly-once ingestion}; kriteria 4 \textit{unreliable clocks / clock skew} yang dapat menyebabkan \textit{split-brain}; kriteria 5 \textit{process pause / zombie leader} yang ditangani dengan \textit{fencing token}.
-\item \textbf{Mekanisme dan sumber waktu:} \textit{lease} di CockroachDB dengan \kode{now()} HLC sebagai satu-satunya sumber waktu, serta \textit{fencing token} yang diperiksa di dalam transaksi penulisan. Pergeseran jam node Aggregator (kriteria 4) tidak berpengaruh karena jam lokal tidak dipakai untuk memutuskan keabsahan \textit{lease}. Instance yang bangun dari \textit{freeze} (kriteria 5) membawa \textit{token} lama, sehingga penulisannya ditolak oleh basis data walaupun ia masih merasa menjadi \textit{leader}.
-\item \textbf{Batas waktu:} TTL \textit{lease} 15 s, perpanjangan 5 s, margin keselamatan lokal 2 s, \textit{drain} 5 s; \textit{failover} terburuk $\approx$ 20 s. Trade-off dijelaskan pada bagian c.
+\item \textbf{Persoalan:} kriteria 2 \textit{leader election / mutual exclusion} dan \textit{effectively-once ingestion}; kriteria 4 \textit{unreliable clocks / clock skew} yang memicu \textit{split-brain}; kriteria 5 \textit{process pause / zombie leader} yang dicegah dengan \textit{fencing token}.
+\item \textbf{Mekanisme dan sumber waktu:} \textit{lease} di CockroachDB dengan \kode{now()} HLC sebagai satu-satunya otoritas waktu, dilengkapi \textit{renew-before-poll} dan pemeriksaan \kode{fencing\_token} di dalam transaksi \textit{serializable} penulisan. Pergeseran jam +45 s / $-$30 s pada node Aggregator (kriteria 4) tidak memengaruhi keputusan \textit{lease} karena jam lokal tidak pernah dibandingkan di DB. Instance yang bangun dari \textit{freeze} (kriteria 5) gagal pada \textit{renew-before-poll} atau ditolak oleh \kode{UpsertFencedBatch} (\kode{ErrFenced}) karena membawa \textit{token} lama, sehingga 0 baris basi tertulis.
+\item \textbf{Batas waktu:} \textit{lease TTL} 15 s, perpanjangan 5 s, margin keselamatan lokal 2 s, \textit{shutdown drain} 5 s, dan \textit{watermark overlap} 1 s; \textit{worst-case failover} $\approx$ 20 s. Analisis \textit{trade-off} tiap nilai disajikan pada tabel bagian Alasan Keputusan di atas.
 \item \textbf{Konfigurasi uji beban:}
 \begin{center}
 \begin{tabularx}{\textwidth}{|p{3.6cm}|X|}
