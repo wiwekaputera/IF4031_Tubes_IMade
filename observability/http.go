@@ -15,8 +15,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Latency buckets in seconds, from 1 ms to 10 s.
-var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}
+// Latency buckets in seconds, from 1 ms to 10 s. The steps are finer between
+// 0.5 s and 5 s, where slow upstream calls land, because histogram_quantile
+// interpolates inside a bucket: with only 2.5 s and 5 s, requests that all
+// take under 3 s would be reported with a p95 above 4 s.
+var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, .75, 1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10}
 
 var (
 	httpRequests = promauto.NewCounterVec(prometheus.CounterOpts{

@@ -411,7 +411,8 @@
             "showPoints": "never",
             "stacking": {
               "mode": "none"
-            }
+            },
+            "axisSoftMax": 0.05
           },
           "min": 0
         },

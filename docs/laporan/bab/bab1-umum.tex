@@ -141,8 +141,14 @@ OS/kernel tiap node: \isi{output \kode{kubectl get nodes -o wide}}. Bukti kernel
 \item \textbf{Status \textit{leader}:} metrik \kode{aggregator\_leader} diatur oleh \textit{hook promote/demote} pemilihan \textit{leader}, dan setiap replika Aggregator di-\textit{scrape} terpisah, sehingga dashboard menunjukkan tepat satu \textit{leader} dan perpindahannya saat \textit{failover}.
 \end{itemize}
 
-\gambarplaceholder{Dashboard metrik per service (latensi, error rate, throughput)}{5cm}
-\gambarplaceholder{Jejak satu permintaan lintas service di Jaeger dengan durasi tiap langkah}{5cm}
+\begin{figure}[H]\centering
+\includegraphics[width=\textwidth]{gambar/grafana-services.png}
+\caption{Dashboard \textit{BNPB --- Services overview} (5 menit terakhir): 11 dari 11 target aktif, $\pm$9,7 permintaan/s, \textit{error rate} 5xx 0\%, dan p95 seluruh service 187 ms. Garis $\pm$2,9 s pada p95 per service adalah \kode{pvmbg-mock}, yang sengaja menunda setiap respons \kode{/volcanic-reports} 0,5--3 s untuk meniru sumber yang lambat.}
+\end{figure}
+\begin{figure}[H]\centering
+\includegraphics[width=\textwidth]{gambar/jaeger-trace.png}
+\caption{Jejak satu pesan WILDFIRE lintas service di Jaeger: \kode{satellite-ingestor} mempublikasikan ke \kode{hazard.ingest.SATELIT} (0,97 ms), pesan menunggu di JetStream $\pm$57 ms, lalu Aggregator memprosesnya dalam satu transaksi CockroachDB (17,8 ms: \kode{BEGIN}, \kode{INSERT} ke \kode{canonical\_events}, \kode{INSERT} ke \textit{outbox}, \kode{COMMIT}). \textit{Trace context} diteruskan lewat header NATS.}
+\end{figure}
 
 % ─────────────────────────────────────────────────────────────
 \subsection{Petunjuk Menjalankan Sistem}

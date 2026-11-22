@@ -57,9 +57,15 @@ Event rusak & Baris lebih dari 1 MiB, JSON rusak, deteksi tidak valid, dan \text
 4. 60$\times$, p95 latensi & Pada rekaman feed latihan (uji \kode{internal/e2e}, tanpa jaringan), pemrosesan $\pm$385 event/s. Feed \textit{live} 60$\times$ (Compose): latensi masuk $\rightarrow$ tersimpan di ingestor p50 15,6 ms, p95 44,6 ms, p99 76,3 ms. Pada tiga pengukuran 60 detik, ingestor membaca 54,5--77,9 event/s, sedangkan feed bertambah 0,3--22,8 event/s, sehingga ingestor selalu lebih cepat daripada feed. Lag $\pm$2,7 juta event saat pengukuran adalah sisa dari waktu ingestor tidak berjalan, sementara sesi feed kelompok terus maju; lag itu berkurang 31,7--65,6 event/s.\\ \hline
 5. Pemroses mati & Uji \kode{internal/e2e} pada feed latihan (181.467 event): 36 kali dimatikan acak (sebagian di tengah transaksi), seluruh tabel dan 120.809 pesan ke Aggregator identik dengan pemrosesan tanpa gangguan; 2.845 kebakaran sama dengan pengelompokan ulang penuh; $\pm$385 event/s. \isi{ulang di klaster demo bila perlu}\\ \hline
 6. Selisih dengan referensi & \isi{perbandingan \kode{SATELLITE\_TEST\_EXPORT} dengan hasil referensi asisten dan penyebab selisih}\\ \hline
-7. Feed \textit{live} & \kode{feed-session.json} (\kode{latest\_offset}, \kode{virtual\_now}); \isi{tangkapan layar dashboard \textit{Satellite fire feed} saat demo}\\ \hline
+7. Feed \textit{live} & \kode{feed-session.json} (\kode{latest\_offset}, \kode{virtual\_now}); dashboard \textit{Satellite fire feed} pada Gambar~\ref{fig:satellite-dashboard}.\\ \hline
 8. Putus-sambung & Klien SSE melanjutkan dari \kode{offset} terkomit + 1; \textit{heartbeat} ikut menempati \textit{offset}. Ingestor dimatikan paksa (\kode{docker compose kill}); \textit{offset} terkomit saat mati 489.672, dan proses baru mencatat \kode{resume\_offset} 489.672 (sama). Lag kembali ke tingkat sebelum dimatikan (2.674.552 event) dalam 29 detik, termasuk waktu \textit{restart}. Lag tidak kembali ke 0 karena sisa \textit{backlog} di atas, bukan karena \textit{restart}.\\ \hline
 \end{longtable}
+
+\begin{figure}[H]\centering
+\includegraphics[width=\textwidth]{gambar/satellite-dashboard.png}
+\caption{Dashboard \textit{Satellite fire feed} (Docker Compose, 30 menit). Lag $\pm$2,6 juta event berwarna merah karena ambang 1.000 event dibuat untuk keadaan normal; kurvanya terus turun karena ingestor membaca lebih cepat daripada feed dan menghabiskan sisa \textit{backlog}. Latensi baca $\rightarrow$ komit p95 $\pm$47 ms.}
+\label{fig:satellite-dashboard}
+\end{figure}
 
 \subsubsection{Jawaban atas Butir ``Di Laporan''}
 \begin{enumerate}
