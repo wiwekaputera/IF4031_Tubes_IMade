@@ -625,6 +625,15 @@ All variables are in [.env.example](.env.example). Milestone 1 variables are unc
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://jaeger:4318` | all Go services | Where traces are sent (OTLP/HTTP). Empty turns export off |
 | `SATELLITE_TRACE_SAMPLE_RATIO` | `0.05` | `satellite-ingestor` | Share of satellite traces kept |
 | `METRICS_ADDR` | `:9090` | `client-api`, `token-service`, `satellite-ingestor` | Internal port for `/metrics` |
+| `CLIENT_API_MAX_INFLIGHT` | `256` | `client-api` | Requests in flight per pod before load shedding; media may use at most 60% of it |
+| `PANTAI_AUTH_TOKEN` | — | `sensor-pantai`, `sensor-pantai-poller` | Bearer token of the coastal sensor API (Secret `pantai-token`) |
+| `PANTAI_PROFILE` / `PANTAI_SEED` / `PANTAI_SPEED` | `practice` / `42` / `60` | `sensor-pantai` | Sensor behaviour profile, random seed and virtual-time speed |
+| `SENSOR_POLL_INTERVAL_MS` | `1000` | `sensor-pantai-poller` | Delay between polls of the sensor |
+| `SENSOR_REQUEST_TIMEOUT_MS` | `2000` | `sensor-pantai-poller` | Timeout of one request to the sensor |
+| `SENSOR_BREAKER_FAILURES` | `3` | `sensor-pantai-poller` | Consecutive failures that open the circuit breaker |
+| `SENSOR_BREAKER_OPEN_MS` / `SENSOR_BREAKER_MAX_OPEN_MS` | `5000` / `30000` | `sensor-pantai-poller` | First open period of the breaker and its cap (doubles with ±20% jitter) |
+| `SENSOR_MAX_OBSERVATION_AGE` | `2h` | `sensor-pantai-poller` | Observations older than this (sensor time) are rejected as `expired` |
+| `SENSOR_STATION_UPDATE_EVERY` | `5m` | `sensor-pantai-poller` | Station condition event republished at least this often (sensor time) |
 | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / *(required)* | `grafana` | Grafana admin login; dashboards are also viewable without logging in |
 | `GRAFANA_PORT` / `PROMETHEUS_PORT` / `JAEGER_UI_PORT` | `3000` / `9090` / `16686` | observability | Host ports for the three UIs |
 
