@@ -1,0 +1,54 @@
+% Diagram deployment: penempatan pod pada klaster demo (kubectl get pods -o wide -L role).
+\begin{tikzpicture}[
+  font=\scriptsize,
+  pod/.style={draw, rounded corners=2pt, fill=white, minimum height=0.55cm, minimum width=3.3cm, align=center},
+  store/.style={pod, fill=gray!15},
+  node box/.style={draw, thick, rounded corners=5pt, inner sep=8pt},
+  link/.style={{Latex[length=1.5mm]}-{Latex[length=1.5mm]}, thick, densely dashed},
+  lbl/.style={font=\tiny, fill=white, inner sep=1pt, align=center},
+]
+% node-a (kolom kiri: x=0 dan x=3.6)
+\node[pod]   (a-api)   at (0, 6.0)  {client-api $\times$2 \textit{(api)}};
+\node[pod]   (a-tok)   at (0, 5.3)  {token-service $\times$2 \textit{(api)}};
+\node[store] (a-tdb)   at (0, 4.6)  {token-db \textit{(store)}};
+\node[pod]   (a-agg)   at (0, 3.9)  {aggregator $\times$2 \textit{(aggregator)}};
+\node[store] (a-crdb)  at (0, 3.2)  {canonical-store-2, -3 \textit{(store)}};
+\node[store] (a-sat)   at (0, 2.5)  {satellite-store \textit{(store)}};
+\node[pod]   (a-nats)  at (3.6, 6.0) {nats-jetstream \textit{(broker)}};
+\node[pod]   (a-notif) at (3.6, 5.3) {notification-consumer \textit{(consumer)}};
+\node[pod]   (a-audit) at (3.6, 4.6) {audit-consumer \textit{(consumer)}};
+\node[pod]   (a-frc)   at (3.6, 3.9) {field-report-consumer \textit{(consumer)}};
+\node[pod]   (a-prom)  at (3.6, 3.2) {prometheus \textit{(other)}};
+\node[pod]   (a-ta)    at (3.6, 2.5) {tester-agent \textit{(DaemonSet)}};
+
+% node-b (kolom kanan: x=11 dan x=14.6)
+\node[pod]   (b-agg)   at (11, 6.0)  {aggregator \textit{(aggregator)}};
+\node[store] (b-crdb)  at (11, 5.3)  {canonical-store-0, -1 \textit{(store)}};
+\node[pod]   (b-bmkg)  at (11, 4.6)  {bmkg-mock \textit{(mock)}};
+\node[pod]   (b-pvmbg) at (11, 3.9)  {pvmbg-mock \textit{(mock)}};
+\node[pod]   (b-sens)  at (11, 3.2)  {sensor-pantai \textit{(sensor)}};
+\node[pod]   (b-poll)  at (11, 2.5)  {sensor-pantai-poller \textit{(consumer)}};
+\node[pod]   (b-sati)  at (14.6, 6.0) {satellite-ingestor \textit{(consumer)}};
+\node[pod]   (b-sink)  at (14.6, 5.3) {stub-sink \textit{(other)}};
+\node[pod]   (b-graf)  at (14.6, 4.6) {grafana \textit{(other)}};
+\node[pod]   (b-jae)   at (14.6, 3.9) {jaeger \textit{(other)}};
+\node[pod]   (b-ta)    at (14.6, 3.2) {tester-agent \textit{(DaemonSet)}};
+
+\begin{scope}[on background layer]
+  \node[node box, fill=blue!4, fit=(a-api)(a-sat)(a-nats)(a-ta)] (na) {};
+  \node[node box, fill=green!4, fit=(b-agg)(b-poll)(b-sati)(b-ta)] (nb) {};
+\end{scope}
+\node[font=\bfseries\small, anchor=south] at (na.north) {node-a 192.168.56.10 --- control plane + worker (4 vCPU / 6 GB)};
+\node[font=\bfseries\small, anchor=south] at (nb.north) {node-b 192.168.56.11 --- worker (4 vCPU / 4 GB)};
+
+% Jalur antar-node (flannel VXLAN di enp0s8)
+\draw[link] (na.east |- 0,5.7) -- node[lbl]{replikasi Raft CockroachDB\\(RF=3, 2 replika dipin ke node-a)} (nb.west |- 0,5.7);
+\draw[link] (na.east |- 0,4.7) -- node[lbl]{publish ingest / alert\\(poller, satellite-ingestor $\rightarrow$ NATS)} (nb.west |- 0,4.7);
+\draw[link] (na.east |- 0,3.7) -- node[lbl]{notifikasi + laporan lapangan\\(consumer $\rightarrow$ stub-sink)} (nb.west |- 0,3.7);
+\draw[link] (na.east |- 0,2.7) -- node[lbl]{scrape metrik Prometheus,\\trace OTLP ke Jaeger} (nb.west |- 0,2.7);
+
+% Akses dari luar klaster
+\node[draw, dashed, rounded corners=2pt, align=center] (host) at (7.3, 0.9) {Host Windows (k6, curl, browser)\\NodePort 30080 client-api, 30083 token-service};
+\draw[-{Latex[length=1.5mm]}, thick] (host.west) -| (a-tdb.south |- na.south);
+\draw[-{Latex[length=1.5mm]}, thick] (host.east) -| (b-poll.south |- nb.south);
+\end{tikzpicture}
