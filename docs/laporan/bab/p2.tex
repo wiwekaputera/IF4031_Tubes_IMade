@@ -2,9 +2,9 @@
 
 \subsubsection{Identifikasi Masalah}
 \begin{itemize}
-\item \textbf{Kriteria 2 --- \textit{Leader election / mutual exclusion} dan \textit{effectively-once ingestion}:} tiga instance yang sama-sama melakukan \textit{polling} menggandakan permintaan ke upstream dan event di penyimpanan. Dibutuhkan tepat satu pemimpin aktif yang melakukan \textit{polling}, disertai penulisan idempoten agar pergantian pemimpin tidak menimbulkan duplikat maupun celah data.
-\item \textbf{Kriteria 4 --- \textit{Unreliable clocks / clock skew} dan \textit{split-brain}:} jam fisik (\textit{wall-clock}) antar mesin bisa bergeser maju maupun mundur (+45 s / $-$30 s). Jika keabsahan \textit{lease} dihitung memakai jam lokal node Aggregator, dua instance bisa sama-sama merasa menjadi \textit{leader} (\textit{split-brain}) dan menulis bersamaan.
-\item \textbf{Kriteria 5 --- \textit{Process pause / zombie leader} dan \textit{fencing token}:} \textit{leader} yang membeku (\textit{suspend} VM atau jeda GC panjang) melebihi batas waktu \textit{lease} tidak tahu bahwa kepemimpinannya sudah pindah ke instance lain. Ketika bangun kembali (\textit{zombie leader}), ia dapat menulis data basi ke penyimpanan. Penanganannya adalah \textit{fencing token} yang naik monoton dan diperiksa di sisi penyimpanan (Kleppmann, 2016 dan 2017, bab 8).
+\item \textbf{Kriteria 2 (\textit{Leader election / mutual exclusion} dan \textit{effectively-once ingestion}):} tiga instance yang sama-sama melakukan \textit{polling} menggandakan permintaan ke upstream dan event di penyimpanan. Dibutuhkan tepat satu pemimpin aktif yang melakukan \textit{polling}, disertai penulisan idempoten agar pergantian pemimpin tidak menimbulkan duplikat maupun celah data.
+\item \textbf{Kriteria 4 (\textit{Unreliable clocks / clock skew} dan \textit{split-brain}):} jam fisik (\textit{wall-clock}) antar mesin bisa bergeser maju maupun mundur (+45 s / $-$30 s). Jika keabsahan \textit{lease} dihitung memakai jam lokal node Aggregator, dua instance bisa sama-sama merasa menjadi \textit{leader} (\textit{split-brain}) dan menulis bersamaan.
+\item \textbf{Kriteria 5 (\textit{Process pause / zombie leader} dan \textit{fencing token}):} \textit{leader} yang membeku (\textit{suspend} VM atau jeda GC panjang) melebihi batas waktu \textit{lease} tidak tahu bahwa kepemimpinannya sudah pindah ke instance lain. Ketika bangun kembali (\textit{zombie leader}), ia dapat menulis data basi ke penyimpanan. Penanganannya adalah \textit{fencing token} yang naik monoton dan diperiksa di sisi penyimpanan (Kleppmann, 2016 dan 2017, bab 8).
 \item \textbf{Kriteria 6--8:} \textit{horizontal scaling} di bawah beban, \textit{load balancing} berbasis \textit{readiness}, dan \textit{rolling update} tanpa \textit{downtime}.
 \end{itemize}
 
@@ -15,7 +15,7 @@
 \item \textbf{\textit{Renew-before-poll}.} Sebelum mengirim permintaan ke BMKG/PVMBG pada setiap siklus, pemimpin memanggil \kode{elector.RenewNow()} secara sinkron ke DB. Jika \textit{zombie leader} baru bangun dari \textit{freeze}, panggilan ini langsung gagal dan instance mendemosi dirinya (\kode{leader\_lost}) tanpa menyentuh upstream.
 \item \textbf{\textit{Fencing token} pada transaksi tulis (\kode{UpsertFencedBatch}).} Jika pemimpin membeku \textit{setelah} membaca upstream namun \textit{sebelum} menulis ke DB, \kode{UpsertFencedBatch} memverifikasi \kode{holder}, \kode{fencing\_token}, dan \kode{expires\_at > now()} di dalam transaksi \textit{serializable} yang sama dengan \textit{upsert} event, \textit{outbox}, dan pemajuan \textit{watermark}. Bila token sudah usang, transaksi di-\textit{rollback} (\kode{ErrFenced}, 0 baris tertulis) dan instance mendemosi dirinya.
 \item \textbf{\textit{Watermark} durable dan idempotensi.} Tabel \kode{poller\_watermarks} menyimpan posisi terakhir secara atomik bersama batch tulis. Pemimpin baru memuat \textit{watermark} ini dengan mundur aman \kode{watermarkOverlap = 1 s} agar tidak ada event yang terlewat di batas detik, sementara kunci deterministik \kode{hazard\_id} (\kode{ON CONFLICT DO NOTHING/UPDATE}) mencegah duplikat. Mock mencatat permintaan per instance pada \kode{/admin/requests} untuk pembuktian.
-\item \textbf{Uji beban (Fayadh).} k6 dijalankan dari luar klaster dengan skrip \kode{scripts/demo/m2/load/} (konfigurasi pada butir ``Di Laporan'' 4).
+\item \textbf{Uji beban.} k6 dijalankan dari luar klaster dengan skrip \kode{scripts/demo/m2/load/} (konfigurasi pada butir ``Di Laporan'' 4).
 \end{enumerate}
 
 \subsubsection{Alasan Keputusan}
@@ -27,7 +27,7 @@
 \hline
 \textbf{Parameter} & \textbf{Nilai} & \textbf{Fungsi dan \textit{trade-off}}\\ \hline
 \kode{LEASE\_TTL\_S} & 15 s & Masa berlaku \textit{lease}. \textit{Worst-case failover} $\approx$ 15 + 5 = 20 s (jauh di bawah batas 60 s). Nilai terlalu kecil (mis.\ 5 s) memicu \textit{false failover} saat jeda GC/jaringan singkat. Nilai terlalu besar (mis.\ 45 s) mendesak \textit{failover} ke batas 60 s.\\ \hline
-\kode{LEASE\_RENEW\_INTERVAL\_S} & 5 s & Jeda perpanjangan \textit{lease}. Memberi 3 kali kesempatan perpanjangan dalam 15 s sehingga gangguan satu permintaan tidak menjatuhkan \textit{leader}, sambil menjaga beban tulis sangat rendah (0,2 \textit{writes}/s).\\ \hline
+\kode{LEASE\_RENEW\_}\allowbreak\kode{INTERVAL\_S} & 5 s & Jeda perpanjangan \textit{lease}. Memberi 3 kali kesempatan perpanjangan dalam 15 s sehingga gangguan satu permintaan tidak menjatuhkan \textit{leader}, sambil menjaga beban tulis sangat rendah (0,2 \textit{writes}/s).\\ \hline
 \kode{safetyMargin} lokal & 2 s & Pemimpin lokal berhenti menganggap dirinya aktif pada 13 s tanpa perpanjangan sukses, sebagai rem konservatif sebelum \textit{lease} benar-benar habis di DB.\\ \hline
 \kode{SHUTDOWN\_DRAIN\_S} & 5 s & Waktu tunggu setelah \kode{/internal/ready} mengembalikan 503 agar \textit{load balancer} menghentikan trafik baru sebelum proses keluar, tanpa melewati batas terminasi pod 30 s.\\ \hline
 \kode{watermarkOverlap} & 1 s & Mundur 1 s saat \textit{polling} untuk mencegah celah di batas detik. Memicu pembacaan ulang beberapa event terbaru namun aman karena \textit{upsert} idempoten.\\ \hline
@@ -67,7 +67,7 @@ Skrip: \kode{scripts/demo/m2/p2/c1}--\kode{c5} (\kode{MODE=k8s}) dan \kode{scrip
 \item \textbf{Batas waktu:} \textit{lease TTL} 15 s, perpanjangan 5 s, margin keselamatan lokal 2 s, \textit{shutdown drain} 5 s, dan \textit{watermark overlap} 1 s. Dengan demikian, \textit{failover} terburuk $\approx$ 20 s. Analisis \textit{trade-off} tiap nilai disajikan pada tabel bagian Alasan Keputusan di atas.
 \item \textbf{Konfigurasi uji beban:}
 \begin{center}
-\begin{tabularx}{\textwidth}{|p{3.6cm}|X|}
+\begin{tabularx}{\linewidth}{|p{3.6cm}|X|}
 \hline
 Alat dan lokasi & k6 v1.4.2 di laptop host (Windows 11, di luar kedua VM), menembak NodePort client-api (\kode{tests/load/k6\_m2.js})\\ \hline
 Beban & 10.000 VU, \textit{ramp} 30 s, ditahan 150 s, jeda 0,5 s per iterasi, \kode{GET /v1/events?limit=20} dengan token Tim Lapangan\\ \hline

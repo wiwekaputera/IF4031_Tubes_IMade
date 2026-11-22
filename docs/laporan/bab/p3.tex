@@ -10,10 +10,10 @@
 
 \subsubsection{Rancangan Solusi}
 
-\textbf{Perubahan skema PVMBG (Theo).} Mock PVMBG mendapat mode \kode{POST /admin/schema-version?mode=incompatible} (\kode{volcano\_id} menjadi \kode{volcano\_code}, \kode{ash\_column\_height\_m} menjadi string, \kode{reported\_at} dihapus). Aggregator memvalidasi setiap laporan sebelum normalisasi:
+\textbf{Perubahan skema PVMBG.} Mock PVMBG mendapat mode \kode{POST /admin/schema-version?mode=incompatible} (\kode{volcano\_id} menjadi \kode{volcano\_code}, \kode{ash\_column\_height\_m} menjadi string, \kode{reported\_at} dihapus). Aggregator memvalidasi setiap laporan sebelum normalisasi:
 
 \begin{center}
-\begin{tabularx}{\textwidth}{|X|X|}
+\begin{tabularx}{\linewidth}{|X|X|}
 \hline
 \textbf{Perubahan} & \textbf{Perlakuan}\\ \hline
 Field baru & Diterima, disimpan di \kode{attributes}\\ \hline
@@ -27,9 +27,9 @@ Basis data atau kegagalan sementara lain & \textbf{retrying} dengan \textit{back
 
 DLQ adalah tabel \kode{dead\_letters} yang menyimpan pesan mentah \textit{byte} demi \textit{byte} beserta \kode{reason}, \kode{source}, \kode{received\_at}, \kode{retryable}, \kode{attempts}, dan \kode{status} (\kode{retrying}/\kode{parked}/\kode{resolved}). \textit{Watermark polling} hanya maju setelah setiap pesan tersimpan atau aman di DLQ. \textit{Replay} (\kode{POST /internal/dlq/replay}) memproses ulang pesan \textit{parked} dengan normalizer terbaru. Hasilnya di-\textit{upsert} berdasarkan \kode{(source, source\_ref\_id)} dan urutan per \kode{source\_ref\_id} dipertahankan. Pemeriksaan DLQ hanya untuk BNPB Internal Ops (\kode{INTERNAL\_OPS\_TOKEN}) dan Audit API (\kode{/internal/audit/unprocessed}). Ingest dari sumber lain (\kode{hazard.ingest.*}) memakai DLQ yang sama untuk pesan rusak dan data yang ditolak sumbernya (\kode{op=reject}, lihat P5).
 
-\textbf{Pembaruan normalizer dan \textit{replay} (Theo).} Pesan yang di-\textit{park} karena skema baru hanya berguna bila bisa diproses setelah normalizer diperbarui. Pembaruan itu disediakan sebagai \textit{adapter} skema v2 yang dinyalakan lewat \kode{PVMBG\_SCHEMA\_V2\_ADAPTER=true} (bawaan \kode{false}), seperti saat versi normalizer baru di-\textit{deploy}. \textit{Adapter} memetakan \kode{volcano\_code} kembali ke \kode{volcano\_id}, mengurai \kode{ash\_column\_height\_m} yang berupa string menjadi angka (nilai yang bukan angka tetap ditolak), dan mengisi \kode{reported\_at} yang hilang dengan waktu Aggregator pertama kali menerima laporan tersebut, lalu menandainya dengan \kode{reported\_at\_source = "received\_at"} di \kode{attributes}. Saat \textit{replay}, waktu terima diambil dari kolom \kode{received\_at} baris DLQ, bukan waktu \textit{replay}. Alur lengkapnya: skema berubah, pesan v2 di-\textit{park}, \textit{adapter} dinyalakan (\textit{rolling update}), lalu \kode{POST /internal/dlq/replay} dijalankan sehingga pesan berstatus \kode{resolved} dan tersimpan sekali di \kode{canonical\_events}.
+\textbf{Pembaruan normalizer dan \textit{replay}.} Pesan yang di-\textit{park} karena skema baru hanya berguna bila bisa diproses setelah normalizer diperbarui. Pembaruan itu disediakan sebagai \textit{adapter} skema v2 yang dinyalakan lewat \kode{PVMBG\_SCHEMA\_V2\_ADAPTER=true} (bawaan \kode{false}), seperti saat versi normalizer baru di-\textit{deploy}. \textit{Adapter} memetakan \kode{volcano\_code} kembali ke \kode{volcano\_id}, mengurai \kode{ash\_column\_height\_m} yang berupa string menjadi angka (nilai yang bukan angka tetap ditolak), dan mengisi \kode{reported\_at} yang hilang dengan waktu Aggregator pertama kali menerima laporan tersebut, lalu menandainya dengan \kode{reported\_at\_source = "received\_at"} di \kode{attributes}. Saat \textit{replay}, waktu terima diambil dari kolom \kode{received\_at} baris DLQ, bukan waktu \textit{replay}. Alur lengkapnya: skema berubah, pesan v2 di-\textit{park}, \textit{adapter} dinyalakan (\textit{rolling update}), lalu \kode{POST /internal/dlq/replay} dijalankan sehingga pesan berstatus \kode{resolved} dan tersimpan sekali di \kode{canonical\_events}.
 
-\textbf{Laporan Tim Lapangan (Fayadh).}
+\textbf{Laporan Tim Lapangan.}
 \begin{enumerate}
 \item \kode{POST /field-reports}: \textit{scope} \kode{field\_team}/\kode{internal\_ops} (Media 403), body $\le$ 64 KB, JSON ketat, field wajib, \kode{Idempotency-Key} (atau \kode{report\_id}) wajib.
 \item Laporan dipublikasikan ke stream \kode{FIELD\_REPORTS} (\textit{file storage}) dengan \kode{Nats-Msg-Id = <client\_id>/<key>}. \textbf{Balasan 202 baru dikirim setelah PubAck}. Tanpa \textit{ack} dalam 2 s, balasan 503 + \kode{Retry-After} (tidak pernah 202 palsu).

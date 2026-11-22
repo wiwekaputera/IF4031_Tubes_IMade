@@ -16,7 +16,7 @@
 \node[svc]   (sensor) at (0, 3.9) {sensor-pantai\\(image asisten)};
 \node[ext]   (feed)   at (0, 2.8) {Feed Satelit\\(layanan asisten)};
 
-\node[store] (crdb)   at (4, 7.3) {canonical-store\\CockroachDB 4 node, RF=3};
+\node[store] (crdb)   at (4, 7.3) {canonical-store\\CockroachDB 4 instans, RF=3};
 \node[svc]   (agg)    at (4, 5.5) {aggregator $\times$3\\(1 leader + fencing)};
 \node[svc]   (poller) at (4, 3.9) {sensor-pantai-poller\\(breaker, validasi)};
 \node[svc]   (sat)    at (4, 2.8) {satellite-ingestor};
