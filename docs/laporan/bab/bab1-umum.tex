@@ -20,7 +20,7 @@ Platform Koordinasi Kebencanaan BNPB adalah sistem terdistribusi yang menjadi hu
 
 Pada Milestone 2, cakupan sistem diperluas menjadi:
 \begin{enumerate}[label=\alph*.]
-\item \textbf{Penyimpanan Terdistribusi (P1):} \textit{canonical store} berpindah dari satu PostgreSQL ke klaster CockroachDB 4 node dengan replikasi \textit{RF}=3 dan 8 \textit{hash shard} logis. Pembacaan lintas \textit{shard} memakai \textit{scatter-gather} dan menandai jawaban yang tidak lengkap (\kode{partial: true}).
+\item \textbf{Penyimpanan Terdistribusi (P1):} \textit{canonical store} berpindah dari satu PostgreSQL ke klaster CockroachDB 4 instans (pod) di 2 node dengan replikasi \textit{RF}=3 dan 8 \textit{hash shard} logis. Pembacaan lintas \textit{shard} memakai \textit{scatter-gather} dan menandai jawaban yang tidak lengkap (\kode{partial: true}).
 \item \textbf{Aggregator Ketersediaan Tinggi (P2):} tiga atau lebih instance Aggregator di belakang satu Service. Hanya satu \textit{leader} yang mengambil data (\textit{lease} di basis data dengan waktu dari CockroachDB), dan setiap penulisan dilindungi \textit{fencing token}.
 \item \textbf{Perubahan Skema dan Laporan Lapangan (P3):} perubahan skema yang tidak kompatibel disimpan utuh di \textit{dead-letter queue} untuk diproses ulang. Tim Lapangan mendapat jalur tulis \kode{POST /field-reports} yang membalas 202 hanya setelah laporan tersimpan di JetStream.
 \item \textbf{Pemrosesan Aliran Satelit (P4):} \kode{satellite-ingestor} membaca aliran SSE, mengelompokkan deteksi menjadi kebakaran berdasarkan waktu deteksi, dan menyimpan \textit{offset} secara atomik bersama keadaan.
@@ -98,6 +98,7 @@ Uji beban & k6 (di luar klaster) & Skenario \textit{ramping} 10.000 VU dengan \t
 \item Sensor Pantai dan Feed Satelit adalah kotak hitam. Kelompok hanya berinteraksi melalui kontraknya dan tidak bergantung pada ID, \textit{seed}, atau pola profil latihan.
 \item Satu broker NATS (R1) dianggap memadai untuk prototipe. Risikonya dibahas pada batasan P3 dan P5.
 \item Kedua VM berjalan pada satu laptop (VirtualBox di atas Hyper-V), sehingga angka \textit{throughput} dan latensi pada pengujian beban mencerminkan batas host tersebut, bukan batas rancangan. Kegagalan node tetap nyata karena tiap node memiliki kernel sendiri.
+\item \textbf{Lingkungan bukti.} Di host ini satu \kode{fsync} pada disk virtual memakan 28--46 ms, sehingga empat instans CockroachDB tidak dapat menyelesaikan transaksi tulis tepat waktu di klaster demo (rincian di post-mortem P5). Karena itu bukti P1 dan sebagian P2 diambil dari Docker Compose di laptop yang sama (satu kernel). Bukti platform, P3 (laporan Tim Lapangan), P5, dan sebagian P2 diambil dari klaster 2 VM. Setiap baris bukti menyebutkan lingkungannya.
 \end{enumerate}
 
 % ─────────────────────────────────────────────────────────────
@@ -117,7 +118,7 @@ client-api hanya baca & Diubah & Jalur tulis \kode{POST /field-reports} (P3).\\ 
 Filter \kode{type} hanya SEISMIC/VOLCANIC, \kode{hazard\_id} UUID & Diubah & Seluruh tipe kontrak (termasuk WILDFIRE, COASTAL), ID kanonik \kode{hz-\ldots}, \textit{cursor pagination} diteruskan.\\ \hline
 Satu durable consumer notifikasi & Diubah & Consumer kedua untuk stream prioritas \kode{BNPB\_ALERTS} (P5).\\ \hline
 Log JSON + \kode{X-Correlation-ID} & Dipertahankan + diperluas & Ditambah metrik Prometheus, \textit{tracing} OpenTelemetry, dan \kode{trace\_id} di log.\\ \hline
-Uji beban 50 VU & Diubah & 10.000 VU dijalankan dari luar klaster (P2).\\ \hline
+Uji beban 50 VU & Diubah & Dirancang 10.000 VU dari luar klaster (P2). Di klaster demo dijalankan 500 VU karena keterbatasan host.\\ \hline
 \textit{Liveness probe} dengan \textit{timeout} bawaan 1 s & Diubah & Pada VM dengan CPU penuh, \textit{probe} 1 s gagal dan pod sehat di-\textit{restart}. \textit{Liveness} memakai \textit{timeout} 5 s dan 6 kegagalan beruntun, \textit{readiness} 3 s.\\ \hline
 \end{longtable}
 
@@ -142,7 +143,15 @@ Kedua node menjalankan Ubuntu Server 24.04.5 LTS dengan kernel \kode{6.8.0-151-g
 \item \textbf{Metrik:} setiap service Go memasang paket bersama \kode{observability/} (latensi, \textit{error rate}, \textit{throughput} per rute dan per panggilan keluar, metrik pesan JetStream). Prometheus di klaster menemukan pod lewat anotasi \kode{prometheus.io/*}. Label \kode{instance} = nama pod, \kode{node} = node tempat pod berjalan.
 \item \textbf{Dashboard Grafana (folder BNPB):} \textit{Services overview}. \textit{Aggregator, sources and dead-letter queue} (status sumber, \textit{leader}, DLQ, \textit{outbox}). \textit{Satellite fire feed} (lag, latensi ingest, deteksi terlambat). \textit{Coastal sensor and alert SLO} (\textit{breaker}, data ditolak, jalur peringatan, SLO, \textit{load shedding}).
 \item \textbf{\textit{Tracing}:} OpenTelemetry SDK ke Jaeger (OTLP/HTTP), konteks W3C \kode{traceparent}. Satu permintaan terlacak client-api ke Aggregator ke CockroachDB dengan durasi tiap langkah (setiap \textit{query} SQL menjadi \textit{span}). \textit{Trace} juga diteruskan lewat header pesan JetStream, sehingga \textit{publish} Aggregator ke consumer ke stub-sink dan kebakaran dari \kode{satellite-ingestor} ke \textit{upsert} di Aggregator masing-masing tampil sebagai satu \textit{trace}. Semua \textit{trace} disimpan, kecuali \kode{satellite-ingestor} yang disampel 5\% karena volumenya.
-\item \textbf{Log:} JSON terstruktur dengan \kode{correlation\_id} dan \kode{trace\_id}/\kode{span\_id} yang sama dengan Jaeger, sehingga \textit{trace} yang lambat dapat ditelusuri ke log-nya dan sebaliknya.
+\item \textbf{Log:} JSON terstruktur dengan \kode{correlation\_id} dan \kode{trace\_id}/\kode{span\_id} yang sama dengan Jaeger, sehingga \textit{trace} yang lambat dapat ditelusuri ke log-nya dan sebaliknya. Contoh satu baris log client-api (Docker Compose, 22 November 2026, dirapikan per baris):
+\begin{lstlisting}
+{"level":"warn","service":"client-api",
+ "correlation_id":"a31a7a4e-a0ca-47f8-bd18-2c340c45409b",
+ "method":"POST","path":"/api/v4/jobs/request","status":401,
+ "latency_ms":0,"time":"2026-11-22T14:42:23.040774629Z",
+ "trace_id":"2230d13c485f41d0fdb0d9cd9a9c5c3e",
+ "span_id":"d856ce2c82d2d42d","message":"request processed"}
+\end{lstlisting}
 \item \textbf{Paket bersama \kode{observability/}:} \textit{middleware} HTTP (metrik dan \textit{span} server, \kode{X-Correlation-ID}), \textit{transport} klien HTTP, propagasi \textit{trace} lewat header NATS, \textit{tracer} pgx untuk \textit{query} SQL, dan \textit{hook} zerolog. Setiap service cukup memanggil \kode{observability.Init} dan membungkus \textit{handler} serta klien HTTP-nya.
 \item \textbf{Status \textit{leader}:} metrik \kode{aggregator\_leader} diatur oleh \textit{hook promote/demote} pemilihan \textit{leader}, dan setiap replika Aggregator di-\textit{scrape} terpisah, sehingga dashboard menunjukkan tepat satu \textit{leader} dan perpindahannya saat \textit{failover}.
 \end{itemize}
