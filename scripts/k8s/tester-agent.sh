@@ -12,6 +12,9 @@
 #   ./scripts/k8s/tester-agent.sh logs             action log of the agent on every node
 set -euo pipefail
 
+# Git Bash on Windows would turn "/app" into a Windows path; keep it literal.
+export MSYS_NO_PATHCONV=1
+
 MANIFEST_URL="https://raw.githubusercontent.com/susTuna/if4031-tester-agent/ebb55261711123a9a211739ffbf140a275caa6da/manifest.yaml"
 NS="tester-agent"
 
