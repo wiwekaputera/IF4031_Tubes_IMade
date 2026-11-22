@@ -131,13 +131,14 @@ OS/kernel tiap node: \isi{output \kode{kubectl get nodes -o wide}}. Bukti kernel
 
 % ─────────────────────────────────────────────────────────────
 \subsection{Observabilitas}
-\tinjau{oleh Theo}
 
 \begin{itemize}
 \item \textbf{Metrik:} setiap service Go memasang paket bersama \kode{observability/} (latensi, \textit{error rate}, \textit{throughput} per rute dan per panggilan keluar, metrik pesan JetStream). Prometheus di klaster menemukan pod lewat anotasi \kode{prometheus.io/*}; label \kode{instance} = nama pod, \kode{node} = node tempat pod berjalan.
 \item \textbf{Dashboard Grafana (folder BNPB):} \textit{Services overview}; \textit{Aggregator, sources and dead-letter queue} (status sumber, \textit{leader}, DLQ, \textit{outbox}); \textit{Satellite fire feed} (lag, latensi ingest, deteksi terlambat); \textit{Coastal sensor and alert SLO} (\textit{breaker}, data ditolak, jalur peringatan, SLO, \textit{load shedding}).
-\item \textbf{\textit{Tracing}:} OpenTelemetry SDK $\rightarrow$ Jaeger (OTLP/HTTP). Satu permintaan terlacak client-api $\rightarrow$ Aggregator $\rightarrow$ CockroachDB; \textit{trace} juga diteruskan lewat header pesan JetStream.
-\item \textbf{Log:} JSON terstruktur dengan \kode{correlation\_id} dan \kode{trace\_id}.
+\item \textbf{\textit{Tracing}:} OpenTelemetry SDK $\rightarrow$ Jaeger (OTLP/HTTP), konteks W3C \kode{traceparent}. Satu permintaan terlacak client-api $\rightarrow$ Aggregator $\rightarrow$ CockroachDB dengan durasi tiap langkah (setiap \textit{query} SQL menjadi \textit{span}). \textit{Trace} juga diteruskan lewat header pesan JetStream, sehingga \textit{publish} Aggregator $\rightarrow$ consumer $\rightarrow$ stub-sink dan kebakaran dari \kode{satellite-ingestor} $\rightarrow$ \textit{upsert} di Aggregator masing-masing tampil sebagai satu \textit{trace}. Semua \textit{trace} disimpan, kecuali \kode{satellite-ingestor} yang disampel 5\% karena volumenya.
+\item \textbf{Log:} JSON terstruktur dengan \kode{correlation\_id} dan \kode{trace\_id}/\kode{span\_id} yang sama dengan Jaeger, sehingga \textit{trace} yang lambat dapat ditelusuri ke log-nya dan sebaliknya.
+\item \textbf{Paket bersama \kode{observability/}:} \textit{middleware} HTTP (metrik dan \textit{span} server, \kode{X-Correlation-ID}), \textit{transport} klien HTTP, propagasi \textit{trace} lewat header NATS, \textit{tracer} pgx untuk \textit{query} SQL, dan \textit{hook} zerolog. Setiap service cukup memanggil \kode{observability.Init} dan membungkus \textit{handler} serta klien HTTP-nya.
+\item \textbf{Status \textit{leader}:} metrik \kode{aggregator\_leader} diatur oleh \textit{hook promote/demote} pemilihan \textit{leader}, dan setiap replika Aggregator di-\textit{scrape} terpisah, sehingga dashboard menunjukkan tepat satu \textit{leader} dan perpindahannya saat \textit{failover}.
 \end{itemize}
 
 \gambarplaceholder{Dashboard metrik per service (latensi, error rate, throughput)}{5cm}

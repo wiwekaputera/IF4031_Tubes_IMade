@@ -21,6 +21,9 @@ type Config struct {
 	PVMBGTimeout         time.Duration
 	PVMBGCbThreshold     int
 	PVMBGCbProbeInterval time.Duration
+	// PVMBGSchemaV2Adapter accepts PVMBG's incompatible schema version by
+	// rewriting it into the current shape (see schema.AdaptVolcanicV2).
+	PVMBGSchemaV2Adapter bool
 	PollInterval         time.Duration
 	DBDSN                string
 	AuditToken           string
@@ -124,6 +127,7 @@ func Load() (*Config, error) {
 		PVMBGTimeout:         time.Duration(pvmbgTimeoutMs) * time.Millisecond,
 		PVMBGCbThreshold:     cbThreshold,
 		PVMBGCbProbeInterval: time.Duration(cbProbeIntervalS) * time.Second,
+		PVMBGSchemaV2Adapter: strings.EqualFold(getEnv("PVMBG_SCHEMA_V2_ADAPTER", "false"), "true"),
 		PollInterval:         time.Duration(pollIntervalS) * time.Second,
 		DBDSN:                dbDSN,
 		AuditToken:           auditToken,

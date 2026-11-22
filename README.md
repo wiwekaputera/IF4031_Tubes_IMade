@@ -391,16 +391,22 @@ The DLQ is the `dead_letters` table. It keeps the raw message byte for byte with
    incurl -o /dev/null -w "%{http_code}\n" "http://aggregator:8090/internal/dlq"                          # 401
    incurl -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer wrong" "http://aggregator:8090/internal/dlq"   # 401
    ```
-4. **Switch the schema back and replay:**
+4. **Update the normaliser, then replay:** the v2 adapter is the normaliser update. It maps `volcano_code` back to `volcano_id`, parses the string height, and uses the time the report was received when `reported_at` is missing, marked with `reported_at_source: "received_at"` in `attributes`.
    ```bash
-   curl -s -X POST "http://localhost:8082/admin/schema-version?mode=incompatible"   # toggles off
+   AGGREGATOR_PVMBG_SCHEMA_V2_ADAPTER=true docker compose up -d --no-deps aggregator    # k8s: kubectl -n <ns> set env deploy/aggregator PVMBG_SCHEMA_V2_ADAPTER=true
    incurl -X POST -H "Authorization: Bearer $INTERNAL_OPS_TOKEN" "http://aggregator:8090/internal/dlq/replay?limit=100"
+   curl -s -X POST "http://localhost:8082/admin/schema-version?mode=incompatible"         # back to the normal schema
    ```
-   Replay runs each parked message through the current normaliser. Messages it can now read become `resolved` and are upserted by `(source, source_ref_id)`, so a replay never creates duplicates. Messages it still cannot read stay `parked`. Replay keeps the order per `source_ref_id`: once one message of a report fails, later messages of the same report wait.
+   Replay runs each parked message through the current normaliser. Messages it can now read become `resolved` and are upserted by `(source, source_ref_id)`, so a replay never creates duplicates. Messages it still cannot read stay `parked`. Replay keeps the order per `source_ref_id`: once one message of a report fails, later messages of the same report wait. The original receive time comes from the dead-letter row, not the time of the replay.
 5. **Malformed-message tests:**
    ```bash
    cd services/aggregator && go test ./internal/schema/ ./internal/dlq/ ./internal/poller/
    ```
+6. **All of the above in one run, with evidence for the report:**
+   ```bash
+   MODE=compose bash scripts/demo/m2/p3/p3.sh     # or MODE=k8s
+   ```
+   Results go to `evidence/p3/<run>/`; `summary.txt` has the numbers for criteria 1–5. The script restores the normal schema and turns the adapter off when it finishes.
 
 **Field reports (`POST /field-reports`)**
 
@@ -496,6 +502,13 @@ Result on the development cluster (N=150): 170/170 accepted reports delivered, 0
    docker run --rm --network if4031-tubes-imade_bus_net natsio/nats-box:latest \
      nats -s nats://nats-jetstream:4222 sub 'hazard.ingest.SATELIT' --count 3
    ```
+
+**Evidence for the report** (criteria 1–4, 7 and 8: example fires in both stores, an ID kept across updates, late and duplicate totals, latency and lag, a pod kill with resume):
+
+```bash
+MODE=compose bash scripts/demo/m2/p4/p4.sh     # or MODE=k8s; SKIP_KILL=1 to leave the ingestor running
+```
+Results go to `evidence/p4/<run>/`, with the numbers in `summary.txt`.
 
 **Kill-and-restart proof.** `internal/e2e` replays a recorded feed into two databases: once straight through, and once killed at random moments (some in the middle of a transaction) and restarted from the committed offset each time. Every table and the exact sequence of messages to the aggregator must match, and the fires must equal a full recluster of all stored detections.
 
@@ -594,6 +607,7 @@ All variables are in [.env.example](.env.example). Milestone 1 variables are unc
 | `AGGREGATOR_DB_DSN` | `postgresql://aggregator@canonical-store-0:26257,…/canonical?sslmode=disable` | `aggregator` | Multi-host CockroachDB connection string |
 | `AGGREGATOR_AUDIT_TOKEN` | `change-me-audit-token` | `aggregator` | Bearer token required by `/internal/audit/*` and `/internal/admin/distribution` |
 | `INTERNAL_OPS_TOKEN` | *(required)* | `aggregator` | Bearer token for `/internal/dlq` routes. Generate with `openssl rand -hex 32` |
+| `AGGREGATOR_PVMBG_SCHEMA_V2_ADAPTER` | `false` | `aggregator` | Normaliser update for PVMBG's incompatible schema. `false`: v2 reports are parked. `true`: they are accepted and parked ones can be replayed |
 | `INSTANCE_ID` | *(hostname)* | `aggregator` | Instance identifier sent in `X-Instance-ID` and stored as lease holder |
 | `AGGREGATOR_LEASE_TTL_S` | `15` | `aggregator` | Leader lease TTL in seconds (must be `> 2 ×` renew interval) |
 | `AGGREGATOR_LEASE_RENEW_INTERVAL_S` | `5` | `aggregator` | Leader lease renewal interval in seconds |

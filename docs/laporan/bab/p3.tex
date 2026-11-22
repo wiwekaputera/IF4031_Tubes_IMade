@@ -1,5 +1,4 @@
 \subsection{Problem 3: Surat dari Tetangga}
-\tinjau{oleh Theo untuk kriteria 1--5; kriteria 6 oleh Fayadh}
 
 \subsubsection{Identifikasi Masalah}
 \begin{itemize}
@@ -28,6 +27,8 @@ Basis data atau kegagalan sementara lain & \textbf{retrying} dengan \textit{back
 
 DLQ adalah tabel \kode{dead\_letters} yang menyimpan pesan mentah \textit{byte} demi \textit{byte} beserta \kode{reason}, \kode{source}, \kode{received\_at}, \kode{retryable}, \kode{attempts}, dan \kode{status} (\kode{retrying}/\kode{parked}/\kode{resolved}). \textit{Watermark polling} hanya maju setelah setiap pesan tersimpan atau aman di DLQ. \textit{Replay} (\kode{POST /internal/dlq/replay}) memproses ulang pesan \textit{parked} dengan normalizer terbaru; hasilnya di-\textit{upsert} berdasarkan \kode{(source, source\_ref\_id)} dan urutan per \kode{source\_ref\_id} dipertahankan. Pemeriksaan DLQ hanya untuk BNPB Internal Ops (\kode{INTERNAL\_OPS\_TOKEN}) dan Audit API (\kode{/internal/audit/unprocessed}). Ingest dari sumber lain (\kode{hazard.ingest.*}) memakai DLQ yang sama untuk pesan rusak dan data yang ditolak sumbernya (\kode{op=reject}, lihat P5).
 
+\textbf{Pembaruan normalizer dan \textit{replay} (Theo).} Pesan yang di-\textit{park} karena skema baru hanya berguna bila bisa diproses setelah normalizer diperbarui. Pembaruan itu disediakan sebagai \textit{adapter} skema v2 yang dinyalakan lewat \kode{PVMBG\_SCHEMA\_V2\_ADAPTER=true} (bawaan \kode{false}), seperti saat versi normalizer baru di-\textit{deploy}. \textit{Adapter} memetakan \kode{volcano\_code} kembali ke \kode{volcano\_id}, mengurai \kode{ash\_column\_height\_m} yang berupa string menjadi angka (nilai yang bukan angka tetap ditolak), dan mengisi \kode{reported\_at} yang hilang dengan waktu Aggregator pertama kali menerima laporan tersebut, lalu menandainya dengan \kode{reported\_at\_source = "received\_at"} di \kode{attributes}. Saat \textit{replay}, waktu terima diambil dari kolom \kode{received\_at} baris DLQ, bukan waktu \textit{replay}. Alur lengkapnya: skema berubah $\rightarrow$ pesan v2 di-\textit{park} $\rightarrow$ \textit{adapter} dinyalakan (\textit{rolling update}) $\rightarrow$ \kode{POST /internal/dlq/replay} $\rightarrow$ pesan berstatus \kode{resolved} dan tersimpan sekali di \kode{canonical\_events}.
+
 \textbf{Laporan Tim Lapangan (Fayadh).}
 \begin{enumerate}
 \item \kode{POST /field-reports}: \textit{scope} \kode{field\_team}/\kode{internal\_ops} (Media 403), body $\le$ 64 KB, JSON ketat, field wajib, \kode{Idempotency-Key} (atau \kode{report\_id}) wajib.
@@ -39,8 +40,8 @@ DLQ adalah tabel \kode{dead\_letters} yang menyimpan pesan mentah \textit{byte} 
 
 \subsubsection{Alasan Keputusan}
 \begin{itemize}
-\item \textbf{DLQ di tabel basis data vs stream terpisah:} \tinjau{oleh Theo}
-\item \textbf{Menolak perubahan tidak kompatibel vs menebak isinya:} menebak pemetaan (misalnya \kode{volcano\_code} dianggap \kode{volcano\_id}) berisiko menyimpan data salah tanpa jejak; menyimpan utuh dan memproses ulang setelah normalizer diperbarui menjaga kebenaran data. \tinjau{oleh Theo}
+\item \textbf{DLQ di tabel basis data vs stream terpisah:} pesan PVMBG berasal dari \textit{polling} HTTP, bukan dari broker, sehingga tidak ada \textit{stream} asal yang bisa di-\textit{nack}. Tabel di \textit{canonical store} dapat di-\textit{query} langsung (alasan, status, jumlah percobaan, \kode{received\_at}), dibaca Audit API (\kode{/internal/audit/unprocessed}), diperbarui status per baris saat \textit{retry} dan \textit{replay}, dan diurutkan per \kode{source\_ref\_id}. \textit{Stream} JetStream terpisah akan memerlukan konsumen tambahan untuk inspeksi dan tidak mendukung perubahan status per pesan. Konsekuensinya, DLQ ikut ketersediaan \textit{canonical store}; bila penulisan DLQ gagal, \textit{watermark} tidak maju sehingga pesan diambil ulang, bukan hilang.
+\item \textbf{Menolak perubahan tidak kompatibel vs menebak isinya:} menebak pemetaan (misalnya \kode{volcano\_code} dianggap \kode{volcano\_id}) berisiko menyimpan data salah tanpa jejak; menyimpan utuh dan memproses ulang setelah normalizer diperbarui menjaga kebenaran data. Pemetaan v2 hanya dilakukan setelah keputusan eksplisit (\textit{adapter} dinyalakan), dan pengganti yang bukan data asli (\kode{reported\_at}) ditandai.
 \item \textbf{202 setelah PubAck vs menulis langsung ke basis data:} menulis ke basis data dari client-api melanggar kepemilikan storage dan membuat latensi bergantung pada basis data; balasan 202 sebelum publish berisiko kehilangan laporan bila client-api mati.
 \item \textbf{Dedup di setiap hop vs \textit{exactly-once} broker saja:} efek samping di penerima tetap memerlukan dedup; kombinasi \textit{at-least-once} + dedup lebih sederhana dan terbukti.
 \end{itemize}
@@ -48,7 +49,10 @@ DLQ adalah tabel \kode{dead\_letters} yang menyimpan pesan mentah \textit{byte} 
 \subsubsection{Batasan yang Disadari}
 \begin{itemize}
 \item NATS berjalan satu instance (R1): bila node \textit{control plane} mati total, jalur tulis laporan berhenti (client menerima 503, tidak pernah 202 palsu). JetStream melakukan \textit{fsync} secara berkala, sehingga kehilangan daya mendadak pada node broker masih menyisakan risiko kecil; \textit{crash} proses dan \textit{pod} aman.
-\item \isi{batasan DLQ/replay menurut Theo}
+\item \textit{Replay} dipicu manual oleh Internal Ops dan memproses maksimal 1.000 baris per panggilan; pesan dengan \kode{source\_ref\_id} yang sama menunggu bila pesan sebelumnya masih gagal, sehingga satu pesan yang terus gagal menahan pesan berikutnya untuk kunci itu sampai normalizer diperbaiki.
+\item DLQ tersimpan di \textit{canonical store}; selama \textit{store} tidak tersedia, polling PVMBG tertahan (\textit{watermark} tidak maju) walaupun tidak ada pesan yang hilang.
+\item \textit{Adapter} v2 mengganti \kode{reported\_at} yang hilang dengan waktu terima. Untuk laporan yang lama tertahan di sumber, waktu kejadian menjadi lebih lambat dari kenyataan; penandaan \kode{reported\_at\_source} membuat hal ini dapat diketahui klien.
+\item Event satelit yang rusak tersimpan di \kode{satellite\_dead\_letters} milik \kode{satellite-store}, terpisah dari tabel \kode{dead\_letters}, sehingga belum muncul di \kode{/internal/audit/unprocessed}.
 \end{itemize}
 
 \subsubsection{Bukti Penyelesaian}
@@ -56,18 +60,19 @@ DLQ adalah tabel \kode{dead\_letters} yang menyimpan pesan mentah \textit{byte} 
 \begin{longtable}{|p{4.2cm}|p{10.7cm}|}
 \hline
 \textbf{Kriteria} & \textbf{Bukti}\\ \hline \endhead
-1. Deklarasi kebijakan & Tabel kebijakan di atas; \isi{tangkapan layar perilaku pada mock PVMBG mode \kode{incompatible}}\\ \hline
-2. Pesan tersimpan, \textit{retrying} vs \textit{parked} & \isi{query \kode{dead\_letters} / \kode{GET /internal/dlq?status=parked}}\\ \hline
-3. Pesan rusak & \isi{\kode{go test ./internal/schema/ ./internal/dlq/ ./internal/poller/} dan \kode{kubectl get pods} (0 \textit{restart})}\\ \hline
-4. \textit{Replay} & \isi{hasil \kode{/internal/dlq/replay}: \kode{resolved}, 0 duplikat, urutan per \kode{source\_ref\_id}}\\ \hline
-5. Hanya Internal Ops & \isi{401 tanpa token / token salah, 200 dengan token Internal Ops}\\ \hline
+\multicolumn{2}{|p{14.9cm}|}{Bukti kriteria 1--5 dikumpulkan oleh \kode{scripts/demo/m2/p3/p3.sh} ke \kode{evidence/p3/<run>/}; angka di bawah diambil dari \kode{summary.txt}.}\\ \hline
+1. Deklarasi kebijakan & Tabel kebijakan di atas. Mock PVMBG mode \kode{incompatible} (\kode{pvmbg-v2-sample.json}): \isi{jumlah laporan v2 yang di-\textit{park}, baris 1--2 \kode{summary.txt}}\\ \hline
+2. Pesan tersimpan, \textit{retrying} vs \textit{parked} & \kode{dead-letters-by-reason.txt} dan \kode{dlq-parked.json}: \isi{alasan dan status, misalnya \kode{missing\_required:volcano\_id}, \kode{parked}}. Pembedaan \textit{retrying}/\textit{parked} diuji di \kode{internal/dlq} (\textit{backoff} 5 s $\rightarrow$ 10 menit, \textit{parked} setelah 5 percobaan).\\ \hline
+3. Pesan rusak & Uji \kode{internal/schema}, \kode{internal/dlq}, \kode{internal/poller}: JSON terpotong, UTF-8 tidak valid, body $>$ 1 MiB, \textit{nesting} $>$ 32, \textit{panic} di tengah pesan, semuanya di-\textit{park} tanpa \textit{crash}. \isi{jumlah uji lulus dan \textit{restart count} Aggregator sebelum/sesudah, baris 3 \kode{summary.txt}}\\ \hline
+4. \textit{Replay} & \textit{Adapter} v2 dinyalakan, lalu \kode{POST /internal/dlq/replay}: \isi{hasil \textit{replay} (\kode{resolved}/\kode{parked}) dan jumlah grup duplikat \kode{(source, source\_ref\_id)} di \kode{canonical\_events} (harus 0), baris 4 \kode{summary.txt}}. Urutan per kunci diuji di \kode{internal/dlq} (\kode{TestReplayKeepsPerKeyOrder}).\\ \hline
+5. Hanya Internal Ops & \kode{access.txt}: \isi{kode HTTP tanpa token, token salah, dan token Internal Ops, baris 5 \kode{summary.txt}}\\ \hline
 6. Laporan Tim Lapangan & Klaster pengembangan (\kode{scripts/demo/m2/field-reports/field-reports.sh}, N=150): consumer dimatikan $\rightarrow$ 20/20 dibalas 202 (p95 20 ms); client-api dan consumer di-SIGKILL di tengah pengiriman $\rightarrow$ 170 dibalas 202, 170 sampai di penerima, 0 hilang, 0 diproses ganda, 150/150 pengiriman ulang dijawab \kode{duplicate: true}; broker mati $\rightarrow$ 503 dalam 8 ms. Klaster demo: \isi{hasil N=200 dari \kode{evidence/field-reports/<run>/}}\\ \hline
 \end{longtable}
 
 \subsubsection{Jawaban atas Butir ``Di Laporan''}
 \begin{enumerate}
 \item \textbf{Persoalan:} kriteria 2 \textit{dead letter channel} dan pembedaan \textit{retryable/non-retryable}; kriteria 3 \textit{poison message}; kriteria 4 \textit{idempotent replay} dengan \textit{per-key ordering}; kriteria 6 \textit{guaranteed delivery} dengan \textit{idempotent receiver}.
-\item \textbf{Kebijakan skema:} perubahan aditif dan field opsional yang hilang diterima otomatis; \textit{rename}, perubahan tipe, field wajib hilang, dan pesan rusak ditolak ke DLQ. \tinjau{oleh Theo: alasan pemilihan}
+\item \textbf{Kebijakan skema:} perubahan aditif dan field opsional yang hilang diterima otomatis; \textit{rename}, perubahan tipe, field wajib hilang, dan pesan rusak ditolak ke DLQ. Alasannya: perubahan aditif bersifat \textit{backward compatible} dan aman diterima dengan pola \textit{tolerant reader} (field baru disimpan di \kode{attributes} seperti M1). Perubahan yang mengubah arti atau tipe data tidak bisa ditafsirkan dengan aman oleh mesin; menerimanya berarti menebak, dan tebakan yang salah merusak data tanpa jejak. Pesan tersebut disimpan utuh agar tidak ada yang hilang, dan diproses ulang setelah manusia memutuskan pemetaannya (\textit{adapter} v2).
 \item \textbf{Penyimpanan, pemeriksaan, pemrosesan ulang:} tabel \kode{dead\_letters}; diperiksa lewat \kode{/internal/dlq} (Internal Ops) dan \kode{/internal/audit/unprocessed}; \textit{replay} melalui normalizer terbaru dengan \textit{upsert} \kode{(source, source\_ref\_id)} sehingga tidak ada duplikat.
 \item \textbf{Jaminan pengiriman laporan Tim Lapangan:} \textit{at-least-once} dari JetStream + dedup \textit{message ID} di setiap hop (\textit{duplicate window} JetStream, bbolt di consumer, penerima idempoten) = setiap laporan yang dibalas 202 diproses tepat sekali secara efektif. Bukti: baris kriteria 6 pada tabel di atas.
 \end{enumerate}

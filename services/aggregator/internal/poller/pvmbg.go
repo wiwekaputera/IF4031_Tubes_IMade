@@ -80,7 +80,7 @@ func (p *Poller) pollPVMBG(ctx context.Context, corrID string, since time.Time, 
 			recs := make([]store.UpsertRequest, 0, len(items))
 			var toPark []pendingDLQ
 			for _, raw := range items {
-				rec, ts, err := p.classifyPVMBG(corrID, raw)
+				rec, ts, err := p.classifyPVMBG(corrID, raw, time.Now())
 				if err != nil {
 					reason := err.Error()
 					var pe *dlq.PermanentError
@@ -268,7 +268,9 @@ func (p *Poller) PVMBGRetryHandler() dlq.Handler {
 }
 
 // classifyPVMBG validates and normalizes one PVMBG message with panic recovery.
-func (p *Poller) classifyPVMBG(corrID string, raw []byte) (rec store.UpsertRequest, ts time.Time, err error) {
+// receivedAt is when the aggregator first got the message; the schema v2
+// adapter uses it when the report carries no reported_at.
+func (p *Poller) classifyPVMBG(corrID string, raw []byte, receivedAt time.Time) (rec store.UpsertRequest, ts time.Time, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			rec = store.UpsertRequest{}
@@ -277,6 +279,11 @@ func (p *Poller) classifyPVMBG(corrID string, raw []byte) (rec store.UpsertReque
 		}
 	}()
 
+	if p.cfg != nil && p.cfg.PVMBGSchemaV2Adapter {
+		if adapted, ok := schema.AdaptVolcanicV2(raw, receivedAt); ok {
+			raw = adapted
+		}
+	}
 	report, rej := schema.ClassifyVolcanicReport(raw)
 	if rej != nil {
 		_, reportedAt := schema.Peek(raw)
@@ -305,7 +312,7 @@ func (p *Poller) processPVMBG(ctx context.Context, corrID string, raw []byte) (t
 		}
 	}()
 
-	rec, ts, err := p.classifyPVMBG(corrID, raw)
+	rec, ts, err := p.classifyPVMBG(corrID, raw, dlq.ReceivedAt(ctx, time.Now()))
 	if err != nil {
 		return ts, err
 	}

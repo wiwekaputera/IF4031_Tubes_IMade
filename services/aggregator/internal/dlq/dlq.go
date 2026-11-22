@@ -83,7 +83,7 @@ func RunRetries(ctx context.Context, s Store, h Handler, now time.Time, limit in
 	}
 	for _, row := range rows {
 		attempts := row.Attempts + 1
-		herr := h(ctx, row.Raw)
+		herr := h(WithReceivedAt(ctx, row.ReceivedAt), row.Raw)
 		switch {
 		case herr == nil:
 			if err := s.MarkResolved(ctx, row.ID); err != nil {
@@ -121,7 +121,7 @@ func Replay(ctx context.Context, s Store, h Handler, limit int) (Result, error) 
 			res.Parked++
 			continue
 		}
-		if herr := h(ctx, row.Raw); herr != nil {
+		if herr := h(WithReceivedAt(ctx, row.ReceivedAt), row.Raw); herr != nil {
 			blocked[key] = true
 			if err := s.MarkParked(ctx, row.ID, row.Attempts+1, herr.Error()); err != nil {
 				return res, err
@@ -135,4 +135,24 @@ func Replay(ctx context.Context, s Store, h Handler, limit int) (Result, error) 
 		res.Resolved++
 	}
 	return res, nil
+}
+
+type receivedAtKey struct{}
+
+// WithReceivedAt returns ctx carrying the time a dead-lettered message was
+// first received. Retry and replay set it so a handler can tell when the
+// message actually arrived, not when it is being reprocessed.
+func WithReceivedAt(ctx context.Context, t time.Time) context.Context {
+	if t.IsZero() {
+		return ctx
+	}
+	return context.WithValue(ctx, receivedAtKey{}, t)
+}
+
+// ReceivedAt returns the time set by WithReceivedAt, or fallback.
+func ReceivedAt(ctx context.Context, fallback time.Time) time.Time {
+	if t, ok := ctx.Value(receivedAtKey{}).(time.Time); ok {
+		return t
+	}
+	return fallback
 }
