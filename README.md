@@ -116,10 +116,10 @@ Every component runs on k3s in the namespace `sistem-informasi-kebencanaan-bnpb`
 
 | Node | Kubernetes role | Type | Physical host | Host CPU / RAM | Node vCPU / RAM | OS / kernel |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `node-a` | control plane + worker | VM (_hypervisor_) | _host laptop_ | _CPU_ / _RAM_ | _n_ vCPU / _n_ GB | Ubuntu Server 24.04 / _kernel_ |
-| `node-b` | worker | VM (_hypervisor_) | _host laptop_ | _CPU_ / _RAM_ | _n_ vCPU / _n_ GB | Ubuntu Server 24.04 / _kernel_ |
+| `node-a` (`192.168.56.10`) | control plane + worker | VM (VirtualBox 7.2.2) | ASUS TUF Gaming A15 FA506IHRB, Windows 11 | AMD Ryzen 5 4600H (6 cores / 12 threads) / 15.4 GB | 4 vCPU / 6 GB, 40 GB disk | Ubuntu Server 24.04.5 LTS / 6.8.0-151-generic |
+| `node-b` (`192.168.56.11`) | worker | VM (VirtualBox 7.2.2) | same laptop | same | 4 vCPU / 4 GB, 40 GB disk | Ubuntu Server 24.04.5 LTS / 6.8.0-151-generic |
 
-Fill in the italic values from the demo cluster (`kubectl get nodes -o wide`, `lscpu`, `free -h`). Node-kill scenarios only target `node-b`.
+Both VMs run on one physical host but each has its own kernel; k3s `v1.37.2+k3s1`. They talk over a VirtualBox host-only network (`192.168.56.0/24`, flannel on that interface) and reach the internet through NAT. The host also runs the load generator (k6). Node-kill scenarios only target `node-b`.
 
 ### 1. Create the cluster (k3s, two nodes with separate kernels)
 
