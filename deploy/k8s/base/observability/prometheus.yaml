@@ -140,11 +140,14 @@ spec:
             limits:
               memory: 256Mi
           readinessProbe:
+            timeoutSeconds: 3
             httpGet:
               path: /-/ready
               port: 9090
             periodSeconds: 5
           livenessProbe:
+            timeoutSeconds: 5
+            failureThreshold: 6
             httpGet:
               path: /-/healthy
               port: 9090

@@ -62,11 +62,14 @@ spec:
             limits:
               memory: 256Mi
           readinessProbe:
+            timeoutSeconds: 3
             httpGet:
               path: /health
               port: 8087
             periodSeconds: 5
           livenessProbe:
+            timeoutSeconds: 5
+            failureThreshold: 6
             httpGet:
               path: /health
               port: 8087
