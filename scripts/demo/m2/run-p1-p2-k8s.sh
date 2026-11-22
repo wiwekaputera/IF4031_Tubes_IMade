@@ -77,7 +77,34 @@ if [[ "${SKIP_P2:-0}" != "1" ]]; then
     bash "scripts/demo/m2/p2/${s}"
   done
 
+  # On a 2-node cluster (control-plane + 1 worker), 2 of 3 CockroachDB replicas live on
+  # the control-plane node. Skewing (>500ms) or pausing the control-plane VM would break
+  # Raft quorum, so ensure the active leader pod is on a worker node before c4/c5.
+  ensure_leader_on_worker() {
+    local node_count cp_node leader_pod leader_node
+    node_count="$(kubectl get nodes --no-headers | wc -l | tr -d ' ')"
+    [[ "$node_count" -ne 2 ]] && return 0
+    cp_node="$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    [[ -z "$cp_node" ]] && return 0
+    for attempt in 1 2 3 4 5; do
+      leader_pod="$(kubectl -n "$NAMESPACE" exec canonical-store-0 -- /cockroach/cockroach sql --insecure --format=tsv \
+        --execute="SELECT holder FROM canonical.leader_leases WHERE name='ingest-poller' AND expires_at > now() LIMIT 1;" \
+        2>/dev/null | tail -n +2 | head -n 1 | tr -d '\r' || true)"
+      [[ -z "$leader_pod" ]] && { sleep 3; continue; }
+      leader_node="$(kubectl -n "$NAMESPACE" get pod "$leader_pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)"
+      if [[ -n "$leader_node" && "$leader_node" != "$cp_node" ]]; then
+        echo "  Leader ${leader_pod} is on worker node '${leader_node}' (safe for 2-node skew/freeze)."
+        return 0
+      fi
+      echo "  Leader ${leader_pod} is on control-plane '${cp_node}'; rotating pod (attempt ${attempt}/5) so a worker pod holds the lease..."
+      kubectl -n "$NAMESPACE" delete pod "$leader_pod" --wait=false >/dev/null 2>&1 || true
+      sleep 8
+    done
+    echo "WARN: leader is still on control-plane '${cp_node}'; proceed carefully on 2-node clusters." >&2
+  }
+
   step "P2: c4-clock-skew.sh"
+  ensure_leader_on_worker
   SSH_ARGS=()
   if [[ -n "${K3S_NODES:-}" ]]; then
     # Query active leader pod (holder == INSTANCE_ID == pod name in K8s) and match its node IP against K3S_NODES.
@@ -103,6 +130,7 @@ if [[ "${SKIP_P2:-0}" != "1" ]]; then
   fi
 
   step "P2: c5-freeze.sh"
+  ensure_leader_on_worker
   bash scripts/demo/m2/p2/c5-freeze.sh
 fi
 

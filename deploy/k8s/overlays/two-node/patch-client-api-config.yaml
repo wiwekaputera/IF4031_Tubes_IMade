@@ -1,0 +1,8 @@
+# Tune client-api MAX_INFLIGHT for the 2-VM host so excess load is shed cleanly
+# with controlled 503 + Retry-After before CockroachDB times out.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: client-api-config
+data:
+  MAX_INFLIGHT: "32"

@@ -171,3 +171,71 @@ func TestUpsertFencedBatch_ValidAndStaleToken(t *testing.T) {
 		t.Errorf("expected watermark unchanged at %v, got %v", wm1, gotWM)
 	}
 }
+
+func TestUpsertFencedBatch_ChunkedMultiRowAndIdempotency(t *testing.T) {
+	resetLeaseState(t)
+	ctx := context.Background()
+
+	if _, err := testPool.Exec(ctx, `TRUNCATE TABLE canonical_events, outbox`); err != nil {
+		t.Fatalf("failed to truncate tables: %v", err)
+	}
+
+	tok, ok, err := testRepo.AcquireOrRenewLease(ctx, DefaultLeaseName, "agg-chunk", 15*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("acquire failed: ok=%v err=%v", ok, err)
+	}
+	fence := Fence{LeaseName: DefaultLeaseName, Holder: "agg-chunk", Token: tok}
+
+	base := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	// Build 120 events (> 2 chunks of 50) plus a duplicate HazardID with updated severity in the same batch.
+	recs := make([]UpsertRequest, 0, 121)
+	for i := 0; i < 120; i++ {
+		ref := "eq-chunk-" + time.Duration(i).String()
+		recs = append(recs, UpsertRequest{
+			HazardID:    hazard.ID(hazard.SourceBMKG, ref),
+			Source:      string(hazard.SourceBMKG),
+			SourceRefID: ref,
+			HazardType:  hazard.HazardTypeSeismic,
+			Severity:    hazard.SeverityWaspada,
+			AreaName:    "Jawa Barat",
+			Latitude:    -6.9,
+			Longitude:   107.6,
+			OccurredAt:  base.Add(time.Duration(i) * time.Second),
+		})
+	}
+	updated0 := recs[0]
+	updated0.Severity = hazard.SeverityAwas
+	recs = append(recs, updated0)
+
+	wm := base.Add(120 * time.Second)
+	if err := testRepo.UpsertFencedBatch(ctx, fence, string(hazard.SourceBMKG), wm, recs); err != nil {
+		t.Fatalf("UpsertFencedBatch (pass 1) failed: %v", err)
+	}
+
+	var totalEvents, totalOutbox int
+	var ver0 int64
+	_ = testPool.QueryRow(ctx, `SELECT count(*) FROM canonical_events`).Scan(&totalEvents)
+	_ = testPool.QueryRow(ctx, `SELECT count(*) FROM outbox`).Scan(&totalOutbox)
+	_ = testPool.QueryRow(ctx, `SELECT version FROM canonical_events WHERE shard = $1 AND hazard_id = $2`, ShardForHazardID(recs[0].HazardID), recs[0].HazardID).Scan(&ver0)
+
+	if totalEvents != 120 {
+		t.Fatalf("expected 120 unique events, got %d", totalEvents)
+	}
+	if ver0 != 2 {
+		t.Fatalf("expected duplicated-then-updated event version 2, got %d", ver0)
+	}
+	if totalOutbox != 121 {
+		t.Fatalf("expected 121 outbox rows (120 inserts + 1 update), got %d", totalOutbox)
+	}
+
+	// Re-running the unchanged 120-row batch (with updated0's current state) must be a complete no-op on version & outbox.
+	recs[0] = updated0
+	if err := testRepo.UpsertFencedBatch(ctx, fence, string(hazard.SourceBMKG), wm, recs[:120]); err != nil {
+		t.Fatalf("UpsertFencedBatch (re-poll) failed: %v", err)
+	}
+	var outboxAfter int
+	_ = testPool.QueryRow(ctx, `SELECT count(*) FROM outbox`).Scan(&outboxAfter)
+	if outboxAfter != totalOutbox {
+		t.Fatalf("expected unchanged re-poll to add 0 outbox rows, got %d -> %d", totalOutbox, outboxAfter)
+	}
+}

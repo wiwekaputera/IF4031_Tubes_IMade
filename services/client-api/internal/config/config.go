@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Port              string
 	AggregatorBaseURL string
+	AggregatorTimeout time.Duration
 	JWKSURL           string
 	RPSLimit          float64
 	Burst             int
@@ -42,6 +43,15 @@ func Load() (*Config, error) {
 	aggregatorBaseURL := os.Getenv("AGGREGATOR_BASE_URL")
 	if aggregatorBaseURL == "" {
 		aggregatorBaseURL = "http://aggregator:8090"
+	}
+
+	aggregatorTimeout := 3 * time.Second
+	if v := os.Getenv("AGGREGATOR_TIMEOUT_MS"); v != "" {
+		ms, err := strconv.Atoi(v)
+		if err != nil || ms <= 0 {
+			return nil, fmt.Errorf("invalid AGGREGATOR_TIMEOUT_MS %q: must be positive integer", v)
+		}
+		aggregatorTimeout = time.Duration(ms) * time.Millisecond
 	}
 
 	jwksURL := os.Getenv("JWKS_URL")
@@ -116,6 +126,7 @@ func Load() (*Config, error) {
 	return &Config{
 		Port:              port,
 		AggregatorBaseURL: aggregatorBaseURL,
+		AggregatorTimeout: aggregatorTimeout,
 		JWKSURL:           jwksURL,
 		RPSLimit:          rpsLimit,
 		Burst:             burst,

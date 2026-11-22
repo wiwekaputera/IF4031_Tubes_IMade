@@ -67,8 +67,8 @@ func NewClient(opts Options) *AggregatorClient {
 				Timeout:   1 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 50,
+			MaxIdleConns:        512,
+			MaxIdleConnsPerHost: 256,
 			IdleConnTimeout:     90 * time.Second,
 		}
 		httpClient = &http.Client{
@@ -104,7 +104,29 @@ func (c *AggregatorClient) GetEvents(ctx context.Context, rawQuery, correlationI
 	}
 
 	start := time.Now()
-	resp, err := c.httpClient.Do(req)
+	var resp *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			req, err = http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create upstream request: %w", err)
+			}
+			req.Header.Set("Accept", "application/json")
+			if correlationID != "" {
+				req.Header.Set("X-Correlation-ID", correlationID)
+			}
+		}
+		resp, err = c.httpClient.Do(req)
+		if err == nil {
+			break
+		}
+		// Retry once on transient transport errors (e.g. EOF/reset during a rolling
+		// update of an aggregator pod) for this idempotent GET, unless timed out/canceled.
+		var netErr net.Error
+		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+			break
+		}
+	}
 	latencyMs := time.Since(start).Milliseconds()
 
 	if err != nil {

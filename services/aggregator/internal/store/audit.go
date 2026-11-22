@@ -637,15 +637,26 @@ func listUnprocessedWithQuerier(
 	}, nil
 }
 
-// RecordUnprocessed inserts a non-retryable parked message into dead_letters.
+// RecordUnprocessed inserts a non-retryable parked message into dead_letters,
+// skipping exact duplicates that are already active (parked/retrying).
 func (r *PostgresRepo) RecordUnprocessed(ctx context.Context, source, sourceRefID string, raw []byte, reason string) error {
 	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
 	defer cancel()
 
-	_, err := r.db.Exec(ctx, `
-		INSERT INTO dead_letters
-			(source, source_ref_id, raw_payload, reason, retryable, attempts, status, last_error)
-		VALUES ($1, NULLIF($2, ''), $3, $4, false, 0, 'parked', $4)
-	`, source, sourceRefID, raw, reason)
-	return err
+	return withRetry40001(ctx, func() error {
+		_, err := r.db.Exec(ctx, `
+			INSERT INTO dead_letters
+				(source, source_ref_id, raw_payload, reason, retryable, attempts, status, last_error)
+			SELECT $1::STRING, NULLIF($2::STRING, ''), $3::BYTES, $4::TEXT, false, 0, 'parked', $4::TEXT
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM dead_letters
+				WHERE source = $1::STRING
+				  AND status IN ('retrying', 'parked')
+				  AND source_ref_id IS NOT DISTINCT FROM NULLIF($2::STRING, '')
+				  AND raw_payload = $3::BYTES
+			)
+		`, source, sourceRefID, raw, reason)
+		return err
+	})
 }

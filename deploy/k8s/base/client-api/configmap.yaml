@@ -8,6 +8,7 @@ data:
   PORT: "8080"
   METRICS_ADDR: ":9090"
   AGGREGATOR_BASE_URL: "http://aggregator:8090"
+  AGGREGATOR_TIMEOUT_MS: "3000"
   JWKS_URL: "http://token-service:8083/.well-known/jwks.json"
   TOKEN_ISSUER: "bnpb-token-service"
   TOKEN_AUDIENCE: "bnpb-client-api"

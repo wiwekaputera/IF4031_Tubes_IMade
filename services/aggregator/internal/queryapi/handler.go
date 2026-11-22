@@ -24,6 +24,8 @@ type Handler struct {
 	sourceHealthFunc SourceHealthFunc
 	instanceID       string
 	ready            atomic.Bool
+	wasReady         atomic.Bool
+	draining         atomic.Bool
 }
 
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -64,7 +66,16 @@ func (h *Handler) WithInstanceID(id string) *Handler {
 }
 
 // SetReady toggles readiness for /internal/ready (200 when true, 503 when false).
+// Transitioning from ready -> not-ready marks the handler as draining so HTTP
+// responses advertise Connection: close and clients drop keep-alive sockets
+// cleanly before shutdown during rolling updates.
 func (h *Handler) SetReady(ready bool) {
+	if ready {
+		h.wasReady.Store(true)
+		h.draining.Store(false)
+	} else if h.wasReady.Load() {
+		h.draining.Store(true)
+	}
 	h.ready.Store(ready)
 }
 
@@ -232,6 +243,12 @@ func Routes(h *Handler, auditHandlers ...*auditapi.Handler) http.Handler {
 	}
 
 	var handler http.Handler = mux
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.draining.Load() {
+			w.Header().Set("Connection", "close")
+		}
+		mux.ServeHTTP(w, r)
+	})
 	handler = LoggingMiddleware(h.logger, handler)
 	handler = CorrelationIDMiddleware(handler)
 	return handler

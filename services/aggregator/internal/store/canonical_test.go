@@ -348,3 +348,165 @@ func TestGetLatestEventTime(t *testing.T) {
 	}
 }
 
+func TestInsertDeadLetter_DeduplicatesActiveRows(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if _, err := testPool.Exec(ctx, "TRUNCATE TABLE dead_letters"); err != nil {
+		t.Fatalf("truncate dead_letters: %v", err)
+	}
+
+	raw1 := []byte(`{"report_id":"R-V2-1","volcano_code":"GNG-001","alert_level":"SIAGA"}`)
+	dl := DeadLetter{
+		Source:      "PVMBG",
+		SourceRefID: "R-V2-1",
+		Raw:         raw1,
+		Reason:      "missing_required:volcano_id",
+		Retryable:   false,
+	}
+
+	// Re-inserting the exact same active parked payload (e.g. re-polling without reported_at) must not create duplicates.
+	for i := 0; i < 5; i++ {
+		if err := testRepo.InsertDeadLetter(ctx, dl); err != nil {
+			t.Fatalf("InsertDeadLetter attempt %d failed: %v", i, err)
+		}
+	}
+	var count int
+	if err := testPool.QueryRow(ctx, "SELECT count(*) FROM dead_letters WHERE source='PVMBG'").Scan(&count); err != nil {
+		t.Fatalf("count dead_letters: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 deduplicated parked row, got %d", count)
+	}
+
+	// A different payload for the same source_ref_id must still be stored (preserving replay order).
+	dl2 := dl
+	dl2.Raw = []byte(`{"report_id":"R-V2-1","volcano_code":"GNG-001","alert_level":"AWAS"}`)
+	if err := testRepo.InsertDeadLetter(ctx, dl2); err != nil {
+		t.Fatalf("InsertDeadLetter distinct payload failed: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, "SELECT count(*) FROM dead_letters WHERE source='PVMBG'").Scan(&count); err != nil {
+		t.Fatalf("count dead_letters: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 distinct parked rows, got %d", count)
+	}
+
+	// RecordUnprocessed also deduplicates active parked rows.
+	for i := 0; i < 3; i++ {
+		if err := testRepo.RecordUnprocessed(ctx, "SENSOR_PANTAI", "obs-1", []byte(`{"bad":1}`), "quality_not_ok"); err != nil {
+			t.Fatalf("RecordUnprocessed attempt %d failed: %v", i, err)
+		}
+	}
+	if err := testPool.QueryRow(ctx, "SELECT count(*) FROM dead_letters WHERE source='SENSOR_PANTAI'").Scan(&count); err != nil {
+		t.Fatalf("count sensor dead_letters: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 deduplicated SENSOR_PANTAI row, got %d", count)
+	}
+
+	// CountDeadLetters and OutboxBacklog succeed cleanly.
+	counts, err := testRepo.CountDeadLetters(ctx)
+	if err != nil {
+		t.Fatalf("CountDeadLetters failed: %v", err)
+	}
+	if counts == nil {
+		t.Fatal("expected non-nil dead-letter count map")
+	}
+}
+
+func TestMarkOutboxPublishedBatch(t *testing.T) {
+	truncateTables(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	for i := 0; i < 5; i++ {
+		hid := uuid.NewString()
+		if _, err := testRepo.UpsertEvent(ctx, UpsertRequest{
+			HazardID:    hid,
+			Source:      "BMKG",
+			SourceRefID: fmt.Sprintf("ob-batch-%d", i),
+			HazardType:  hazard.HazardTypeSeismic,
+			Severity:    hazard.SeverityWaspada,
+			AreaName:    "Bali",
+			OccurredAt:  time.Date(2026, 1, 1, 0, i, 0, 0, time.UTC),
+		}); err != nil {
+			t.Fatalf("UpsertEvent %d: %v", i, err)
+		}
+	}
+
+	rows, err := testRepo.GetUnpublishedOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetUnpublishedOutbox: %v", err)
+	}
+	if len(rows) != 5 {
+		t.Fatalf("expected 5 unpublished outbox rows, got %d", len(rows))
+	}
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
+	}
+	if err := testRepo.MarkOutboxPublishedBatch(ctx, ids); err != nil {
+		t.Fatalf("MarkOutboxPublishedBatch: %v", err)
+	}
+	remaining, err := testRepo.GetUnpublishedOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetUnpublishedOutbox after batch: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected 0 remaining outbox rows, got %d", len(remaining))
+	}
+	if _, err := testRepo.OutboxBacklog(ctx); err != nil {
+		t.Fatalf("OutboxBacklog: %v", err)
+	}
+}
+
+func TestCoveringIndexes_NoIndexJoinOnHotQueries(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	explain := func(sql string) string {
+		rows, err := testPool.Query(ctx, "EXPLAIN "+sql)
+		if err != nil {
+			t.Fatalf("EXPLAIN failed for %q: %v", sql, err)
+		}
+		defer rows.Close()
+		var lines []string
+		for rows.Next() {
+			var line string
+			if err := rows.Scan(&line); err != nil {
+				t.Fatalf("scan explain: %v", err)
+			}
+			lines = append(lines, line)
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	eventsPlan := explain(`
+		SELECT hazard_id, source, source_ref_id, hazard_type, severity, area_name,
+			latitude, longitude, occurred_at, ingested_at, attributes
+		FROM canonical_events
+		WHERE shard = 0 AND deleted_at IS NULL
+		ORDER BY occurred_at DESC, hazard_id DESC
+		LIMIT 20
+	`)
+	if !strings.Contains(eventsPlan, "idx_canonical_events_shard_occurred") {
+		t.Fatalf("expected ListEvents to use idx_canonical_events_shard_occurred, got:\n%s", eventsPlan)
+	}
+	if strings.Contains(strings.ToLower(eventsPlan), "index join") {
+		t.Fatalf("expected covering index scan without index join for ListEvents, got:\n%s", eventsPlan)
+	}
+
+	checksumPlan := explain(`
+		SELECT source_ref_id
+		FROM canonical_events
+		WHERE shard = 0 AND source = 'BMKG' AND deleted_at IS NULL
+	`)
+	if !strings.Contains(checksumPlan, "idx_canonical_events_shard_source_ref") {
+		t.Fatalf("expected ComputeChecksum to use idx_canonical_events_shard_source_ref, got:\n%s", checksumPlan)
+	}
+	if strings.Contains(strings.ToLower(checksumPlan), "index join") {
+		t.Fatalf("expected covering index scan without index join for ComputeChecksum, got:\n%s", checksumPlan)
+	}
+}
+

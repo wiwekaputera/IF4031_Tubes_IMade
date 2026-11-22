@@ -324,6 +324,13 @@ func (p *Poller) processPVMBG(ctx context.Context, corrID string, raw []byte) (t
 
 // RunDLQWorker retries transient dead-letter rows every interval until ctx is cancelled.
 func RunDLQWorker(ctx context.Context, wg *sync.WaitGroup, s dlq.Store, h dlq.Handler, interval time.Duration, logger zerolog.Logger) {
+	RunDLQWorkerWithLeader(ctx, wg, s, h, interval, nil, logger)
+}
+
+// RunDLQWorkerWithLeader retries transient dead-letter rows only while isLeader
+// returns true (or unconditionally when isLeader is nil), avoiding multi-replica
+// contention on the shared dead_letters table.
+func RunDLQWorkerWithLeader(ctx context.Context, wg *sync.WaitGroup, s dlq.Store, h dlq.Handler, interval time.Duration, isLeader func() bool, logger zerolog.Logger) {
 	defer wg.Done()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -333,6 +340,9 @@ func RunDLQWorker(ctx context.Context, wg *sync.WaitGroup, s dlq.Store, h dlq.Ha
 			logger.Info().Msg("dlq worker stopped")
 			return
 		case now := <-ticker.C:
+			if isLeader != nil && !isLeader() {
+				continue
+			}
 			res, err := dlq.RunRetries(ctx, s, h, now.UTC(), 100)
 			if err != nil {
 				logger.Error().Err(err).Msg("dlq retry pass failed")

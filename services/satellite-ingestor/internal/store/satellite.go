@@ -236,6 +236,17 @@ func (s *Satellite) Commit(ctx context.Context, c ingest.Commit) error {
 	}
 	defer tx.Rollback(ctx) // no-op once committed
 
+	// Do not wait for the WAL flush on commit. Waiting for the disk on every
+	// feed event limits the ingestor to a few dozen events per second. If
+	// Postgres itself crashes, the last few hundred milliseconds of commits
+	// can be lost, but always whole transactions: the offset, the fire state
+	// and the outbox roll back together, the ingestor resumes from the older
+	// offset, and the replayed events produce the same messages with the same
+	// IDs, which JetStream and the aggregator's version guard drop.
+	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit = off`); err != nil {
+		return fmt.Errorf("set synchronous_commit: %w", err)
+	}
+
 	if dl := c.DeadLetter; dl != nil {
 		raw := dl.Raw
 		if raw == nil {

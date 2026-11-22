@@ -100,7 +100,7 @@ func main() {
 	// Upstream Aggregator client
 	aggClient := upstream.NewClient(upstream.Options{
 		BaseURL: cfg.AggregatorBaseURL,
-		Timeout: 2 * time.Second,
+		Timeout: cfg.AggregatorTimeout,
 		Logger:  logger,
 	})
 
