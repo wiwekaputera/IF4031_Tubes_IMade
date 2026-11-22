@@ -24,8 +24,10 @@ func (f *fakeStore) PendingOutbox(_ context.Context, limit int) ([]store.OutboxR
 	return out, nil
 }
 
-func (f *fakeStore) MarkPublished(_ context.Context, id int64) error {
-	f.published[id] = true
+func (f *fakeStore) MarkPublished(_ context.Context, ids ...int64) error {
+	for _, id := range ids {
+		f.published[id] = true
+	}
 	return nil
 }
 
@@ -84,5 +86,70 @@ func TestFailureStopsBatchAndRetriesSameRow(t *testing.T) {
 	}
 	if fmt.Sprint(p.sent) != "[hazard.ingest.SATELIT m1 hazard.ingest.SATELIT m2 hazard.ingest.SATELIT m3]" {
 		t.Fatalf("sent = %v", p.sent)
+	}
+}
+
+// fireRows builds outbox rows for the given fires, one row per entry, in order.
+func fireRows(fires ...string) []store.OutboxRow {
+	var out []store.OutboxRow
+	for i, f := range fires {
+		out = append(out, store.OutboxRow{
+			ID: int64(i + 1), MessageID: fmt.Sprintf("%s:%d", f, i+1),
+			Subject: "hazard.ingest.SATELIT", SourceRefID: f,
+		})
+	}
+	return out
+}
+
+func TestSendsOnlyNewestRowPerFire(t *testing.T) {
+	s := &fakeStore{rows: fireRows("a", "b", "a", "a", "b", "c"), published: map[int64]bool{}}
+	p := &fakePub{}
+	superseded := 0
+	r := &Relay{Store: s, Publisher: p, OnSuperseded: func(n int) { superseded += n }}
+
+	n, err := r.PublishPending(context.Background())
+	if err != nil || n != 6 {
+		t.Fatalf("n=%d err=%v, want all 6 rows cleared", n, err)
+	}
+	// The newest rows keep their original order: a:4 comes before b:5.
+	want := "[hazard.ingest.SATELIT a:4 hazard.ingest.SATELIT b:5 hazard.ingest.SATELIT c:6]"
+	if fmt.Sprint(p.sent) != want {
+		t.Fatalf("sent = %v, want %s", p.sent, want)
+	}
+	if len(s.published) != 6 || superseded != 3 {
+		t.Fatalf("marked %d rows, superseded %d; want 6 and 3", len(s.published), superseded)
+	}
+}
+
+func TestSupersededRowsStayPendingWhenNewestFails(t *testing.T) {
+	s := &fakeStore{rows: fireRows("a", "a", "b"), published: map[int64]bool{}}
+	p := &fakePub{failOn: "a:2"}
+	r := &Relay{Store: s, Publisher: p}
+
+	if _, err := r.PublishPending(context.Background()); err == nil {
+		t.Fatal("want an error from the failed publish")
+	}
+	if s.published[1] || s.published[2] || s.published[3] {
+		t.Fatalf("rows marked after a failed publish: %v", s.published)
+	}
+	if _, err := r.PublishPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(p.sent) != "[hazard.ingest.SATELIT a:2 hazard.ingest.SATELIT b:3]" {
+		t.Fatalf("sent = %v", p.sent)
+	}
+	if len(s.published) != 3 {
+		t.Fatalf("marked %d rows, want 3", len(s.published))
+	}
+}
+
+func TestRowsWithoutFireIDAreNeverMerged(t *testing.T) {
+	s := &fakeStore{rows: rows(3), published: map[int64]bool{}}
+	p := &fakePub{}
+	if _, err := (&Relay{Store: s, Publisher: p}).PublishPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.sent) != 3 {
+		t.Fatalf("sent %d messages, want 3", len(p.sent))
 	}
 }

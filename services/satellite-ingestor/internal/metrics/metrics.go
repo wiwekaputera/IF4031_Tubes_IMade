@@ -44,6 +44,11 @@ var (
 		Help: "Running totals kept in the database, so they survive restarts.",
 	}, []string{"kind"})
 
+	outboxSuperseded = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "satellite_outbox_superseded_total",
+		Help: "Outbox rows not sent because a newer row for the same fire was sent in their place.",
+	})
+
 	outboxBacklog = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "satellite_outbox_backlog",
 		Help: "Hazard messages committed but not yet acknowledged by JetStream.",
@@ -100,6 +105,9 @@ func SetLag(latestOffset, next int64, virtualNow, watermark time.Time) {
 		eventTimeLag.Set(virtualNow.Sub(watermark).Seconds())
 	}
 }
+
+// AddSuperseded counts outbox rows skipped in favour of a newer row.
+func AddSuperseded(n int) { outboxSuperseded.Add(float64(n)) }
 
 // SetBacklog records the outbox and dead-letter sizes.
 func SetBacklog(outbox, dead int64) {

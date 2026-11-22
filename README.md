@@ -232,6 +232,7 @@ client-api and token-service serve `/metrics` on an internal port (`9090`) that 
 | `satellite_feed_messages_total{type,outcome}` | Feed messages by outcome |
 | `satellite_durable_count{kind}` | Running totals kept in the database, so they survive restarts |
 | `satellite_outbox_backlog`, `satellite_dead_letters` | Waiting WILDFIRE messages, parked feed events |
+| `satellite_outbox_superseded_total` | Outbox rows not sent because a newer row for the same fire was sent instead |
 
 ### Checking it end to end
 

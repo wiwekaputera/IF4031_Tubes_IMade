@@ -2,6 +2,12 @@
 // published only after JetStream acknowledges it. If the process dies between
 // the acknowledgement and the mark, the row is sent again with the same
 // Nats-Msg-Id and JetStream drops the duplicate.
+//
+// When one fire has several unpublished rows in a batch, only the newest is
+// sent and the older ones are marked as superseded. The aggregator keeps only
+// the highest source_version per fire, so the older rows would be ignored
+// anyway; skipping them keeps a burst of updates to one fire from flooding
+// the aggregator.
 package relay
 
 import (
@@ -18,7 +24,7 @@ import (
 
 const (
 	defaultInterval = 500 * time.Millisecond
-	defaultBatch    = 100
+	defaultBatch    = 500
 	streamMaxAge    = 24 * time.Hour
 	duplicateWindow = 2 * time.Minute
 )
@@ -26,7 +32,7 @@ const (
 // Store is the part of the satellite store the relay needs.
 type Store interface {
 	PendingOutbox(ctx context.Context, limit int) ([]store.OutboxRow, error)
-	MarkPublished(ctx context.Context, id int64) error
+	MarkPublished(ctx context.Context, ids ...int64) error
 }
 
 // Publisher sends one message and returns after the broker acknowledges it.
@@ -86,6 +92,9 @@ type Relay struct {
 	Log       *slog.Logger
 	Interval  time.Duration
 	Batch     int
+	// OnSuperseded, when set, is told how many rows were skipped because a
+	// newer row for the same fire was published in their place.
+	OnSuperseded func(n int)
 }
 
 // Run publishes pending rows every Interval until ctx ends.
@@ -96,9 +105,16 @@ func (r *Relay) Run(ctx context.Context) {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	batch := r.batch()
 	for {
-		if _, err := r.PublishPending(ctx); err != nil && ctx.Err() == nil {
+		n, err := r.PublishPending(ctx)
+		if err != nil && ctx.Err() == nil {
 			r.logger().Warn("outbox publish failed, will retry", "err", err)
+		}
+		// A full batch means more rows are waiting: go again without waiting
+		// for the next tick, so a backlog drains at broker speed.
+		if err == nil && n >= batch && ctx.Err() == nil {
+			continue
 		}
 		select {
 		case <-ctx.Done():
@@ -108,27 +124,53 @@ func (r *Relay) Run(ctx context.Context) {
 	}
 }
 
-// PublishPending sends one batch and returns how many rows were published.
-// It stops at the first failure so a later message never overtakes an
-// earlier one for the same fire.
+// PublishPending sends one batch and returns how many rows it cleared, either
+// published or superseded by a newer row for the same fire. It stops at the
+// first failure so a later message never overtakes an earlier one for the
+// same fire.
 func (r *Relay) PublishPending(ctx context.Context) (int, error) {
-	batch := r.Batch
-	if batch <= 0 {
-		batch = defaultBatch
-	}
-	rows, err := r.Store.PendingOutbox(ctx, batch)
+	rows, err := r.Store.PendingOutbox(ctx, r.batch())
 	if err != nil {
 		return 0, err
 	}
+
+	// For each fire, find the newest row in this batch. Rows without a fire
+	// id are never merged.
+	newest := make(map[string]int, len(rows))
 	for i, row := range rows {
-		if err := r.Publisher.Publish(ctx, row.Subject, row.MessageID, row.Payload); err != nil {
-			return i, err
-		}
-		if err := r.Store.MarkPublished(ctx, row.ID); err != nil {
-			return i, err
+		if row.SourceRefID != "" {
+			newest[row.SourceRefID] = i
 		}
 	}
-	return len(rows), nil
+
+	cleared := 0
+	olderByFire := map[string][]int64{} // superseded rows waiting for their fire's newest row
+	for i, row := range rows {
+		if row.SourceRefID != "" && newest[row.SourceRefID] != i {
+			olderByFire[row.SourceRefID] = append(olderByFire[row.SourceRefID], row.ID)
+			continue
+		}
+		if err := r.Publisher.Publish(ctx, row.Subject, row.MessageID, row.Payload); err != nil {
+			return cleared, err
+		}
+		older := olderByFire[row.SourceRefID]
+		delete(olderByFire, row.SourceRefID)
+		if err := r.Store.MarkPublished(ctx, append(older, row.ID)...); err != nil {
+			return cleared, err
+		}
+		cleared += len(older) + 1
+		if len(older) > 0 && r.OnSuperseded != nil {
+			r.OnSuperseded(len(older))
+		}
+	}
+	return cleared, nil
+}
+
+func (r *Relay) batch() int {
+	if r.Batch > 0 {
+		return r.Batch
+	}
+	return defaultBatch
 }
 
 func (r *Relay) logger() *slog.Logger {

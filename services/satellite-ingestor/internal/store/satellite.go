@@ -169,16 +169,17 @@ func (s *Satellite) FiresContaining(ctx context.Context, keys []string) ([]fire.
 
 // OutboxRow is one hazard message waiting to be published.
 type OutboxRow struct {
-	ID        int64
-	MessageID string
-	Subject   string
-	Payload   []byte
+	ID          int64
+	MessageID   string
+	Subject     string
+	SourceRefID string // the fire this message is about; empty if unknown
+	Payload     []byte
 }
 
 // PendingOutbox returns unpublished messages in the order they were written.
 func (s *Satellite) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, message_id, subject, payload::text
+		SELECT id, message_id, subject, coalesce(payload->>'source_ref_id', ''), payload::text
 		FROM satellite_outbox
 		WHERE published_at IS NULL
 		ORDER BY id
@@ -194,7 +195,7 @@ func (s *Satellite) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, 
 			r       OutboxRow
 			payload string
 		)
-		if err := rows.Scan(&r.ID, &r.MessageID, &r.Subject, &payload); err != nil {
+		if err := rows.Scan(&r.ID, &r.MessageID, &r.Subject, &r.SourceRefID, &payload); err != nil {
 			return nil, fmt.Errorf("scan outbox: %w", err)
 		}
 		r.Payload = []byte(payload)
@@ -203,9 +204,13 @@ func (s *Satellite) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, 
 	return out, rows.Err()
 }
 
-// MarkPublished records that JetStream acknowledged the message.
-func (s *Satellite) MarkPublished(ctx context.Context, id int64) error {
-	_, err := s.pool.Exec(ctx, `UPDATE satellite_outbox SET published_at = now() WHERE id = $1`, id)
+// MarkPublished records that JetStream acknowledged the messages, or that
+// they were superseded by a newer message for the same fire.
+func (s *Satellite) MarkPublished(ctx context.Context, ids ...int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE satellite_outbox SET published_at = now() WHERE id = ANY($1)`, ids)
 	return err
 }
 

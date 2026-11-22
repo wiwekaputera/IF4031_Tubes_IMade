@@ -17,21 +17,21 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability"
+	"github.com/wiwekaputera/if4031-tubes-imade/observability/pgxtrace"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/feed"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/ingest"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/metrics"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/relay"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/internal/store"
-	"github.com/wiwekaputera/if4031-tubes-imade/observability"
-	"github.com/wiwekaputera/if4031-tubes-imade/observability/pgxtrace"
 	"github.com/wiwekaputera/if4031-tubes-imade/satellite-ingestor/migrations"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -155,7 +155,7 @@ func run(log *slog.Logger) error {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		(&relay.Relay{Store: s, Publisher: relay.NewJetStream(js), Log: log}).Run(ctx)
+		(&relay.Relay{Store: s, Publisher: relay.NewJetStream(js), Log: log, OnSuperseded: metrics.AddSuperseded}).Run(ctx)
 	}()
 	go func() {
 		defer wg.Done()

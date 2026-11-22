@@ -23,7 +23,8 @@ cd "$ROOT" || exit 1
 
 ENV_FILE="${ENV_FILE:-.env}"
 # shellcheck disable=SC1090
-if [[ -f "$ENV_FILE" ]]; then set -a; source "$ENV_FILE"; set +a; fi
+# Strip Windows line endings so a .env saved on Windows still loads.
+if [[ -f "$ENV_FILE" ]]; then set -a; source <(tr -d '\r' < "$ENV_FILE"); set +a; fi
 
 NS="${NAMESPACE:-sistem-informasi-kebencanaan-bnpb}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -46,6 +47,19 @@ summary() { echo "$*" | tee -a "$EVIDENCE_DIR/summary.txt"; }
 PF_PID=""
 cleanup() { [[ -n "$PF_PID" ]] && kill "$PF_PID" 2>/dev/null; }
 trap cleanup EXIT
+
+if [[ "$MODE" == "k8s" ]]; then
+  # Stop early when kubectl is not pointed at a cluster running the stack.
+  if ! kubectl get ns "$NS" >/dev/null 2>&1; then
+    echo "namespace $NS not found in kubectl context '$(kubectl config current-context 2>/dev/null)'." >&2
+    echo "Deploy the stack first (kubectl apply -k deploy/k8s/overlays/multi-node) or run with MODE=compose." >&2
+    exit 1
+  fi
+  if ! kubectl -n "$NS" get deploy aggregator >/dev/null 2>&1; then
+    echo "deployment aggregator not found in namespace $NS." >&2
+    exit 1
+  fi
+fi
 
 if [[ "$MODE" == "k8s" ]]; then
   NODE_IP="${NODE_IP:-$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')}"
