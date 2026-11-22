@@ -22,6 +22,8 @@
 # Variables: MEDIA_VUS (default 800), FIELD_VUS (20), RECOVERY_S (180)
 # Evidence: evidence/gameday/<run>/ (timeline, snapshots, k6 summary)
 set -uo pipefail
+# Git Bash on Windows would turn "/app" into a Windows path; keep it literal.
+export MSYS_NO_PATHCONV=1
 EVIDENCE_DIR="${EVIDENCE_DIR:-evidence/gameday/$(date -u +%Y%m%dT%H%M%SZ)}"
 source "$(dirname "${BASH_SOURCE[0]}")/../load/_lib.sh"
 

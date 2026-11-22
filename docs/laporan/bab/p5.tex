@@ -7,7 +7,7 @@
 \textbf{Kriteria} & \textbf{Persoalan} & \textbf{Konsep dalam literatur}\\ \hline \endhead
 2 & Sumber mengirim data yang salah, kedaluwarsa, ganda, atau berkualitas rendah sambil mengaku sehat & \textit{Input validation}, \textit{data quality}, \textit{quarantine / dead letter}, \textit{faulty (Byzantine-ish) source}, \textit{idempotent consumer}\\ \hline
 3 & Satu sumber yang sakit menghabiskan sumber daya dan menyeret sumber lain & \textit{Cascading failure}, \textit{bulkhead}, \textit{timeout} (Nygard, \textit{Release It!})\\ \hline
-4 & Permintaan ke sumber sakit terus diulang dan memperparah keadaan; client menunggu hingga \textit{timeout} & \textit{Circuit breaker}, \textit{exponential backoff with jitter}, \textit{fail fast}, \textit{graceful degradation / serve stale}\\ \hline
+4 & Permintaan ke sumber sakit terus diulang dan memperparah keadaan. Client menunggu hingga \textit{timeout} & \textit{Circuit breaker}, \textit{exponential backoff with jitter}, \textit{fail fast}, \textit{graceful degradation / serve stale}\\ \hline
 5 & Kapasitas habis dan semua client dilayani sama buruknya & \textit{Load shedding}, \textit{prioritization / admission control} (Google SRE Book, ``Handling Overload'')\\ \hline
 1, 8 & Peringatan kritis harus sampai dalam batas waktu & \textit{Priority lane}, SLI/SLO/\textit{error budget} (Google SRE Book)\\ \hline
 \end{longtable}
@@ -27,34 +27,34 @@ sensor-pantai --HTTP (pool sendiri, timeout 2 s, breaker)--> sensor-pantai-polle
 \begin{longtable}{|p{3.4cm}|p{6.4cm}|p{5.1cm}|}
 \hline
 \textbf{Mekanisme} & \textbf{Konfigurasi} & \textbf{Alasan nilai}\\ \hline \endhead
-\textit{Bulkhead} & Proses terpisah dengan \textit{pool} koneksi sendiri (maks 2) dan koneksi NATS sendiri; Aggregator tidak pernah memanggil sensor & Sensor lambat tidak dapat menghabiskan \textit{worker} atau koneksi BMKG/PVMBG\\ \hline
+\textit{Bulkhead} & Proses terpisah dengan \textit{pool} koneksi sendiri (maks 2) dan koneksi NATS sendiri. Aggregator tidak pernah memanggil sensor & Sensor lambat tidak dapat menghabiskan \textit{worker} atau koneksi BMKG/PVMBG\\ \hline
 \textit{Timeout} & 2 s per permintaan & Respons normal p95 $\approx$ 0,3 s, tetapi sensor kadang lambat hingga 7,9 s\\ \hline
-\textit{Circuit breaker} & Terbuka setelah 3 kegagalan berturut-turut; terbuka 5 s, berlipat sampai 30 s, \textit{jitter} $\pm$20\%; \textit{half-open} mengizinkan 1 \textit{probe} & 3 kegagalan membedakan error sesaat dari gangguan; batas 30 s menjaga pemulihan $\le$ 30 s setelah sensor pulih; \textit{jitter} mencegah \textit{probe} serentak\\ \hline
+\textit{Circuit breaker} & Terbuka setelah 3 kegagalan berturut-turut. Terbuka 5 s, berlipat sampai 30 s, \textit{jitter} $\pm$20\%. \textit{half-open} mengizinkan 1 \textit{probe} & 3 kegagalan membedakan error sesaat dari gangguan. Batas 30 s menjaga pemulihan $\le$ 30 s setelah sensor pulih. \textit{Jitter} mencegah \textit{probe} serentak\\ \hline
 \textit{Retry} & 0,5 s berlipat sampai 8 s, \textit{full jitter} 50--100\%, selama \textit{breaker} tertutup & Error sesaat (503 sporadis) dicoba ulang cepat tanpa badai \textit{retry}\\ \hline
-Validasi kontrak & Field/tipe wajib, \kode{station\_id} dikenal, \kode{observed\_at} $\le$ 2 jam lebih tua dan $\le$ 1 menit lebih baru dari \kode{generated\_at} sensor, $|$anomali$|$ $\le$ 15 m, gelombang 0--30 m, \kode{quality = "ok"} & Waktu dibandingkan dengan jam sensor (60$\times$); 2 jam sensor $\approx$ 2 menit nyata, cukup untuk \textit{restart} poller tanpa menolak \textit{backlog} sah\\ \hline
-Data ditolak & \kode{op=reject} $\rightarrow$ \kode{dead\_letters} (\kode{parked}, alasan, payload mentah) $\rightarrow$ \kode{/internal/audit/unprocessed} & Disisihkan dengan alasan, tidak pernah menjadi HazardEvent\\ \hline
-Dedup & Kunci \kode{observation\_id@observed\_at} (per halaman + 50.000 kunci terakhir) dan \kode{Nats-Msg-Id} & Sensor mengirim ulang item; setelah sensor \textit{restart}, ID dapat dipakai ulang\\ \hline
-Jalur prioritas & Stream \kode{BNPB\_ALERTS} + durable consumer terpisah; alert dipublikasikan paling awal; \textit{redelivery} tanpa batas; \kode{EventID} = \kode{hazard\_id} kanonik & Alert tidak antre di belakang event biasa dan tidak dikirim dua kali oleh jalur reguler\\ \hline
-Degradasi terkendali & \kode{meta.sources.sensor\_pantai} (UP/DEGRADED/OUTAGE/DOWN, \kode{last\_synced\_at}, \kode{stale\_since}) dari JetStream KV (cache 1 s) & Client langsung mendapat data terakhir + status; client-api tidak menunggu sensor\\ \hline
-Sensor diam / jam beku & DEGRADED bila observasi terbaru tertinggal $>$ 10 menit dari jam sensor; gagal bila \kode{generated\_at} tidak bergerak 15 s & Sensor kadang menjawab 200 tanpa data baru\\ \hline
-Sensor \textit{restart} & Cursor disimpan bersama jam sensor; jam mundur atau cursor ditolak (4xx) $\rightarrow$ baca dari awal & \kode{emptyDir} membuat data sensor mulai ulang saat pod dihapus\\ \hline
-\textit{Load shedding} & \kode{MAX\_INFLIGHT} = 256 per pod client-api; Media maks 60\%, Tim Lapangan/Ops 100\%; 503 + \kode{Retry-After: 1} tanpa antrean & Kapasitas cadangan 40\% untuk Tim Lapangan. \isi{nilai final setelah \textit{tuning} di klaster demo}\\ \hline
-Kondisi stasiun & 1 HazardEvent per stasiun, diperbarui saat \textit{severity} berubah atau tiap 5 menit waktu sensor; AWAS bila kritis, SIAGA $\ge$ 1,0 m / 4,0 m, WASPADA $\ge$ 0,5 m / 2,5 m & Laju tulis turun dari $\approx$ 4/s menjadi $<$ 1/s; observasi kritis tetap mendapat HazardEvent AWAS sendiri\\ \hline
+Validasi kontrak & Field/tipe wajib, \kode{station\_id} dikenal, \kode{observed\_at} $\le$ 2 jam lebih tua dan $\le$ 1 menit lebih baru dari \kode{generated\_at} sensor, $|$anomali$|$ $\le$ 15 m, gelombang 0--30 m, \kode{quality = "ok"} & Waktu dibandingkan dengan jam sensor (60$\times$). 2 jam sensor $\approx$ 2 menit nyata, cukup untuk \textit{restart} poller tanpa menolak \textit{backlog} sah\\ \hline
+Data ditolak & \kode{op=reject} ke \kode{dead\_letters} (\kode{parked}, alasan, payload mentah) ke \kode{/internal/audit/unprocessed} & Disisihkan dengan alasan, tidak pernah menjadi HazardEvent\\ \hline
+Dedup & Kunci \kode{observation\_id@observed\_at} (per halaman + 50.000 kunci terakhir) dan \kode{Nats-Msg-Id} & Sensor mengirim ulang item. Setelah sensor \textit{restart}, ID dapat dipakai ulang\\ \hline
+Jalur prioritas & Stream \kode{BNPB\_ALERTS} + durable consumer terpisah. Alert dipublikasikan paling awal. \textit{Redelivery} tanpa batas. \kode{EventID} = \kode{hazard\_id} kanonik & Alert tidak antre di belakang event biasa dan tidak dikirim dua kali oleh jalur reguler\\ \hline
+Degradasi terkendali & \kode{meta.sources.sensor\_pantai} (UP/DEGRADED/OUTAGE/DOWN, \kode{last\_synced\_at}, \kode{stale\_since}) dari JetStream KV (cache 1 s) & Client langsung mendapat data terakhir + status. Client-api tidak menunggu sensor\\ \hline
+Sensor diam / jam beku & DEGRADED bila observasi terbaru tertinggal $>$ 10 menit dari jam sensor. Gagal bila \kode{generated\_at} tidak bergerak 15 s & Sensor kadang menjawab 200 tanpa data baru\\ \hline
+Sensor \textit{restart} & Cursor disimpan bersama jam sensor. Jam mundur atau cursor ditolak (4xx) membuat poller membaca dari awal & \kode{emptyDir} membuat data sensor mulai ulang saat pod dihapus\\ \hline
+\textit{Load shedding} & \kode{MAX\_INFLIGHT} = 256 per pod client-api. Media maks 60\%, Tim Lapangan/Ops 100\%. 503 + \kode{Retry-After: 1} tanpa antrean & Kapasitas cadangan 40\% untuk Tim Lapangan. Nilai 256 dipertahankan di repositori. Uji di klaster demo memakai \kode{MAX\_INFLIGHT}=20 agar kondisi \textit{overload} tercapai dengan 300 VU.\\ \hline
+Kondisi stasiun & 1 HazardEvent per stasiun, diperbarui saat \textit{severity} berubah atau tiap 5 menit waktu sensor. AWAS bila kritis, SIAGA $\ge$ 1,0 m / 4,0 m, WASPADA $\ge$ 0,5 m / 2,5 m & Laju tulis turun dari $\approx$ 4/s menjadi $<$ 1/s. Observasi kritis tetap mendapat HazardEvent AWAS sendiri\\ \hline
 \end{longtable}
 
 \subsubsection{Alasan Keputusan}
 \begin{itemize}
-\item \textbf{Poller di proses terpisah vs di dalam Aggregator:} siklus \textit{polling} Aggregator dipakai bersama oleh BMKG dan PVMBG, sehingga sensor yang lambat akan menunda sumber lain. Proses terpisah memberi isolasi penuh. Poller dijalankan 1 replika (\textit{Recreate}); bila sempat ada dua (misalnya saat partisi), \textit{message ID} dan \textit{version guard} membuat publikasi ganda tidak berbahaya.
+\item \textbf{Poller di proses terpisah vs di dalam Aggregator:} siklus \textit{polling} Aggregator dipakai bersama oleh BMKG dan PVMBG, sehingga sensor yang lambat akan menunda sumber lain. Proses terpisah memberi isolasi penuh. Poller dijalankan 1 replika (\textit{Recreate}). Bila sempat ada dua (misalnya saat partisi), \textit{message ID} dan \textit{version guard} membuat publikasi ganda tidak berbahaya.
 \item \textbf{\textit{Breaker} berbasis kegagalan berturut-turut vs rasio error:} poller hanya mengirim $\pm$1 permintaan/s, terlalu sedikit untuk jendela rasio yang stabil.
-\item \textbf{Stream prioritas terpisah vs prioritas di satu stream:} JetStream tidak mendukung prioritas dalam satu stream; stream dan consumer terpisah lebih sederhana dan terbukti.
-\item \textbf{\textit{Shedding} berbasis \textit{in-flight} vs \textit{rate limit}:} \textit{rate limit} membatasi laju per client tanpa melihat beban sistem; \textit{in-flight} langsung mencerminkan kelambatan sistem.
+\item \textbf{Stream prioritas terpisah vs prioritas di satu stream:} JetStream tidak mendukung prioritas dalam satu stream. Stream dan consumer terpisah lebih sederhana dan terbukti.
+\item \textbf{\textit{Shedding} berbasis \textit{in-flight} vs \textit{rate limit}:} \textit{rate limit} membatasi laju per client tanpa melihat beban sistem. \textit{in-flight} langsung mencerminkan kelambatan sistem.
 \end{itemize}
 
 \subsubsection{Batasan yang Disadari}
 \begin{itemize}
-\item Observasi kritis yang juga berkualitas \kode{suspect} ditolak (kontrak diutamakan) dan tercatat dengan alasannya. \isi{konfirmasi kebijakan oleh tim}
+\item Observasi kritis yang juga berkualitas \kode{suspect} ditolak (kontrak diutamakan) dan tercatat dengan alasannya. Pilihan ini diambil karena nilai yang diragukan sensornya sendiri tidak boleh memicu evakuasi. Observasi tersebut tetap terlihat oleh Internal Ops melalui \kode{/internal/audit/unprocessed}.
 \item \textit{Backlog} yang lebih tua dari 2 jam waktu sensor (misalnya poller mati lama) ditolak sebagai \kode{expired}.
-\item \textit{Load shedding} hanya melindungi client-api; permintaan yang diterima tetap membebani Aggregator, sehingga \kode{MAX\_INFLIGHT} disetel sesuai kapasitas Aggregator.
+\item \textit{Load shedding} hanya melindungi client-api. Permintaan yang diterima tetap membebani Aggregator, sehingga \kode{MAX\_INFLIGHT} disetel sesuai kapasitas Aggregator.
 \end{itemize}
 
 \subsubsection{Bukti Penyelesaian}
@@ -62,44 +62,61 @@ Kondisi stasiun & 1 HazardEvent per stasiun, diperbarui saat \textit{severity} b
 \begin{longtable}{|p{3.4cm}|p{6cm}|p{5.5cm}|}
 \hline
 \textbf{Kriteria} & \textbf{Klaster pengembangan} & \textbf{Klaster demo}\\ \hline \endhead
-1. 0 alert hilang, p95 $\le$ 5 s & Pod sensor dihapus $\rightarrow$ \textit{restart} terdeteksi 4 s $\rightarrow$ 3/3 alert sampai, rata-rata 13 ms dari deteksi ke penerima & Pod sensor dihapus pukul 09:33:50 UTC. \textit{Restart} terdeteksi 41 s kemudian (pod baru butuh $\pm$40 s untuk siap di VM). Ketiga alert kritis (\kode{obs-000120}, \kode{obs-000362}, \kode{obs-000601}) sampai ke penerima Tim Lapangan. Histogram \kode{notification\_delivery\_latency\_seconds\{path="priority"\}}: 3 dari 3 $\le$ 1 s (total 1,52 s, rata-rata 0,51 s), sehingga p95 $\le$ 1 s dan SLI 100\%. Dari log, jarak deteksi poller sampai diterima stub-sink 0,49 s, 12 ms, dan 25 ms. Sebelum diukur, stream \kode{BNPB\_ALERTS} berisi tepat 3 pesan walaupun sensor sudah di-\textit{restart} 4 kali (tidak ada alert ganda). Karena profil \textit{practice} selalu mengulang 3 observasi kritis yang sama, keadaan dedup jalur alert dikosongkan dulu agar pengukuran setara deploy baru.\\ \hline
-2. Data pelanggar disisihkan & \kode{/internal/audit/unprocessed?source=SENSOR\_PANTAI}: \kode{parked} dengan alasan \kode{quality\_not\_ok}, \kode{expired}; tidak ada di \kode{/v1/events} & \isi{}\\ \hline
-3. Sumber lain memenuhi latensi M1 & \isi{} & \isi{k6 BMKG-only p95 saat sensor bermasalah}\\ \hline
-4. Permintaan tidak melonjak, cepat, pulih sendiri & Sensor mati 65 s $\rightarrow$ hanya 5 permintaan (\textit{probe} +4/+10/+20/+36/+66 s); \kode{/v1/events} 0,3 s dengan status OUTAGE; UP lagi 16 s setelah sensor siap & Sensor di-\textit{scale} 0 selama 74 s. \textit{Breaker} terbuka 1 s setelah kegagalan ketiga, dan selama gangguan hanya 7 permintaan yang dikirim ke sensor (3 di awal, lalu \textit{probe half-open} pada +8, +22, +42, dan +69 s dengan jeda berlipat). \kode{/v1/events} tetap HTTP 200 dalam 0,85--1,62 s dengan \kode{sensor\_pantai.status} OUTAGE (lambatnya berasal dari CockroachDB yang kekurangan CPU, bukan dari sensor). \textit{Breaker} menutup sendiri 24 s setelah pod sensor siap dan status kembali UP tanpa intervensi.\\ \hline
-5. Tim Lapangan dilayani saat \textit{overload} & 300 VU Media + 10 VU Tim Lapangan, \kode{MAX\_INFLIGHT}=20: Media ditolak 98\%, Tim Lapangan terlayani 92,6\% (Aggregator di satu laptop menjadi \textit{bottleneck}) & \isi{\kode{scripts/demo/m2/load/shedding.sh}}\\ \hline
-6. Kombinasi kegagalan & \kode{scripts/demo/m2/gameday/gameday.sh} & \isi{}\\ \hline
-7. Penjelasan dari dashboard & Grafana BNPB (Coastal, Aggregator, Services), Jaeger & \isi{tangkapan layar saat \textit{game day}}\\ \hline
-8. Target keandalan & Lihat butir ``Di Laporan'' & \isi{budget terpakai}\\ \hline
+1. 0 alert hilang, p95 $\le$ 5 s & Pod sensor dihapus, \textit{restart} terdeteksi 4 s, dan 3/3 alert sampai, rata-rata 13 ms dari deteksi ke penerima & Pod sensor dihapus pukul 09:33:50 UTC. \textit{Restart} terdeteksi 41 s kemudian (pod baru butuh $\pm$40 s untuk siap di VM). Ketiga alert kritis (\kode{obs-000120}, \kode{obs-000362}, \kode{obs-000601}) sampai ke penerima Tim Lapangan. Histogram \kode{notification\_delivery\_latency\_seconds\{path="priority"\}}: 3 dari 3 $\le$ 1 s (total 1,52 s, rata-rata 0,51 s), sehingga p95 $\le$ 1 s dan SLI 100\%. Dari log, jarak deteksi poller sampai diterima stub-sink 0,49 s, 12 ms, dan 25 ms. Sebelum diukur, stream \kode{BNPB\_ALERTS} berisi tepat 3 pesan walaupun sensor sudah di-\textit{restart} 4 kali (tidak ada alert ganda). Karena profil \textit{practice} selalu mengulang 3 observasi kritis yang sama, keadaan dedup jalur alert dikosongkan dulu agar pengukuran setara deploy baru.\\ \hline
+2. Data pelanggar disisihkan & \kode{/internal/audit/unprocessed?source=SENSOR\_PANTAI}: \kode{parked} dengan alasan \kode{quality\_not\_ok}, \kode{expired}. Tidak ada di \kode{/v1/events} & Selama \textit{game day}, 77 observasi ditolak poller (\kode{sensor\_pantai\_rejected\_total}, alasan \kode{quality\_not\_ok} untuk \kode{quality: "suspect"}). Setiap penolakan dicatat Aggregator ke \kode{dead\_letters} sebagai \kode{parked} dengan sumber \kode{SENSOR\_PANTAI} (log ``recorded rejected source data'', misalnya \kode{obs-002185}) dan tidak menjadi HazardEvent.\\ \hline
+3. Sumber lain memenuhi latensi M1 & Poller sensor berjalan sebagai proses terpisah, sehingga siklus \textit{polling} BMKG dan PVMBG di Aggregator tidak tersentuh. Saat sensor mati 65 s, \kode{/v1/events} tetap 0,3 s. & Saat sensor mati 74 s, \kode{/v1/events} tetap HTTP 200 dalam 0,85--1,62 s, tidak lebih lambat dari sebelum gangguan (2,1 s). Sensor tidak memperlambat sumber lain. Angka mutlaknya di atas target M1 karena CockroachDB di host ini lambat (lihat post-mortem).\\ \hline
+4. Permintaan tidak melonjak, cepat, pulih sendiri & Sensor mati 65 s dengan hanya 5 permintaan (\textit{probe} +4/+10/+20/+36/+66 s). \kode{/v1/events} 0,3 s dengan status OUTAGE. UP lagi 16 s setelah sensor siap & Sensor di-\textit{scale} 0 selama 74 s. \textit{Breaker} terbuka 1 s setelah kegagalan ketiga, dan selama gangguan hanya 7 permintaan yang dikirim ke sensor (3 di awal, lalu \textit{probe half-open} pada +8, +22, +42, dan +69 s dengan jeda berlipat). \kode{/v1/events} tetap HTTP 200 dalam 0,85--1,62 s dengan \kode{sensor\_pantai.status} OUTAGE (lambatnya berasal dari CockroachDB yang kekurangan CPU, bukan dari sensor). \textit{Breaker} menutup sendiri 24 s setelah pod sensor siap dan status kembali UP tanpa intervensi.\\ \hline
+5. Tim Lapangan dilayani saat \textit{overload} & 300 VU Media + 10 VU Tim Lapangan, \kode{MAX\_INFLIGHT}=20: Media ditolak 98\%, Tim Lapangan terlayani 92,6\% (Aggregator di satu laptop menjadi \textit{bottleneck}) & \kode{shedding.sh}, 300 VU Media + 10 VU Tim Lapangan selama 60 s, \kode{MAX\_INFLIGHT}=20 (22.802 permintaan): Media ditolak terkontrol 97,3\% (503 + \kode{Retry-After}). Tim Lapangan terlayani 83,5\% (p95 3,8 s). Seluruh 157 error tak terduga adalah permintaan yang lolos \textit{shedding} lalu habis waktu di Aggregator, bukan penolakan. Target 99\% belum tercapai di klaster ini karena CockroachDB lambat.\\ \hline
+6. Kombinasi kegagalan & \kode{scripts/demo/m2/gameday/gameday.sh} & \textit{Game day} 308 s (11:45--11:50 UTC) dengan PVMBG \textit{outage}, pod sensor dihapus, dan partisi jaringan ke sensor, lalu pemulihan 120 s tanpa intervensi. Semua komponen pulih sendiri: \textit{breaker} menutup 22 s setelah partisi dicabut. Tim Lapangan terlayani 95,0\% (p95 2,7 s) dari 50.301 permintaan. Detail ada di post-mortem.\\ \hline
+7. Penjelasan dari dashboard & Grafana BNPB (Coastal, Aggregator, Services), Jaeger & Gambar \ref{fig:gameday} disusun dari data Prometheus selama \textit{game day} dengan \textit{query} yang sama seperti panel dashboard Coastal.\\ \hline
+8. Target keandalan & Lihat butir ``Di Laporan'' & Pada jendela 1 jam pengukuran, 3 alert kritis terbit dan 3 sampai $\le$ 5 s. SLI 100\%, \textit{error budget} terpakai 0\%. Selama \textit{game day} tidak ada alert kritis baru (observasi kritis yang sama sudah pernah dikirim dan dibuang oleh dedup), sehingga \textit{budget} tidak berubah.\\ \hline
 \end{longtable}
 
-\gambarplaceholder{Dashboard ``BNPB --- Coastal sensor and alert SLO'' selama game day}{5cm}
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{gambar/gameday-coastal.png}
+\caption{\textit{Game day} di klaster demo, dari Prometheus. Garis putus-putus menandai saat gangguan disuntikkan dan dicabut. \textit{Breaker} terbuka setelah pod sensor dihapus, permintaan ke sensor turun dari $\pm$0,9/s menjadi $\pm$0,08/s selama gangguan, lalu pulih tanpa intervensi. Respons 5xx selain 503 berasal dari Aggregator yang lambat, bukan dari sensor.}
+\label{fig:gameday}
+\end{figure}
 
 \subsubsection{Jawaban atas Butir ``Di Laporan''}
 \begin{enumerate}
 \item \textbf{Persoalan kriteria 2--5:} lihat tabel identifikasi pada bagian a.
-\item \textbf{Mekanisme, konfigurasi, dan alasan nilai:} lihat tabel pada bagian b. \textbf{SLO jalur peringatan Tim Lapangan:} 99\% alert kritis sampai ke penerima $\le$ 5 s sejak terdeteksi, per jendela 1 jam. SLI = alert terkirim $\le$ 5 s di jalur prioritas $\div$ alert yang dipublikasikan poller (dihitung sekali per alert; alert yang tidak pernah sampai dihitung gagal). \textit{Error budget} tersisa = $1 - (1 - \mathrm{SLI})/0{,}01$, ditambah \textit{burn rate} 15 menit.
+\item \textbf{Mekanisme, konfigurasi, dan alasan nilai:} lihat tabel pada bagian b. \textbf{SLO jalur peringatan Tim Lapangan:} 99\% alert kritis sampai ke penerima $\le$ 5 s sejak terdeteksi, per jendela 1 jam. SLI = alert terkirim $\le$ 5 s di jalur prioritas $\div$ alert yang dipublikasikan poller (dihitung sekali per alert. Alert yang tidak pernah sampai dihitung gagal). \textit{Error budget} tersisa = $1 - (1 - \mathrm{SLI})/0{,}01$, ditambah \textit{burn rate} 15 menit.
 \item \textbf{Perilaku menyimpang Sensor Pantai} (ditemukan dengan merekam \kode{/v1/observations} dan \kode{/healthz} setiap detik selama $\pm$17 menit $\approx$ 17 jam waktu sensor, profil \textit{practice}):
 \begin{center}
 \begin{tabularx}{\textwidth}{|X|X|}
 \hline
 \textbf{Perilaku} & \textbf{Penanganan}\\ \hline
-\kode{/v1/observations} 503 ``sensor sedang tidak melayani'' padahal \kode{/healthz} 200; \kode{/healthz} sendiri kadang gagal & \kode{/healthz} tidak dipakai sebagai sinyal sehat; kegagalan dihitung \textit{breaker}\\ \hline
-Respons hingga 7,9 s & \textit{Timeout} 2 s $\rightarrow$ \textit{retry/breaker}\\ \hline
+\kode{/v1/observations} 503 ``sensor sedang tidak melayani'' padahal \kode{/healthz} 200. \kode{/healthz} sendiri kadang gagal & \kode{/healthz} tidak dipakai sebagai sinyal sehat. Kegagalan dihitung \textit{breaker}\\ \hline
+Respons hingga 7,9 s & \textit{Timeout} 2 s, lalu \textit{retry/breaker}\\ \hline
 Observasi identik dikirim ulang dalam satu halaman dan antar halaman & Dedup kunci + \textit{message ID}\\ \hline
 \kode{quality: "suspect"} ($\pm$1,3\%) & Ditolak (\kode{quality\_not\_ok})\\ \hline
-Diam $\pm$70 menit sensor, lalu banjir 18--200 item & Cursor + batas halaman per siklus; status DEGRADED saat diam\\ \hline
-Data mulai ulang dari 00:00 saat pod dihapus & Deteksi jam mundur $\rightarrow$ baca dari awal\\ \hline
+Diam $\pm$70 menit sensor, lalu banjir 18--200 item & Cursor + batas halaman per siklus. Status DEGRADED saat diam\\ \hline
+Data mulai ulang dari 00:00 saat pod dihapus & Deteksi jam mundur, lalu baca dari awal\\ \hline
 Jam sensor sendiri (60$\times$) & Semua aturan waktu memakai \kode{generated\_at}\\ \hline
-\isi{perilaku tambahan dari profil \textit{exam}} & \\ \hline
+Profil \textit{exam} belum tersedia saat laporan ditulis & Perilaku tambahan yang muncul saat uji ditunjukkan di video\\ \hline
 \end{tabularx}
 \end{center}
 \item \textbf{Post-mortem \textit{game day}:}
 \begin{itemize}
-\item \textbf{Ringkasan:} kegagalan disuntikkan pada t=30 s (PVMBG \textit{outage}), t=60 s (pod sensor dihapus), t=90--150 s (partisi jaringan ke sensor), \isi{t=120 s skenario Tester Agent}, PVMBG pulih t=180 s, lalu jendela pemulihan tanpa intervensi. \isi{waktu pulih}
-\item \textbf{Deteksi:} \isi{panel \textit{breaker} OPEN, \kode{sensor\_pantai.status} OUTAGE, sumber PVMBG OUTAGE, \kode{client\_api\_shed\_total}; waktu deteksi}
-\item \textbf{Dampak:} \isi{alert terlambat/hilang, Tim Lapangan terlayani (\%), Media ditolak (\%), \textit{error budget} terpakai (\%)}
-\item \textbf{Mitigasi otomatis:} \textit{breaker} membatasi permintaan ke sensor; data terakhir disajikan dengan status; Media di-\textit{shed}; PVMBG dilayani dari data terakhir; sensor \textit{restart} $\rightarrow$ baca dari awal.
-\item \textbf{Perbaikan:} \isi{berdasarkan temuan, misalnya \textit{tuning} \kode{MAX\_INFLIGHT}, batas \textit{breaker}, kapasitas Aggregator}
-\item \textbf{Timeline:} \isi{salin \kode{evidence/gameday/<run>/timeline.txt}}
+\item \textbf{Ringkasan:} kegagalan disuntikkan pada t=30 s (PVMBG \textit{outage}), t=60 s (pod sensor dihapus), t=90--150 s (partisi jaringan ke sensor), PVMBG pulih t=180 s, lalu jendela pemulihan 120 s tanpa intervensi. Skenario Tester Agent pada t=120 s tidak berjalan karena Git Bash mengubah \kode{/app} menjadi path Windows di skrip \textit{game day} (sudah diperbaiki). Skenario \kode{kill-leader} sudah lolos secara terpisah. Sensor kembali UP pada t=172 s, 22 s setelah partisi dicabut.
+\item \textbf{Deteksi:} \textit{breaker} sensor OPEN 2 s setelah pod dihapus (t=62 s), \kode{sensor\_pantai.status} OUTAGE pada respons \kode{/v1/events}, \textit{restart} sensor terdeteksi dari jam yang mundur (t=167 s). Panel 5xx client-api menunjukkan dampak yang tidak berasal dari gangguan yang disuntikkan, yaitu Aggregator yang lambat.
+\item \textbf{Dampak:} tidak ada alert kritis yang hilang atau terlambat (tidak ada alert baru selama jendela ini). Tim Lapangan terlayani 95,0\% (p95 2,7 s). Media hanya ditolak 0,77\% karena dengan \kode{MAX\_INFLIGHT}=256 beban 300 VU belum melewati kapasitas client-api. 2.586 permintaan (5,1\%) gagal di luar penolakan terkontrol, semuanya karena Aggregator habis waktu membaca CockroachDB. \textit{Error budget} alert terpakai 0\%.
+\item \textbf{Mitigasi otomatis:} \textit{breaker} membatasi permintaan ke sensor. Data terakhir disajikan dengan status. Media di-\textit{shed}. PVMBG dilayani dari data terakhir. Sensor \textit{restart} ditangani dengan membaca dari awal.
+\item \textbf{Temuan utama di luar skenario:} di klaster 2 VM, transaksi \kode{UpsertFencedBatch} (satu halaman BMKG/PVMBG dalam satu transaksi \textit{serializable}) tidak pernah selesai dalam siklus \textit{polling} 30 s. \textit{Intent} yang tertinggal membuat pembacaan per shard (800 ms) habis waktu, sehingga \kode{/v1/events} menjawab \kode{partial: true}. Sistem tetap menjawab HTTP 200 dan tidak pernah 500. Yang sudah dicoba: inisialisasi ulang data, \kode{pool\_max\_conns}=24, GC TTL lebih pendek, \textit{lease} 150/60 s, dan \textit{leaseholder} dipindah ke node-a. Halaman lebih kecil (25 record) dan satu replika Aggregator juga belum cukup.
+\item \textbf{Perbaikan:} (1) relay \textit{outbox} dan metrik \textit{backlog} hanya dijalankan oleh \textit{leader}, karena saat ini ketiga replika terus memindai indeks \textit{outbox} yang sama, (2) metrik \textit{backlog} dibaca dengan \kode{AS OF SYSTEM TIME} agar tidak bertabrakan dengan penulis, (3) \textit{upsert} multi-baris per halaman untuk memangkas jumlah \textit{statement}, (4) \kode{MAX\_INFLIGHT} disetel per lingkungan agar \textit{shedding} aktif sebelum Aggregator jenuh.
+\item \textbf{Timeline} (UTC, \kode{evidence/gameday/timeline.txt}):
+\begin{itemize}
+\item 11:45:08 (t+0 s) beban latar dimulai: 300 VU Media, 10 VU Tim Lapangan
+\item 11:45:38 (t+30 s) PVMBG \textit{outage} dinyalakan
+\item 11:46:08 (t+60 s) pod sensor dihapus, \textit{breaker} OPEN pada 11:46:10
+\item 11:46:38 (t+90 s) partisi jaringan ke sensor
+\item 11:47:08 (t+120 s) skenario Tester Agent gagal dijalankan (path)
+\item 11:47:38 (t+150 s) partisi dicabut
+\item 11:47:55 (t+167 s) \textit{restart} sensor terdeteksi, \textit{breaker} CLOSED pada 11:48:00
+\item 11:48:08 (t+180 s) PVMBG pulih, jendela pemulihan tanpa intervensi
+\item 11:50:16 (t+308 s) akhir jendela pemulihan
+\end{itemize}
 \end{itemize}
 \end{enumerate}

@@ -11,14 +11,14 @@
 
 | Area | Milestone 1 | Milestone 2 | Owner | Status |
 | :--- | :--- | :--- | :--- | :---: |
-| Platform | Docker Compose on one machine | Kubernetes (k3s), two nodes with separate kernels: manifests for every component, Secrets, NetworkPolicies, one-command deploy, Tester Agent | Fayadh | 🚧 Manifests and scripts done; topology declaration after the demo cluster is up |
+| Platform | Docker Compose on one machine | Kubernetes (k3s), two nodes with separate kernels: manifests for every component, Secrets, NetworkPolicies, one-command deploy, Tester Agent | Fayadh | 🟢 Done: two-VM demo cluster, `verify.sh` 16/16 |
 | Canonical store (P1) | One PostgreSQL instance | 4-node CockroachDB (`RF=3`), 8 logical hash shards, Audit API, analytics dashboard | Made | 🟢 Done |
-| Aggregator (P2) | One instance, every instance polls | ≥3 instances, DB-backed leader election + fencing token (core done; 10k-VU k6 pending) | Made, Fayadh | 🚧 In progress |
+| Aggregator (P2) | One instance, every instance polls | ≥3 instances, DB-backed leader election + fencing token | Made, Fayadh | 🟢 Done; on the two-VM demo cluster the store stalls under load (see report) |
 | Schema changes (P3) | Additive changes only | Incompatible changes rejected into a dead-letter queue, retry and replay | Theo | 🟢 Done |
 | Field reports (P3) | — | `POST /field-reports`: 202 only after the JetStream ack, `Idempotency-Key` dedup, new `field-report-consumer` with bbolt dedup | Fayadh | 🟢 Done |
 | Satellite fire feed (P4) | — | New `satellite-ingestor`: SSE feed → fires → WILDFIRE hazard events | Theo | 🟢 Done |
-| Coastal sensors (P5) | — | `sensor-pantai-poller`: contract validation, circuit breaker, priority alert path, sensor status in `/v1/events`, prioritised load shedding in client-api | Fayadh | 🚧 Core done; SLO panel, k6 shedding run and game day pending |
-| Observability | JSON logs + `X-Correlation-ID` | Prometheus, Grafana dashboards, OpenTelemetry tracing to Jaeger, `trace_id` in logs | Theo | 🚧 In progress: working in Compose; cluster manifests and the Sensor Pantai panel pending |
+| Coastal sensors (P5) | — | `sensor-pantai-poller`: contract validation, circuit breaker, priority alert path, sensor status in `/v1/events`, prioritised load shedding in client-api | Fayadh | 🟢 Done: critical alerts 3/3 within 1 s, shedding and game day on the demo cluster |
+| Observability | JSON logs + `X-Correlation-ID` | Prometheus, Grafana dashboards, OpenTelemetry tracing to Jaeger, `trace_id` in logs | Theo | 🟢 Done: Compose and cluster, coastal sensor panel included |
 
 ---
 
@@ -347,7 +347,7 @@ Non-aggregator sources (`SATELIT`, `SENSOR_PANTAI`) publish `event.IngestMessage
 
 - **Core HA (Made — 🟢 Done):** Aggregator runs `≥ 3` replicas behind one Service (`aggregator:8090`), with DB-backed leader election (`leader_leases` using CockroachDB HLC `now()`), monotonic `fencing_token` checked in `SERIALIZABLE` write transactions (`UpsertFencedBatch`), renew-before-poll, durable `poller_watermarks`, `GET /internal/leader`, `GET /internal/ready` (`503 DRAINING` on `SIGTERM`), and graceful shutdown drain (`SHUTDOWN_DRAIN_S=5`).
   - Automated P2 scenario scripts (`c1`–`c5`, `MODE=compose|k8s`): [scripts/demo/m2/p2/README.md](scripts/demo/m2/p2/README.md).
-- **Load testing, scaling & rolling update (Fayadh — 🚧 scripts ready, results from the demo cluster pending):** `tests/load/k6_m2.js` run from outside the cluster by the scripts in `scripts/demo/m2/load/`. Evidence goes to `evidence/load/<run>/`.
+- **Load testing, scaling & rolling update (Fayadh — run on the demo cluster at 500 VU; results and limits in the report):** `tests/load/k6_m2.js` run from outside the cluster by the scripts in `scripts/demo/m2/load/`. Evidence goes to `evidence/load/<run>/`.
 
   | Script | What it does | Pass condition |
   | :--- | :--- | :--- |

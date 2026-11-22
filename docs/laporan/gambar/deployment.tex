@@ -43,8 +43,8 @@
 
 % Jalur antar-node (flannel VXLAN di enp0s8)
 \draw[link] (na.east |- 0,5.7) -- node[lbl]{replikasi Raft CockroachDB\\(RF=3, 2 replika dipin ke node-a)} (nb.west |- 0,5.7);
-\draw[link] (na.east |- 0,4.7) -- node[lbl]{publish ingest / alert\\(poller, satellite-ingestor $\rightarrow$ NATS)} (nb.west |- 0,4.7);
-\draw[link] (na.east |- 0,3.7) -- node[lbl]{notifikasi + laporan lapangan\\(consumer $\rightarrow$ stub-sink)} (nb.west |- 0,3.7);
+\draw[link] (na.east |- 0,4.7) -- node[lbl]{publish ingest / alert\\(poller, satellite-ingestor ke NATS)} (nb.west |- 0,4.7);
+\draw[link] (na.east |- 0,3.7) -- node[lbl]{notifikasi + laporan lapangan\\(consumer ke stub-sink)} (nb.west |- 0,3.7);
 \draw[link] (na.east |- 0,2.7) -- node[lbl]{scrape metrik Prometheus,\\trace OTLP ke Jaeger} (nb.west |- 0,2.7);
 
 % Akses dari luar klaster
