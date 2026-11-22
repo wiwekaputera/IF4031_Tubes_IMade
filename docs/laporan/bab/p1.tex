@@ -60,13 +60,13 @@ Skrip skenario: \kode{scripts/demo/m2/p1/c1}--\kode{c7} (\kode{MODE=k8s}), bukti
 \begin{longtable}{|p{4.2cm}|p{10.7cm}|}
 \hline
 \textbf{Kriteria} & \textbf{Bukti}\\ \hline \endhead
-1. Dataset dimuat, tersebar & \isi{tabel sebaran unit (primary dan replica) per node dari \kode{c1-distribution.txt} untuk dataset asisten}\\ \hline
-2. Ketidakmerataan & \isi{beban per node saat memuat dan saat lonjakan satu wilayah (\kode{c2-skew-summary.txt})}\\ \hline
-3. Baca lintas lokasi & \isi{50 event terbaru + \textit{pagination} (\kode{c3-verification.txt})}\\ \hline
-4. Node worker mati + data dihapus & \isi{checksum sebelum/sesudah (Audit API) dan \kode{c4-hammer.csv}: 0 HTTP 500, respons \kode{partial} selama pemulihan}\\ \hline
-5. Node baru & \isi{\kode{c5-rebalance-snapshots.txt}: replika dan \textit{lease} berpindah, baca/tulis tanpa error}\\ \hline
-6. Tahan kehilangan berikutnya & \isi{\kode{c6-verification.txt}}\\ \hline
-7. Dashboard analitik & \isi{tangkapan layar dashboard, \kode{c7-dashboard-vs-audit.txt}, dan banner ``Data belum lengkap'' saat node mati}\\ \hline
+1. Dataset dimuat, tersebar & Belum dapat dibuktikan di klaster demo karena penulisan ke CockroachDB di klaster 2 VM macet (lihat temuan pada post-mortem P5). Loader katalog (50.000 baris) dijalankan sebagai Job di klaster, tetapi 0 baris masuk dalam 2 menit. Penempatan replika yang teramati: setiap \textit{range} memiliki 3 replika, 2 di node-a dan 1 di node-b sesuai \textit{zone config}, dengan \textit{leaseholder} di node-a.\\ \hline
+2. Ketidakmerataan & Belum dapat dibuktikan di klaster demo karena penulisan ke CockroachDB di klaster 2 VM macet (lihat temuan pada post-mortem P5). Skrip: \kode{c2-skew.sh}.\\ \hline
+3. Baca lintas lokasi & Belum dapat dibuktikan di klaster demo karena penulisan ke CockroachDB di klaster 2 VM macet (lihat temuan pada post-mortem P5). Skrip: \kode{c3-cross-shard-read.sh}.\\ \hline
+4. Node worker mati + data dihapus & Skenario lengkap belum dijalankan di klaster demo. Yang teramati di klaster: saat shard tidak menjawab dalam batas waktu, \kode{/v1/events} tetap HTTP 200 dengan \kode{partial: true} dan daftar \kode{unavailable\_units} (misalnya \kode{shard-0} sampai \kode{shard-7}). Tidak pernah ada HTTP 500 atau permintaan yang menggantung (respons paling lama 2,1 s).\\ \hline
+5. Node baru & Belum dapat dibuktikan di klaster demo karena penulisan ke CockroachDB di klaster 2 VM macet (lihat temuan pada post-mortem P5). Skrip: \kode{c5-add-node.sh}. Perpindahan \textit{lease} secara \textit{online} teramati saat \kode{lease\_preferences} diubah: dari 43 dari 48 \textit{range} di node-b menjadi seluruhnya di node-a dalam $\pm$1 menit tanpa menghentikan layanan.\\ \hline
+6. Tahan kehilangan berikutnya & Belum dapat dibuktikan di klaster demo karena penulisan ke CockroachDB di klaster 2 VM macet (lihat temuan pada post-mortem P5). Skrip: \kode{c6-survive-next-loss.sh}.\\ \hline
+7. Dashboard analitik & Belum dapat dibuktikan di klaster demo karena penulisan ke CockroachDB di klaster 2 VM macet (lihat temuan pada post-mortem P5). Skrip: \kode{c7-dashboard.sh}.\\ \hline
 \end{longtable}
 
 \subsubsection{Jawaban atas Butir ``Di Laporan''}
