@@ -62,8 +62,10 @@ require BMKG_API_KEY PVMBG_BEARER_TOKEN INTERNAL_OPS_TOKEN AUDIT_TOKEN \
   PANTAI_AUTH_TOKEN
 
 # The aggregator connects to every CockroachDB node; the driver fails over
-# between the hosts listed here.
-DEFAULT_DSN="postgresql://aggregator@canonical-store-0.canonical-store:26257,canonical-store-1.canonical-store:26257,canonical-store-2.canonical-store:26257,canonical-store-3.canonical-store:26257/canonical?sslmode=disable"
+# between the hosts listed here. A read runs one query per shard in parallel
+# next to the ingest, outbox and lease work, so the pool needs more than the
+# pgx default (4 connections on a 4-CPU node) or reads queue for a connection.
+DEFAULT_DSN="postgresql://aggregator@canonical-store-0.canonical-store:26257,canonical-store-1.canonical-store:26257,canonical-store-2.canonical-store:26257,canonical-store-3.canonical-store:26257/canonical?sslmode=disable&pool_max_conns=24"
 TOKEN_DB_DSN="postgres://${TOKEN_DB_POSTGRES_USER}:${TOKEN_DB_POSTGRES_PASSWORD}@token-db:5432/${TOKEN_DB_POSTGRES_DB}?sslmode=disable"
 SATELLITE_DATABASE_URL="postgres://${SATELLITE_STORE_POSTGRES_USER}:${SATELLITE_STORE_POSTGRES_PASSWORD}@satellite-store:5432/${SATELLITE_STORE_POSTGRES_DB}?sslmode=disable"
 
