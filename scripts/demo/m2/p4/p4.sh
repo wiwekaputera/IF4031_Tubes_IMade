@@ -8,6 +8,8 @@
 #      versions, delete messages after merges, retracted detections.
 #   4. 60x feed: latency p50/p95/p99 (read -> committed) and lag sampled over
 #      SAMPLE_S seconds, until the ingestor is caught up.
+#   4b. End to end: time from the ingestor's commit to the HazardEvent being
+#       stored in canonical_events, matched per fire and version.
 #   7. Live feed: the feed's own session (latest offset, virtual time).
 #   8. Disconnect/restart: the ingestor pod is killed; the offset committed while
 #      it is down is compared with the offset it resumes from, and the time
@@ -76,8 +78,8 @@ if [[ "$MODE" == "k8s" ]]; then
   }
   forward_metrics
   METRICS_URL="http://127.0.0.1:${METRICS_LOCAL_PORT}/metrics"
-  satsql() { kubectl -n "$NS" exec deploy/satellite-store -- psql -U "$SAT_USER" -d "$SAT_DB" -c "$1"; }
-  satval() { kubectl -n "$NS" exec deploy/satellite-store -- psql -U "$SAT_USER" -d "$SAT_DB" -tAc "$1"; }
+  satsql() { kubectl -n "$NS" exec satellite-store-0 -- psql -U "$SAT_USER" -d "$SAT_DB" -c "$1"; }
+  satval() { kubectl -n "$NS" exec satellite-store-0 -- psql -U "$SAT_USER" -d "$SAT_DB" -tAc "$1"; }
   crdb() { kubectl -n "$NS" exec canonical-store-0 -- cockroach sql --insecure -d canonical --format=table -e "$1"; }
   crdbv() { kubectl -n "$NS" exec canonical-store-0 -- cockroach sql --insecure -d canonical --format=csv -e "$1" | tail -n +2; }
   stop_ingestor() { kubectl -n "$NS" delete pod -l app=satellite-ingestor --grace-period=0 --force >/dev/null 2>&1; }
@@ -156,6 +158,34 @@ summary "   $(awk -F, 'NR>1 && $2!="" {split($1,t,":"); s=t[1]*3600+t[2]*60+t[3]
        printf "rates: ingest %.1f events/s, feed %.1f events/s, backlog shrinking %.1f events/s", ing, feed, drain;
        if (drain>0) printf "; backlog of %d events clears in about %.1f h", l1, l1/drain/3600;
        else printf "; backlog not shrinking"}' "$EVIDENCE_DIR/lag-samples.csv")"
+
+# ── 4b. End to end: committed by the ingestor -> stored in canonical_events ─
+# Matches each canonical WILDFIRE row changed in the last few minutes with the
+# outbox row of the same fire and version, and compares the two timestamps
+# (outbox created_at is the ingestor's commit; updated_at is the aggregator's).
+crdbv "SELECT source_ref_id, source_version, extract(epoch FROM updated_at) FROM canonical_events WHERE source = 'SATELIT' AND updated_at > now() - INTERVAL '3 minutes'" > "$EVIDENCE_DIR/e2e-canonical.csv" 2>/dev/null
+satval "SELECT payload->>'source_ref_id', payload->>'source_version', extract(epoch FROM created_at) FROM satellite_outbox WHERE created_at > now() - INTERVAL '10 minutes'" > "$EVIDENCE_DIR/e2e-outbox.txt" 2>/dev/null
+e2e="$(python3 - "$EVIDENCE_DIR/e2e-outbox.txt" "$EVIDENCE_DIR/e2e-canonical.csv" <<'PY'
+import sys
+out = {}
+for line in open(sys.argv[1]):
+    p = line.strip().split("|")
+    if len(p) == 3 and p[2]:
+        out[(p[0], p[1])] = float(p[2])
+lat = []
+for line in open(sys.argv[2]):
+    p = line.strip().split(",")
+    if len(p) == 3 and (p[0], p[1]) in out:
+        lat.append((float(p[2]) - out[(p[0], p[1])]) * 1000)
+if not lat:
+    print("no matching rows in the last 3 minutes")
+else:
+    lat.sort()
+    q = lambda f: lat[min(len(lat) - 1, int(f * len(lat)))]
+    print(f"n={len(lat)} p50 {q(.5):.0f} ms, p95 {q(.95):.0f} ms, max {lat[-1]:.0f} ms")
+PY
+)"
+summary "4b. End to end, ingestor commit to HazardEvent stored: $e2e"
 
 # ── 8. Kill and resume ───────────────────────────────────────────────────────
 # The offset is read while the ingestor is down, so it must equal the offset
