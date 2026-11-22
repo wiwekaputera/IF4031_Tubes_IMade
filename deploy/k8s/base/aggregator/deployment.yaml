@@ -68,6 +68,7 @@ spec:
             limits:
               memory: 512Mi
           readinessProbe:
+            timeoutSeconds: 3
             httpGet:
               path: /internal/ready
               port: 8090
@@ -75,12 +76,13 @@ spec:
             periodSeconds: 5
             failureThreshold: 3
           livenessProbe:
+            timeoutSeconds: 5
             httpGet:
               path: /internal/health
               port: 8090
             initialDelaySeconds: 10
             periodSeconds: 10
-            failureThreshold: 3
+            failureThreshold: 6
           lifecycle:
             preStop:
               exec:

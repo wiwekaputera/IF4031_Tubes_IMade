@@ -53,13 +53,15 @@ CREATE TABLE IF NOT EXISTS canonical_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_canonical_events_shard_occurred
-  ON canonical_events (shard, occurred_at DESC, hazard_id);
+  ON canonical_events (shard, occurred_at DESC, hazard_id DESC)
+  STORING (source, source_ref_id, hazard_type, severity, area_name, latitude, longitude, ingested_at, attributes, deleted_at);
 
 CREATE INDEX IF NOT EXISTS idx_canonical_events_shard_ingested
   ON canonical_events (shard, ingested_at, hazard_id);
 
 CREATE INDEX IF NOT EXISTS idx_canonical_events_shard_source_ref
-  ON canonical_events (shard, source, source_ref_id);
+  ON canonical_events (shard, source, source_ref_id)
+  STORING (deleted_at);
 
 CREATE INDEX IF NOT EXISTS idx_canonical_events_shard_type_time
   ON canonical_events (shard, hazard_type, occurred_at DESC);
@@ -125,6 +127,9 @@ CREATE INDEX IF NOT EXISTS idx_dead_letters_status
 
 CREATE INDEX IF NOT EXISTS idx_dead_letters_unprocessed
   ON dead_letters (status, received_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letters_dedup
+  ON dead_letters (source, status, source_ref_id);
 
 -- ============================================================
 -- Cluster settings & replication

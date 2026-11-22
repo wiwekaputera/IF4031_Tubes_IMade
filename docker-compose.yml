@@ -307,6 +307,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
       METRICS_ADDR: ":9090"   # internal only, not published
       AGGREGATOR_BASE_URL: ${CLIENT_API_AGGREGATOR_BASE_URL:-http://aggregator:8090}
+      AGGREGATOR_TIMEOUT_MS: ${CLIENT_API_AGGREGATOR_TIMEOUT_MS:-3000}
       JWKS_URL: ${CLIENT_API_JWKS_URL:-http://token-service:8083/.well-known/jwks.json}
       TOKEN_ISSUER: ${TOKEN_ISSUER:-bnpb-token-service}
       TOKEN_AUDIENCE: ${TOKEN_AUDIENCE:-bnpb-client-api}

@@ -407,3 +407,28 @@ func TestLeader(t *testing.T) {
 		t.Errorf("unexpected leader response for follower: %+v", resp2)
 	}
 }
+
+func TestRoutes_SetsConnectionCloseWhenDraining(t *testing.T) {
+	h := New(&fakeQueryRepo{}, zerolog.Nop(), nil)
+	h.SetReady(true)
+	routes := Routes(h)
+
+	rec1 := httptest.NewRecorder()
+	routes.ServeHTTP(rec1, httptest.NewRequest(http.MethodGet, "/internal/events", nil))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200 while ready, got %d", rec1.Code)
+	}
+	if got := rec1.Header().Get("Connection"); got != "" {
+		t.Fatalf("expected no Connection header while ready, got %q", got)
+	}
+
+	h.SetReady(false)
+	rec2 := httptest.NewRecorder()
+	routes.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/internal/events", nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected 200 while draining, got %d", rec2.Code)
+	}
+	if got := rec2.Header().Get("Connection"); got != "close" {
+		t.Fatalf("expected Connection: close while draining, got %q", got)
+	}
+}

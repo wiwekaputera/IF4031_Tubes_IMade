@@ -32,17 +32,21 @@ log() { echo "[load $(date -u +%H:%M:%SZ)] $*" | tee -a "$EVIDENCE_DIR/run.log";
 #  - token-service: 15-minute access tokens so one token per client lasts
 #    the whole run.
 test_env_apply() {
-  log "test settings: client-api RPS_LIMIT=1000000 BURST=100000, traces 1%; token-service ACCESS_TOKEN_TTL=900"
+  log "test settings: client-api RPS_LIMIT=1000000 BURST=100000, traces 1%, LOG_LEVEL=warn; token-service ACCESS_TOKEN_TTL=900"
   kubectl -n "$NS" set env deploy/client-api RPS_LIMIT=1000000 BURST=100000 \
-    OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.01 >/dev/null
+    LOG_LEVEL=warn OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.01 >/dev/null
+  kubectl -n "$NS" set env deploy/aggregator \
+    LOG_LEVEL=warn OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.01 >/dev/null
   kubectl -n "$NS" set env deploy/token-service ACCESS_TOKEN_TTL=900 >/dev/null
   kubectl -n "$NS" rollout status deploy/client-api --timeout=180s >/dev/null
+  kubectl -n "$NS" rollout status deploy/aggregator --timeout=180s >/dev/null
   kubectl -n "$NS" rollout status deploy/token-service --timeout=180s >/dev/null
 }
 
 test_env_restore() {
-  log "restoring client-api and token-service settings"
-  kubectl -n "$NS" set env deploy/client-api RPS_LIMIT- BURST- OTEL_TRACES_SAMPLER- OTEL_TRACES_SAMPLER_ARG- >/dev/null 2>&1 || true
+  log "restoring client-api, aggregator, and token-service settings"
+  kubectl -n "$NS" set env deploy/client-api RPS_LIMIT- BURST- LOG_LEVEL- OTEL_TRACES_SAMPLER- OTEL_TRACES_SAMPLER_ARG- >/dev/null 2>&1 || true
+  kubectl -n "$NS" set env deploy/aggregator LOG_LEVEL- OTEL_TRACES_SAMPLER- OTEL_TRACES_SAMPLER_ARG- >/dev/null 2>&1 || true
   kubectl -n "$NS" set env deploy/token-service ACCESS_TOKEN_TTL- >/dev/null 2>&1 || true
 }
 

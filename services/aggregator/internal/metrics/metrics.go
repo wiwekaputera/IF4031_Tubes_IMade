@@ -55,6 +55,9 @@ type Snapshot struct {
 	Sources       func() []Source
 	DeadLetters   func(context.Context) (map[string]int64, error)
 	OutboxBacklog func(context.Context) (int64, error)
+	// IsLeader, when set, limits DB-backed gauges (DeadLetters, OutboxBacklog)
+	// to the active leader so follower replicas do not contend on shared tables.
+	IsLeader func() bool
 }
 
 // Run refreshes the gauges every interval until ctx ends.
@@ -83,6 +86,15 @@ func refresh(ctx context.Context, s Snapshot, logger zerolog.Logger) {
 		if !src.LastSynced.IsZero() {
 			sourceSyncAge.WithLabelValues(src.Name).Set(time.Since(src.LastSynced).Seconds())
 		}
+	}
+	if s.IsLeader != nil && !s.IsLeader() {
+		// Zero DB-backed gauges on non-leaders so Grafana's max(...) always
+		// reflects the active leader's latest reading without stale peaks.
+		for _, st := range []string{"retrying", "parked", "resolved"} {
+			deadLetters.WithLabelValues(st).Set(0)
+		}
+		outboxBacklog.Set(0)
+		return
 	}
 	if counts, err := s.DeadLetters(ctx); err == nil {
 		for _, st := range []string{"retrying", "parked", "resolved"} {

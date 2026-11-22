@@ -156,6 +156,11 @@ func main() {
 			OnPromote: func(int64) { metrics.Leader.Set(1) },
 			OnDemote:  func() { metrics.Leader.Set(0) },
 		})
+	isLeader := func() bool {
+		_, ok := elector.IsLeader()
+		return ok
+	}
+	relay.WithLeaderCheck(isLeader)
 	norm := normalizer.New(logger, volcanoRefs)
 	p := poller.New(cfg, norm, repo, logger).WithElector(elector)
 
@@ -194,6 +199,7 @@ func main() {
 		},
 		DeadLetters:   repo.CountDeadLetters,
 		OutboxBacklog: repo.OutboxBacklog,
+		IsLeader:      isLeader,
 	}, 5*time.Second, logger)
 
 	wg.Add(5)
@@ -202,7 +208,7 @@ func main() {
 		elector.Run(ctx)
 	}()
 	go poller.StartPolling(ctx, &wg, p, cfg, logger)
-	go poller.RunDLQWorker(ctx, &wg, repo, retryHandler, 5*time.Second, logger)
+	go poller.RunDLQWorkerWithLeader(ctx, &wg, repo, retryHandler, 5*time.Second, isLeader, logger)
 	go func() {
 		defer wg.Done()
 		relay.Run(ctx)

@@ -9,3 +9,5 @@ resources:
 
 patches:
   - path: patch-init-zone.yaml
+  - path: patch-aggregator-cpu.yaml
+  - path: patch-client-api-config.yaml

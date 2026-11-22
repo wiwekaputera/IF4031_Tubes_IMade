@@ -125,3 +125,61 @@ func TestPublishPendingRejectsInvalidEnvelope(t *testing.T) {
 		t.Fatal("invalid envelope must not be published or marked")
 	}
 }
+
+type fakeBatchOutboxStore struct {
+	fakeOutboxStore
+	batchCalls int
+}
+
+func (s *fakeBatchOutboxStore) MarkOutboxPublishedBatch(_ context.Context, ids []int64) error {
+	s.batchCalls++
+	if s.markErr != nil {
+		return s.markErr
+	}
+	s.markedIDs = append(s.markedIDs, ids...)
+	return nil
+}
+
+func TestPublishPendingUsesBatchMarkWhenSupported(t *testing.T) {
+	repo := &fakeBatchOutboxStore{
+		fakeOutboxStore: fakeOutboxStore{
+			rows: []store.OutboxRecord{
+				{ID: 21, EventKey: "hazard-1:1", Payload: []byte(`{"event_id":"hazard-1","version":1,"data":{}}`)},
+				{ID: 22, EventKey: "hazard-2:1", Payload: []byte(`{"event_id":"hazard-2","version":1,"data":{}}`)},
+				{ID: 23, EventKey: "hazard-3:1", Payload: []byte(`{"event_id":"hazard-3","version":1,"data":{}}`)},
+			},
+		},
+	}
+	publisher := &fakePublisher{}
+	relay := New(repo, publisher, zerolog.Nop(), time.Second, 10)
+
+	if err := relay.PublishPending(context.Background()); err != nil {
+		t.Fatalf("PublishPending() error = %v", err)
+	}
+	if repo.batchCalls != 1 {
+		t.Fatalf("expected 1 MarkOutboxPublishedBatch call, got %d", repo.batchCalls)
+	}
+	if len(repo.markedIDs) != 3 || repo.markedIDs[0] != 21 || repo.markedIDs[2] != 23 {
+		t.Fatalf("marked IDs = %v, want [21 22 23]", repo.markedIDs)
+	}
+}
+
+func TestRelaySkipsPollingWhenNotLeader(t *testing.T) {
+	repo := &fakeBatchOutboxStore{
+		fakeOutboxStore: fakeOutboxStore{
+			rows: []store.OutboxRecord{
+				{ID: 31, EventKey: "hazard-1:1", Payload: []byte(`{"event_id":"hazard-1","version":1,"data":{}}`)},
+			},
+		},
+	}
+	publisher := &fakePublisher{}
+	relay := New(repo, publisher, zerolog.Nop(), 10*time.Millisecond, 10).WithLeaderCheck(func() bool { return false })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Millisecond)
+	defer cancel()
+	relay.Run(ctx)
+
+	if len(publisher.messages) != 0 || len(repo.markedIDs) != 0 {
+		t.Fatalf("non-leader relay must not publish; got %d published, %d marked", len(publisher.messages), len(repo.markedIDs))
+	}
+}

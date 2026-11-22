@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -202,83 +203,152 @@ func (r *PostgresRepo) UpsertEvent(ctx context.Context, rec UpsertRequest) (stri
 	return storedHazardID, nil
 }
 
+// chunkUniqueByHazardID splits recs into chunks of at most maxChunk elements
+// while guaranteeing every HazardID is unique within each chunk (required by
+// multi-row INSERT ... ON CONFLICT DO UPDATE) and preserving sequential order.
+func chunkUniqueByHazardID(recs []UpsertRequest, maxChunk int) [][]UpsertRequest {
+	if len(recs) == 0 {
+		return nil
+	}
+	if maxChunk < 1 {
+		maxChunk = 1
+	}
+	var chunks [][]UpsertRequest
+	cur := make([]UpsertRequest, 0, min(len(recs), maxChunk))
+	seen := make(map[string]struct{}, min(len(recs), maxChunk))
+	for _, rec := range recs {
+		if len(cur) >= maxChunk {
+			chunks = append(chunks, cur)
+			cur = make([]UpsertRequest, 0, maxChunk)
+			clear(seen)
+		} else if _, dup := seen[rec.HazardID]; dup {
+			chunks = append(chunks, cur)
+			cur = make([]UpsertRequest, 0, maxChunk)
+			clear(seen)
+		}
+		seen[rec.HazardID] = struct{}{}
+		cur = append(cur, rec)
+	}
+	if len(cur) > 0 {
+		chunks = append(chunks, cur)
+	}
+	return chunks
+}
+
 func upsertEventInTx(ctx context.Context, tx pgx.Tx, rec UpsertRequest, writtenBy *string, fencingToken *int64) (string, error) {
-	if rec.Sources == nil {
-		rec.Sources = make(map[string]interface{})
-	}
-	if rec.Attributes == nil {
-		rec.Attributes = make(map[string]interface{})
-	}
-
-	sourcesJSON, err := json.Marshal(rec.Sources)
-	if err != nil {
+	if err := upsertChunkInTx(ctx, tx, []UpsertRequest{rec}, writtenBy, fencingToken); err != nil {
 		return "", err
 	}
-	attrsJSON, err := json.Marshal(rec.Attributes)
-	if err != nil {
-		return "", err
+	return rec.HazardID, nil
+}
+
+// upsertChunkInTx upserts a slice of records with distinct HazardIDs in a single
+// multi-row SQL statement (no full-table scan, no-op on unchanged rows), then
+// inserts outbox envelopes for newly created or modified rows in one batch SQL.
+func upsertChunkInTx(ctx context.Context, tx pgx.Tx, recs []UpsertRequest, writtenBy *string, fencingToken *int64) error {
+	if len(recs) == 0 {
+		return nil
 	}
 
-	var storedHazardID string
-	var version int64
-	var ingestedAt time.Time
-	var isNewOrUpdated bool
-	err = tx.QueryRow(ctx, `
-		WITH pre AS (
-			SELECT version
-			FROM canonical_events
-			WHERE hazard_id = $1
-		),
-		ins AS (
-			INSERT INTO canonical_events
-				(hazard_id, source, source_ref_id, hazard_type, severity, area_name,
-				 latitude, longitude, occurred_at, ingested_at, sources, attributes,
-				 written_by, fencing_token)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13)
-			ON CONFLICT (shard, hazard_id) DO UPDATE SET
-				severity      = EXCLUDED.severity,
-				area_name     = EXCLUDED.area_name,
-				sources       = canonical_events.sources || EXCLUDED.sources,
-				attributes    = canonical_events.attributes || EXCLUDED.attributes,
-				written_by    = COALESCE(EXCLUDED.written_by, canonical_events.written_by),
-				fencing_token = COALESCE(EXCLUDED.fencing_token, canonical_events.fencing_token),
-				version       = CASE
-					WHEN canonical_events.severity IS DISTINCT FROM EXCLUDED.severity
-					  OR canonical_events.area_name IS DISTINCT FROM EXCLUDED.area_name
-					  OR canonical_events.sources IS DISTINCT FROM (canonical_events.sources || EXCLUDED.sources)
-					  OR canonical_events.attributes IS DISTINCT FROM (canonical_events.attributes || EXCLUDED.attributes)
-					THEN canonical_events.version + 1
-					ELSE canonical_events.version
-				END,
-				updated_at    = CASE
-					WHEN canonical_events.severity IS DISTINCT FROM EXCLUDED.severity
-					  OR canonical_events.area_name IS DISTINCT FROM EXCLUDED.area_name
-					  OR canonical_events.sources IS DISTINCT FROM (canonical_events.sources || EXCLUDED.sources)
-					  OR canonical_events.attributes IS DISTINCT FROM (canonical_events.attributes || EXCLUDED.attributes)
-					THEN now()
-					ELSE canonical_events.updated_at
-				END
-			RETURNING hazard_id, version, ingested_at
+	const colsPerRow = 13
+	var q strings.Builder
+	q.Grow(512 + len(recs)*64)
+	q.WriteString(`
+		INSERT INTO canonical_events
+			(hazard_id, source, source_ref_id, hazard_type, severity, area_name,
+			 latitude, longitude, occurred_at, ingested_at, sources, attributes,
+			 written_by, fencing_token)
+		VALUES `)
+
+	args := make([]any, 0, len(recs)*colsPerRow)
+	byID := make(map[string]UpsertRequest, len(recs))
+
+	for i, rec := range recs {
+		if rec.Sources == nil {
+			rec.Sources = make(map[string]interface{})
+		}
+		if rec.Attributes == nil {
+			rec.Attributes = make(map[string]interface{})
+		}
+		sourcesJSON, err := json.Marshal(rec.Sources)
+		if err != nil {
+			return err
+		}
+		attrsJSON, err := json.Marshal(rec.Attributes)
+		if err != nil {
+			return err
+		}
+
+		if i > 0 {
+			q.WriteString(", ")
+		}
+		base := i*colsPerRow + 1
+		fmt.Fprintf(&q, "($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, now(), $%d, $%d, $%d, $%d)",
+			base, base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11, base+12)
+
+		args = append(args,
+			rec.HazardID, rec.Source, rec.SourceRefID, string(rec.HazardType), string(rec.Severity),
+			rec.AreaName, rec.Latitude, rec.Longitude, rec.OccurredAt,
+			sourcesJSON, attrsJSON, writtenBy, fencingToken,
 		)
-		SELECT
-			ins.hazard_id,
-			ins.version,
-			ins.ingested_at,
-			(pre.version IS NULL OR ins.version > pre.version) AS is_new_or_updated
-		FROM ins
-		LEFT JOIN pre ON true;
-	`,
-		rec.HazardID, rec.Source, rec.SourceRefID, string(rec.HazardType), string(rec.Severity),
-		rec.AreaName, rec.Latitude, rec.Longitude, rec.OccurredAt,
-		sourcesJSON, attrsJSON, writtenBy, fencingToken,
-	).Scan(&storedHazardID, &version, &ingestedAt, &isNewOrUpdated)
-	if err != nil {
-		return "", err
+		byID[rec.HazardID] = rec
 	}
 
-	if isNewOrUpdated {
+	q.WriteString(`
+		ON CONFLICT (shard, hazard_id) DO UPDATE SET
+			severity      = EXCLUDED.severity,
+			area_name     = EXCLUDED.area_name,
+			sources       = canonical_events.sources || EXCLUDED.sources,
+			attributes    = canonical_events.attributes || EXCLUDED.attributes,
+			written_by    = COALESCE(EXCLUDED.written_by, canonical_events.written_by),
+			fencing_token = COALESCE(EXCLUDED.fencing_token, canonical_events.fencing_token),
+			version       = canonical_events.version + 1,
+			updated_at    = now()
+		WHERE canonical_events.severity IS DISTINCT FROM EXCLUDED.severity
+		   OR canonical_events.area_name IS DISTINCT FROM EXCLUDED.area_name
+		   OR canonical_events.sources IS DISTINCT FROM (canonical_events.sources || EXCLUDED.sources)
+		   OR canonical_events.attributes IS DISTINCT FROM (canonical_events.attributes || EXCLUDED.attributes)
+		RETURNING hazard_id, version, ingested_at
+	`)
+
+	rows, err := tx.Query(ctx, q.String(), args...)
+	if err != nil {
+		return err
+	}
+
+	type changedRow struct {
+		hazardID   string
+		version    int64
+		ingestedAt time.Time
+	}
+	changed := make([]changedRow, 0, len(recs))
+	for rows.Next() {
+		var cr changedRow
+		if err := rows.Scan(&cr.hazardID, &cr.version, &cr.ingestedAt); err != nil {
+			rows.Close()
+			return err
+		}
+		changed = append(changed, cr)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	if len(changed) == 0 {
+		return nil
+	}
+
+	var ob strings.Builder
+	ob.Grow(128 + len(changed)*16)
+	ob.WriteString(`INSERT INTO outbox (event_key, payload) VALUES `)
+	obArgs := make([]any, 0, len(changed)*2)
+
+	for i, cr := range changed {
+		rec := byID[cr.hazardID]
 		he := hazard.HazardEvent{
-			HazardID:    storedHazardID,
+			HazardID:    cr.hazardID,
 			Source:      hazard.Source(rec.Source),
 			SourceRefID: rec.SourceRefID,
 			HazardType:  rec.HazardType,
@@ -287,36 +357,32 @@ func upsertEventInTx(ctx context.Context, tx pgx.Tx, rec UpsertRequest, writtenB
 			Latitude:    rec.Latitude,
 			Longitude:   rec.Longitude,
 			OccurredAt:  rec.OccurredAt.Format(time.RFC3339),
-			IngestedAt:  ingestedAt.Format(time.RFC3339),
+			IngestedAt:  cr.ingestedAt.Format(time.RFC3339),
 			Attributes:  rec.Attributes,
 		}
-
 		env := event.Envelope{
-			EventID:    storedHazardID,
-			Version:    version,
+			EventID:    cr.hazardID,
+			Version:    cr.version,
 			EventType:  rec.HazardType,
 			OccurredAt: rec.OccurredAt.Format(time.RFC3339),
 			TraceID:    rec.CorrelationID,
 			Data:       he,
 		}
-
 		payload, err := json.Marshal(env)
 		if err != nil {
-			return "", err
+			return err
 		}
-
-		eventKey := storedHazardID + ":" + strconv.FormatInt(version, 10)
-		_, err = tx.Exec(ctx, `
-			INSERT INTO outbox (event_key, payload)
-			VALUES ($1, $2)
-			ON CONFLICT (event_key) DO NOTHING
-		`, eventKey, payload)
-		if err != nil {
-			return "", err
+		if i > 0 {
+			ob.WriteString(", ")
 		}
+		base := i*2 + 1
+		fmt.Fprintf(&ob, "($%d, $%d)", base, base+1)
+		obArgs = append(obArgs, cr.hazardID+":"+strconv.FormatInt(cr.version, 10), payload)
 	}
+	ob.WriteString(` ON CONFLICT (event_key) DO NOTHING`)
 
-	return storedHazardID, nil
+	_, err = tx.Exec(ctx, ob.String(), obArgs...)
+	return err
 }
 
 // GetUnpublishedOutbox returns the oldest committed events that have not yet
@@ -359,12 +425,33 @@ func (r *PostgresRepo) MarkOutboxPublished(ctx context.Context, id int64) error 
 	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
 	defer cancel()
 
-	_, err := r.db.Exec(ctx, `
-		UPDATE outbox
-		SET published_at = now()
-		WHERE id = $1 AND published_at IS NULL
-	`, id)
-	return err
+	return withRetry40001(ctx, func() error {
+		_, err := r.db.Exec(ctx, `
+			UPDATE outbox
+			SET published_at = now()
+			WHERE id = $1 AND published_at IS NULL
+		`, id)
+		return err
+	})
+}
+
+// MarkOutboxPublishedBatch marks a batch of outbox rows published in a single
+// SQL statement, reducing DB round-trips and lock contention during catch-up.
+func (r *PostgresRepo) MarkOutboxPublishedBatch(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
+	return withRetry40001(ctx, func() error {
+		_, err := r.db.Exec(ctx, `
+			UPDATE outbox
+			SET published_at = now()
+			WHERE id = ANY($1) AND published_at IS NULL
+		`, ids)
+		return err
+	})
 }
 
 func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]hazard.HazardEvent, error) {
@@ -380,7 +467,7 @@ func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]haz
 		WHERE deleted_at IS NULL
 	`)
 
-	args := make([]any, 0, 4)
+	args := make([]any, 0, 5)
 	argIdx := 1
 
 	if filter.HazardType != "" {
@@ -390,6 +477,10 @@ func (r *PostgresRepo) GetEvents(ctx context.Context, filter EventFilter) ([]haz
 		argIdx++
 	}
 	if filter.HazardID != "" {
+		q.WriteString(" AND shard = $")
+		q.WriteString(strconv.Itoa(argIdx))
+		args = append(args, ShardForHazardID(filter.HazardID))
+		argIdx++
 		q.WriteString(" AND hazard_id = $")
 		q.WriteString(strconv.Itoa(argIdx))
 		args = append(args, filter.HazardID)

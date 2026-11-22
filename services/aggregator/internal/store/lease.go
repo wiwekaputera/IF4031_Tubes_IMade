@@ -134,44 +134,75 @@ func verifyLeaseTx(ctx context.Context, tx pgx.Tx, fence Fence) error {
 	return err
 }
 
+const fencedBatchChunkSize = 50
+
 // UpsertFencedBatch verifies the leader lease, upserts all events (with outbox),
-// and advances poller_watermarks in a single SERIALIZABLE transaction.
+// and advances poller_watermarks in short chunked SERIALIZABLE transactions.
+// Each chunk re-verifies the lease inside the same transaction so a stale leader
+// can never write even a single row; the watermark advances only in the final chunk.
 // Returns ErrFenced (without retrying) if the lease is no longer valid.
 func (r *PostgresRepo) UpsertFencedBatch(ctx context.Context, fence Fence, source string, watermark time.Time, recs []UpsertRequest) error {
-	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	ctx, cancel := withDefaultTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	return withRetry40001(ctx, func() error {
-		tx, err := r.db.Begin(ctx)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback(ctx)
-
-		if err := verifyLeaseTx(ctx, tx, fence); err != nil {
-			return err
-		}
-
-		for _, rec := range recs {
-			if _, err := upsertEventInTx(ctx, tx, rec, &fence.Holder, &fence.Token); err != nil {
-				return err
-			}
-		}
-
-		if !watermark.IsZero() {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO poller_watermarks (source, watermark, fencing_token, updated_at)
-				VALUES ($1, $2, $3, now())
-				ON CONFLICT (source) DO UPDATE SET
-					watermark     = GREATEST(poller_watermarks.watermark, EXCLUDED.watermark),
-					fencing_token = EXCLUDED.fencing_token,
-					updated_at    = now()
-			`, source, watermark.UTC(), fence.Token)
+	chunks := chunkUniqueByHazardID(recs, fencedBatchChunkSize)
+	if len(chunks) == 0 {
+		return withRetry40001(ctx, func() error {
+			tx, err := r.db.Begin(ctx)
 			if err != nil {
 				return err
 			}
-		}
+			defer tx.Rollback(ctx)
 
-		return tx.Commit(ctx)
-	})
+			if err := verifyLeaseTx(ctx, tx, fence); err != nil {
+				return err
+			}
+			if !watermark.IsZero() {
+				if err := advanceWatermarkTx(ctx, tx, source, watermark, fence.Token); err != nil {
+					return err
+				}
+			}
+			return tx.Commit(ctx)
+		})
+	}
+
+	for i, chunk := range chunks {
+		isLast := i == len(chunks)-1
+		err := withRetry40001(ctx, func() error {
+			tx, err := r.db.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(ctx)
+
+			if err := verifyLeaseTx(ctx, tx, fence); err != nil {
+				return err
+			}
+			if err := upsertChunkInTx(ctx, tx, chunk, &fence.Holder, &fence.Token); err != nil {
+				return err
+			}
+			if isLast && !watermark.IsZero() {
+				if err := advanceWatermarkTx(ctx, tx, source, watermark, fence.Token); err != nil {
+					return err
+				}
+			}
+			return tx.Commit(ctx)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func advanceWatermarkTx(ctx context.Context, tx pgx.Tx, source string, watermark time.Time, token int64) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO poller_watermarks (source, watermark, fencing_token, updated_at)
+		VALUES ($1, $2, $3, now())
+		ON CONFLICT (source) DO UPDATE SET
+			watermark     = GREATEST(poller_watermarks.watermark, EXCLUDED.watermark),
+			fencing_token = EXCLUDED.fencing_token,
+			updated_at    = now()
+	`, source, watermark.UTC(), token)
+	return err
 }

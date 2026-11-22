@@ -22,6 +22,9 @@ type DeadLetter struct {
 const retryBackoff = 5 * time.Second
 
 // InsertDeadLetter stores a rejected or failed message in the dead_letters table.
+// Duplicate active (parked/retrying) rows with identical source, source_ref_id,
+// and raw_payload are skipped so re-polling an incompatible schema page without
+// timestamps cannot flood the table.
 func (r *PostgresRepo) InsertDeadLetter(ctx context.Context, dl DeadLetter) error {
 	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
 	defer cancel()
@@ -34,13 +37,23 @@ func (r *PostgresRepo) InsertDeadLetter(ctx context.Context, dl DeadLetter) erro
 		nextAttempt = &t
 	}
 
-	_, err := r.db.Exec(ctx, `
-		INSERT INTO dead_letters
-			(source, source_ref_id, raw_payload, reason, retryable, attempts, status, next_attempt_at, last_error)
-		VALUES ($1, NULLIF($2, ''), $3, $4, $5, 0, $6, $7, $4)`,
-		dl.Source, dl.SourceRefID, dl.Raw, dl.Reason, dl.Retryable, status, nextAttempt,
-	)
-	return err
+	return withRetry40001(ctx, func() error {
+		_, err := r.db.Exec(ctx, `
+			INSERT INTO dead_letters
+				(source, source_ref_id, raw_payload, reason, retryable, attempts, status, next_attempt_at, last_error)
+			SELECT $1::STRING, NULLIF($2::STRING, ''), $3::BYTES, $4::TEXT, $5::BOOL, 0, $6::STRING, $7::TIMESTAMPTZ, $4::TEXT
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM dead_letters
+				WHERE source = $1::STRING
+				  AND status IN ('retrying', 'parked')
+				  AND source_ref_id IS NOT DISTINCT FROM NULLIF($2::STRING, '')
+				  AND raw_payload = $3::BYTES
+			)`,
+			dl.Source, dl.SourceRefID, dl.Raw, dl.Reason, dl.Retryable, status, nextAttempt,
+		)
+		return err
+	})
 }
 
 const deadLetterColumns = `id, source, COALESCE(source_ref_id, ''), raw_payload, reason, status,
@@ -118,11 +131,18 @@ func (r *PostgresRepo) queryDeadLetters(ctx context.Context, sql string, args ..
 	return out, rows.Err()
 }
 
-// CountDeadLetters returns the number of dead letters per status.
+// CountDeadLetters returns the number of dead letters per status using a
+// follower read so periodic metrics never block active DLQ writers.
 func (r *PostgresRepo) CountDeadLetters(ctx context.Context) (map[string]int64, error) {
-	rows, err := r.db.Query(ctx, `SELECT status, count(*) FROM dead_letters GROUP BY status`)
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
+	rows, err := r.db.Query(ctx, `SELECT status, count(*) FROM dead_letters AS OF SYSTEM TIME follower_read_timestamp() GROUP BY status`)
 	if err != nil {
-		return nil, err
+		rows, err = r.db.Query(ctx, `SELECT status, count(*) FROM dead_letters GROUP BY status`)
+		if err != nil {
+			return nil, err
+		}
 	}
 	defer rows.Close()
 	out := map[string]int64{}
@@ -139,9 +159,16 @@ func (r *PostgresRepo) CountDeadLetters(ctx context.Context) (map[string]int64, 
 	return out, rows.Err()
 }
 
-// OutboxBacklog counts outbox rows not yet published.
+// OutboxBacklog counts outbox rows not yet published using a follower read
+// so periodic metrics never contend with outbox writers or relay updates.
 func (r *PostgresRepo) OutboxBacklog(ctx context.Context) (int64, error) {
+	ctx, cancel := withDefaultTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
+
 	var n int64
-	err := r.db.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE published_at IS NULL`).Scan(&n)
+	err := r.db.QueryRow(ctx, `SELECT count(*) FROM outbox AS OF SYSTEM TIME follower_read_timestamp() WHERE published_at IS NULL`).Scan(&n)
+	if err != nil {
+		err = r.db.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE published_at IS NULL`).Scan(&n)
+	}
 	return n, err
 }

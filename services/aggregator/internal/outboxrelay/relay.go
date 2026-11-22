@@ -27,6 +27,13 @@ type OutboxStore interface {
 	MarkOutboxPublished(context.Context, int64) error
 }
 
+// BatchOutboxStore is an optional extension allowing the relay to mark an
+// entire batch of published outbox rows in a single SQL statement.
+type BatchOutboxStore interface {
+	OutboxStore
+	MarkOutboxPublishedBatch(context.Context, []int64) error
+}
+
 // Publisher publishes one durable message and returns only after JetStream
 // acknowledges it.
 type Publisher interface {
@@ -62,6 +69,7 @@ type Relay struct {
 	logger       zerolog.Logger
 	pollInterval time.Duration
 	batchSize    int
+	isLeader     func() bool
 }
 
 func New(repo OutboxStore, publisher Publisher, logger zerolog.Logger, pollInterval time.Duration, batchSize int) *Relay {
@@ -80,12 +88,21 @@ func New(repo OutboxStore, publisher Publisher, logger zerolog.Logger, pollInter
 	}
 }
 
+// WithLeaderCheck restricts outbox polling to ticks where fn returns true,
+// avoiding redundant multi-replica scans and UPDATE contention on the outbox table.
+func (r *Relay) WithLeaderCheck(fn func() bool) *Relay {
+	r.isLeader = fn
+	return r
+}
+
 // Run polls immediately, then on each configured interval. A failed publish
 // leaves the row pending and stops this batch so later events cannot overtake
 // it; the next poll retries the same row.
 func (r *Relay) Run(ctx context.Context) {
-	if err := r.PublishPending(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		r.logger.Error().Err(err).Msg("outbox poll failed; will retry")
+	if r.isLeader == nil || r.isLeader() {
+		if err := r.PublishPending(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			r.logger.Error().Err(err).Msg("outbox poll failed; will retry")
+		}
 	}
 
 	ticker := time.NewTicker(r.pollInterval)
@@ -95,6 +112,9 @@ func (r *Relay) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if r.isLeader != nil && !r.isLeader() {
+				continue
+			}
 			if err := r.PublishPending(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				r.logger.Error().Err(err).Msg("outbox poll failed; will retry")
 			}
@@ -109,10 +129,22 @@ func (r *Relay) PublishPending(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(rows) == 0 {
+		return nil
+	}
+
+	batchStore, canBatch := r.store.(BatchOutboxStore)
+	var publishedIDs []int64
+	if canBatch {
+		publishedIDs = make([]int64, 0, len(rows))
+	}
 
 	for _, row := range rows {
 		var envelope event.Envelope
 		if err := json.Unmarshal(row.Payload, &envelope); err != nil {
+			if canBatch && len(publishedIDs) > 0 {
+				_ = batchStore.MarkOutboxPublishedBatch(ctx, publishedIDs)
+			}
 			return errors.New("decode outbox event " + row.EventKey + ": " + err.Error())
 		}
 
@@ -127,17 +159,24 @@ func (r *Relay) PublishPending(ctx context.Context) error {
 				Str("correlation_id", envelope.TraceID).
 				Dur("latency", time.Since(started)).
 				Msg("JetStream publish failed; event remains in outbox")
+			if canBatch && len(publishedIDs) > 0 {
+				_ = batchStore.MarkOutboxPublishedBatch(ctx, publishedIDs)
+			}
 			return err
 		}
 
-		if err := r.store.MarkOutboxPublished(ctx, row.ID); err != nil {
-			r.logger.Error().
-				Err(err).
-				Str("event_key", row.EventKey).
-				Str("correlation_id", envelope.TraceID).
-				Dur("latency", time.Since(started)).
-				Msg("failed marking published outbox event; broker may receive a deduplicated retry")
-			return err
+		if canBatch {
+			publishedIDs = append(publishedIDs, row.ID)
+		} else {
+			if err := r.store.MarkOutboxPublished(ctx, row.ID); err != nil {
+				r.logger.Error().
+					Err(err).
+					Str("event_key", row.EventKey).
+					Str("correlation_id", envelope.TraceID).
+					Dur("latency", time.Since(started)).
+					Msg("failed marking published outbox event; broker may receive a deduplicated retry")
+				return err
+			}
 		}
 
 		r.logger.Info().
@@ -145,6 +184,16 @@ func (r *Relay) PublishPending(ctx context.Context) error {
 			Str("correlation_id", envelope.TraceID).
 			Dur("latency", time.Since(started)).
 			Msg("outbox event published")
+	}
+
+	if canBatch && len(publishedIDs) > 0 {
+		if err := batchStore.MarkOutboxPublishedBatch(ctx, publishedIDs); err != nil {
+			r.logger.Error().
+				Err(err).
+				Int("count", len(publishedIDs)).
+				Msg("failed marking published outbox batch; broker may receive deduplicated retries")
+			return err
+		}
 	}
 	return nil
 }

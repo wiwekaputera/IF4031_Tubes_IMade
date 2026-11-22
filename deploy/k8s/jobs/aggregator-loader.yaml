@@ -23,9 +23,9 @@ spec:
             - "--file"
             - "/data/catalog.csv"
             - "--concurrency"
-            - "4"
+            - "2"
             - "--batch-size"
-            - "500"
+            - "250"
           env:
             - name: DB_DSN
               valueFrom:

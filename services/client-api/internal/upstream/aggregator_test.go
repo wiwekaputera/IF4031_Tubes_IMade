@@ -187,3 +187,37 @@ func TestAggregatorClient_MalformedJSON(t *testing.T) {
 		t.Fatalf("expected 502 Bad Gateway for malformed JSON, got %d", upErr.StatusCode)
 	}
 }
+
+func TestAggregatorClient_RetriesOnceOnTransientTransportReset(t *testing.T) {
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			// Simulate abrupt TCP close (EOF/reset) from a terminating pod during rolling update.
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EventsResponse{Data: []map[string]interface{}{}, Meta: map[string]interface{}{"count": 0}})
+	}))
+	defer server.Close()
+
+	client := NewClient(Options{
+		BaseURL: server.URL,
+		Timeout: 1 * time.Second,
+		Logger:  zerolog.Nop(),
+	})
+
+	resp, err := client.GetEvents(context.Background(), "limit=5", "corr-retry")
+	if err != nil {
+		t.Fatalf("expected retry to succeed after transient connection close, got err=%v", err)
+	}
+	if resp == nil || attempts != 2 {
+		t.Fatalf("expected 2 attempts and valid response, got attempts=%d resp=%v", attempts, resp)
+	}
+}
