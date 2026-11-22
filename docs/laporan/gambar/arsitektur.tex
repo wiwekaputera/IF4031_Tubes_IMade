@@ -1,0 +1,81 @@
+% Diagram arsitektur sistem Milestone 2 (TikZ).
+\begin{tikzpicture}[
+  font=\scriptsize,
+  svc/.style={draw, rounded corners=2pt, fill=white, minimum height=0.66cm, minimum width=2.6cm, align=center},
+  store/.style={svc, fill=gray!15},
+  ext/.style={svc, dashed},
+  zone/.style={draw, rounded corners=4pt, inner sep=6pt, fill=#1},
+  zl/.style={font=\tiny\bfseries},
+  sync/.style={-{Latex[length=1.6mm]}, thick},
+  async/.style={-{Latex[length=1.6mm]}, thick, densely dashed},
+  lbl/.style={font=\tiny, fill=white, inner sep=1pt},
+]
+% Kolom: sumber x=0, ingest x=4, broker x=8, konsumen x=12
+\node[svc]   (bmkg)   at (0, 6.0) {bmkg-mock};
+\node[svc]   (pvmbg)  at (0, 5.0) {pvmbg-mock};
+\node[svc]   (sensor) at (0, 3.9) {sensor-pantai\\(image asisten)};
+\node[ext]   (feed)   at (0, 2.8) {Feed Satelit\\(layanan asisten)};
+
+\node[store] (crdb)   at (4, 7.3) {canonical-store\\CockroachDB 4 node, RF=3};
+\node[svc]   (agg)    at (4, 5.5) {aggregator $\times$3\\(1 leader + fencing)};
+\node[svc]   (poller) at (4, 3.9) {sensor-pantai-poller\\(breaker, validasi)};
+\node[svc]   (sat)    at (4, 2.8) {satellite-ingestor};
+\node[store] (satdb)  at (4, 1.7) {satellite-store\\(PostgreSQL)};
+
+\node[svc, minimum height=3.6cm, minimum width=2.4cm] (nats) at (8, 4.4)
+  {\textbf{NATS JetStream}\\[4pt]\tiny HAZARD\_INGEST\\\tiny BNPB\_EVENTS\\\tiny BNPB\_ALERTS\\\tiny FIELD\_REPORTS\\\tiny KV SENSOR\_PANTAI\_STATE};
+
+\node[svc]   (notif)  at (12, 5.9) {notification-consumer\\(reguler + prioritas)};
+\node[svc]   (audit)  at (12, 4.8) {audit-consumer};
+\node[svc]   (frc)    at (12, 3.7) {field-report-consumer};
+\node[svc]   (sink)   at (12, 2.5) {stub-sink\\(penerima Tim Lapangan)};
+
+\node[store] (tokdb)  at (0, -0.6) {token-db\\(PostgreSQL)};
+\node[svc]   (tok)    at (4, -0.6) {token-service\\(JWT ES256, JWKS)};
+\node[svc]   (capi)   at (8, -0.6) {client-api\\(scope, rate limit,\\load shedding)};
+\node[ext]   (client) at (12,-0.6) {Client: Media,\\Tim Lapangan, Ops};
+
+\begin{scope}[on background layer]
+  \node[zone=blue!4,   fit=(bmkg)(feed)]   (zs) {};
+  \node[zone=green!5,  fit=(crdb)(satdb)]  (zi) {};
+  \node[zone=yellow!6, fit=(nats)]         (zb) {};
+  \node[zone=orange!6, fit=(notif)(sink)]  (zc) {};
+  \node[zone=red!4,    fit=(tokdb)(client)](ze) {};
+\end{scope}
+\node[zl, above] at (zs.north) {Sumber};
+\node[zl, above] at (zi.north) {Ingest \& penyimpanan};
+\node[zl, above] at (zb.north) {Broker};
+\node[zl, above] at (zc.north) {Konsumen};
+\node[zl, below] at (ze.south) {Edge \& autentikasi};
+
+% Pengambilan data dari sumber (koridor x=2)
+\draw[sync] ([yshift=3pt]agg.west)  -- (2,{5.5+0.1}) |- (bmkg.east);
+\draw[sync] ([yshift=-3pt]agg.west) -- (2.2,{5.5-0.1}) |- (pvmbg.east);
+\draw[sync] (poller) -- (sensor);
+\draw[sync] (sat) -- node[lbl,above]{SSE} (feed);
+\draw[sync] (sat) -- (satdb);
+\draw[sync] (agg) -- node[lbl,right]{upsert berpagar} (crdb);
+
+% Ke/dari broker
+\draw[async] (poller.east) -- node[lbl,above]{ingest / alert} (poller.east -| nats.west);
+\draw[async] (sat.east)    -- node[lbl,above]{outbox} (sat.east -| nats.west);
+\draw[async] (nats.west |- agg.east) -- node[lbl,above,pos=0.3]{ingest, outbox} (agg.east);
+\draw[async] (nats.east |- notif.west) -- (notif.west);
+\draw[async] (nats.east |- audit.west) -- (audit.west);
+\draw[async] (nats.east |- frc.west)   -- (frc.west);
+\draw[sync]  (notif.east) -- ++(0.3,0) |- (sink.east);
+\draw[sync]  (frc) -- (sink);
+
+% Edge (koridor x=6 antara ingest dan broker)
+\draw[sync]  (client) -- (capi);
+\draw[sync]  (capi) -- node[lbl,above]{JWKS} (tok);
+\draw[sync]  (tok) -- (tokdb);
+\draw[sync]  ([xshift=-6pt]capi.north) -- ++(0,0.5) -| node[lbl,pos=0.7,fill=green!5]{baca} (6,5.3) -- ([yshift=-6pt]agg.east);
+\draw[async] ([xshift=6pt]capi.north) -- node[lbl,right]{POST /field-reports} ([xshift=6pt]nats.south);
+
+% Legenda
+\node[anchor=north west, font=\tiny] at (-1.3,-1.9) {%
+  \tikz[baseline=-0.5ex]{\draw[sync] (0,0)--(0.6,0);} sinkron (HTTP/SQL)\qquad
+  \tikz[baseline=-0.5ex]{\draw[async] (0,0)--(0.6,0);} asinkron (JetStream)\qquad
+  \tikz[baseline=-0.5ex]{\node[draw,fill=gray!15,minimum width=0.45cm,minimum height=0.22cm]{};} storage dimiliki tepat satu service};
+\end{tikzpicture}

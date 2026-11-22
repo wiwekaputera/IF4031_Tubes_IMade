@@ -61,11 +61,13 @@ spec:
             limits:
               memory: 1Gi
           readinessProbe:
+            timeoutSeconds: 3
             httpGet:
               path: /healthz
               port: 9090
             periodSeconds: 5
           livenessProbe:
+            timeoutSeconds: 5
             httpGet:
               path: /healthz
               port: 9090

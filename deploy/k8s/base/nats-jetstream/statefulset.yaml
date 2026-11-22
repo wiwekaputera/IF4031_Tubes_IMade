@@ -43,11 +43,14 @@ spec:
             limits:
               memory: 1Gi
           readinessProbe:
+            timeoutSeconds: 3
             httpGet:
               path: /healthz?js-enabled-only=true
               port: 8222
             periodSeconds: 5
           livenessProbe:
+            timeoutSeconds: 5
+            failureThreshold: 6
             httpGet:
               path: /healthz
               port: 8222

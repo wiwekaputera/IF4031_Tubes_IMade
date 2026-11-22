@@ -31,8 +31,11 @@ Pada Milestone 2, cakupan sistem diperluas menjadi:
 % ─────────────────────────────────────────────────────────────
 \subsection{Diagram Arsitektur Sistem}
 
-\gambarplaceholder{Diagram arsitektur sistem Milestone 2 (komponen, jalur data sinkron/asinkron, batas kepemilikan storage)}{7cm}
-\isi{Ganti dengan gambar diagram arsitektur M2 (perbarui \kode{AAT\_M1\_Diagram-Arsitektur.png}).}
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{\input{gambar/arsitektur}}
+\caption{Diagram arsitektur sistem Milestone 2: komponen, jalur sinkron/asinkron, dan storage yang dimiliki tepat satu service}
+\end{figure}
 
 \textbf{Batas layanan dan kepemilikan storage.}
 \begin{itemize}
@@ -47,8 +50,11 @@ Pada Milestone 2, cakupan sistem diperluas menjadi:
 % ─────────────────────────────────────────────────────────────
 \subsection{Diagram Deployment}
 
-\gambarplaceholder{Diagram deployment: penempatan komponen pada Node A dan Node B serta jalur data antar-node}{8cm}
-\isi{Ganti dengan diagram final berdasarkan \kode{kubectl get pods -o wide -L role} pada klaster demo.}
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{\input{gambar/deployment}}
+\caption{Penempatan pod pada klaster demo (dari \kode{kubectl get pods -o wide -L role}, 22 November 2026) dan jalur data antar-node. Aggregator dijalankan 3 replika; letaknya mengikuti penjadwal (saat diambil 2 di node-a, 1 di node-b setelah skenario \kode{kill-leader}).}
+\end{figure}
 
 \begin{center}
 \begin{tabularx}{\textwidth}{|p{4.3cm}|p{3.2cm}|X|}
@@ -91,7 +97,7 @@ Uji beban & k6 (di luar klaster) & Skenario \textit{ramping} 10.000 VU dengan \t
 \item Feed Satelit dan Sensor Pantai berjalan pada waktu virtual yang dipercepat (60$\times$); seluruh logika waktu memakai jam sumber (\kode{acq\_date/acq\_time}, \kode{generated\_at}), bukan jam BNPB.
 \item Sensor Pantai dan Feed Satelit adalah kotak hitam; kelompok hanya berinteraksi melalui kontraknya dan tidak bergantung pada ID, \textit{seed}, atau pola profil latihan.
 \item Satu broker NATS (R1) dianggap memadai untuk prototipe; risikonya dibahas pada batasan P3 dan P5.
-\item \isi{asumsi tambahan dari anggota lain bila ada}
+\item Kedua VM berjalan pada satu laptop (VirtualBox di atas Hyper-V), sehingga angka \textit{throughput} dan latensi pada pengujian beban mencerminkan batas host tersebut, bukan batas rancangan. Kegagalan node tetap nyata karena tiap node memiliki kernel sendiri.
 \end{enumerate}
 
 % ─────────────────────────────────────────────────────────────
@@ -112,22 +118,22 @@ Filter \kode{type} hanya SEISMIC/VOLCANIC, \kode{hazard\_id} UUID & Diubah & Sel
 Satu durable consumer notifikasi & Diubah & Consumer kedua untuk stream prioritas \kode{BNPB\_ALERTS} (P5).\\ \hline
 Log JSON + \kode{X-Correlation-ID} & Dipertahankan + diperluas & Ditambah metrik Prometheus, \textit{tracing} OpenTelemetry, dan \kode{trace\_id} di log.\\ \hline
 Uji beban 50 VU & Diubah & 10.000 VU dijalankan dari luar klaster (P2).\\ \hline
-\isi{keputusan M1 lain yang dibatalkan, bila ada} & & \\ \hline
+\textit{Liveness probe} dengan \textit{timeout} bawaan 1 s & Diubah & Pada VM dengan CPU penuh, \textit{probe} 1 s gagal dan pod sehat di-\textit{restart}; \textit{liveness} memakai \textit{timeout} 5 s dan 6 kegagalan beruntun, \textit{readiness} 3 s.\\ \hline
 \end{longtable}
 
 % ─────────────────────────────────────────────────────────────
 \subsection{Deklarasi Topologi}
 
 \begin{center}
-\begin{tabularx}{\textwidth}{|p{1.5cm}|p{2.6cm}|p{1.7cm}|X|X|X|}
+\begin{tabularx}{\textwidth}{|p{2.3cm}|p{2.2cm}|p{2cm}|X|X|p{2.2cm}|}
 \hline
 \textbf{Node} & \textbf{Peran} & \textbf{Jenis} & \textbf{Host fisik} & \textbf{CPU/RAM host} & \textbf{vCPU/RAM node}\\ \hline
-node-a & control plane + worker & VM \isi{} & \isi{} & \isi{} & \isi{}\\ \hline
-node-b & worker & VM \isi{} & \isi{} & \isi{} & \isi{}\\ \hline
+node-a (192.168.56.10) & control plane + worker & VM VirtualBox 7.2.2 & Laptop ASUS TUF Gaming A15 FA506IHRB (Windows 11) & AMD Ryzen 5 4600H (6 core/12 thread) / 15,4 GB & 4 vCPU / 6 GB\\ \hline
+node-b (192.168.56.11) & worker & VM VirtualBox 7.2.2 & Laptop yang sama & sama & 4 vCPU / 4 GB\\ \hline
 \end{tabularx}
 \end{center}
 
-OS/kernel tiap node: \isi{output \kode{kubectl get nodes -o wide}}. Bukti kernel terpisah: \isi{output \kode{scripts/k8s/verify.sh} bagian 1 (boot ID berbeda per node)}.
+Kedua node menjalankan Ubuntu Server 24.04.5 LTS dengan kernel \kode{6.8.0-151-generic} masing-masing (VM terpisah, bukan kontainer berbagi kernel) dan k3s \kode{v1.37.2+k3s1}. Antar-node terhubung melalui jaringan \textit{host-only} VirtualBox \kode{192.168.56.0/24} (flannel memakai antarmuka ini); akses internet melalui NAT. k6 dijalankan dari host di luar kedua VM. Skenario node mati hanya menyasar \kode{node-b}. Bukti kernel terpisah: \kode{scripts/k8s/verify.sh} bagian 1 lolos (``2 distinct kernel boot IDs''), dengan boot ID node-a \kode{d90d2271-\ldots-7cd1675aa3bc} dan node-b \kode{84c69f16-\ldots-35dfaa151ed9}. Seluruh 16 pemeriksaan \kode{verify.sh} lolos: 2 node, label \kode{role} di setiap pod, \textit{request/limit} memori di setiap container, \kode{hostPath} untuk setiap pod \kode{role=store}, NetworkPolicy menolak akses ke \kode{token-db}, \kode{satellite-store}, dan \kode{canonical-store} dari pod lain, serta alur token $\rightarrow$ \kode{GET /v1/events} HTTP 200.
 
 % ─────────────────────────────────────────────────────────────
 \subsection{Observabilitas}
